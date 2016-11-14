@@ -1417,6 +1417,11 @@ mesos_execute_SOURCES = cli/execute.cpp
 mesos_execute_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_execute_LDADD = libmesos.la $(LDADD)
 
+bin_PROGRAMS += mesos-batch
+mesos_batch_SOURCES = cli/batch.cpp
+mesos_batch_CPPFLAGS = $(MESOS_CPPFLAGS)
+mesos_batch_LDADD = libmesos.la $(LDADD)
+
 bin_PROGRAMS += mesos-resolve
 mesos_resolve_SOURCES = cli/resolve.cpp
 mesos_resolve_CPPFLAGS = $(MESOS_CPPFLAGS)
