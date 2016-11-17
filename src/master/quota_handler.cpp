@@ -257,7 +257,7 @@ Future<QuotaStatus> Master::QuotaHandler::_status(
   // TODO(alexr): Use an authorization filter here once they are available.
   list<Future<bool>> authorizedRoles;
   foreach (const QuotaInfo& info, quotaInfos) {
-    authorizedRoles.push_back(authorizeGetQuota(principal, info.role()));
+    authorizedRoles.push_back(authorizeGetQuota(principal, info));
   }
 
   return process::collect(authorizedRoles)
@@ -526,7 +526,7 @@ Future<http::Response> Master::QuotaHandler::__remove(const string& role) const
 
 Future<bool> Master::QuotaHandler::authorizeGetQuota(
     const Option<string>& principal,
-    const string& role) const
+    const QuotaInfo& quotaInfo) const
 {
   if (master->authorizer.isNone()) {
     return true;
@@ -534,16 +534,19 @@ Future<bool> Master::QuotaHandler::authorizeGetQuota(
 
   LOG(INFO) << "Authorizing principal '"
             << (principal.isSome() ? principal.get() : "ANY")
-            << "' to get quota for role '" << role << "'";
+            << "' to get quota for role '" << quotaInfo.role() << "'";
 
   authorization::Request request;
-  request.set_action(authorization::GET_QUOTA_WITH_ROLE);
+  request.set_action(authorization::GET_QUOTA);
 
   if (principal.isSome()) {
     request.mutable_subject()->set_value(principal.get());
   }
 
-  request.mutable_object()->set_value(role);
+  // TODO(alexr): The `value` field is set for backwards compatibility
+  // reasons until after the deprecation cycle started with 1.2.0 ends.
+  request.mutable_object()->mutable_quota_info()->CopyFrom(quotaInfo);
+  request.mutable_object()->set_value(quotaInfo.role());
 
   return master->authorizer.get()->authorized(request);
 }
