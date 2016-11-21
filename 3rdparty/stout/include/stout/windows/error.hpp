@@ -27,13 +27,14 @@
 class WindowsErrorBase : public Error
 {
 public:
-  WindowsErrorBase(DWORD _code)
+  const DWORD code;
+
+protected:
+  explicit WindowsErrorBase(DWORD _code)
     : Error(get_last_error_as_string(_code)), code(_code) {}
 
   WindowsErrorBase(DWORD _code, const std::string& message)
     : Error(message + ": " + get_last_error_as_string(_code)), code(_code) {}
-
-  const DWORD code;
 
 private:
   static std::string get_last_error_as_string(DWORD errorCode)
@@ -105,8 +106,13 @@ class WindowsError : public WindowsErrorBase {
 public:
   WindowsError() : WindowsErrorBase(::GetLastError()) {}
 
+  explicit WindowsError(DWORD _code) : WindowsErrorBase(_code) {}
+
   WindowsError(const std::string& message)
     : WindowsErrorBase(::GetLastError(), message) {}
+
+  WindowsError(DWORD _code, const std::string& message)
+    : WindowsErrorBase(_code, message) {}
 };
 
 
@@ -114,8 +120,13 @@ class WindowsSocketError : public WindowsErrorBase {
 public:
   WindowsSocketError() : WindowsErrorBase(::WSAGetLastError()) {}
 
+  explicit WindowsSocketError(DWORD _code) : WindowsErrorBase(_code) {}
+
   WindowsSocketError(const std::string& message)
     : WindowsErrorBase(::WSAGetLastError(), message) {}
+
+  WindowsSocketError(DWORD _code, const std::string& message)
+    : WindowsErrorBase(_code, message) {}
 };
 
 #endif // __STOUT_WINDOWS_ERROR_HPP__
