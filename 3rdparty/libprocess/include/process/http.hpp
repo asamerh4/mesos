@@ -257,45 +257,6 @@ typedef hashmap<std::string,
                 CaseInsensitiveEqual> Headers;
 
 
-struct Request
-{
-  std::string method;
-
-  // TODO(benh): Add major/minor version.
-
-  // For client requests, the URL should be a URI.
-  // For server requests, the URL may be a URI or a relative reference.
-  URL url;
-
-  Headers headers;
-
-  // TODO(bmahler): Add a 'query' field which contains both
-  // the URL query and the parsed form data from the body.
-
-  std::string body;
-
-  // TODO(bmahler): Ensure this is consistent with the 'Connection'
-  // header; perhaps make this a function that checks the header.
-  bool keepAlive;
-
-  // For server requests, this contains the address of the client.
-  // Note that this may correspond to a proxy or load balancer address.
-  network::Address client;
-
-  /**
-   * Returns whether the encoding is considered acceptable in the
-   * response. See RFC 2616 section 14.3 for details.
-   */
-  bool acceptsEncoding(const std::string& encoding) const;
-
-  /**
-   * Returns whether the media type is considered acceptable in the
-   * response. See RFC 2616, section 14.1 for the details.
-   */
-  bool acceptsMediaType(const std::string& mediaType) const;
-};
-
-
 // Represents an asynchronous in-memory unbuffered Pipe, currently
 // used for streaming HTTP responses via chunked encoding. Note that
 // being an in-memory pipe means that this cannot be used across OS
@@ -346,6 +307,12 @@ public:
     // is closed.
     Future<std::string> read();
 
+    // Performs a series of asynchronous reads, until EOF is reached.
+    // Returns the concatenated result of the reads.
+    // Returns Failure if the writer failed, or the read-end
+    // is closed.
+    Future<std::string> readAll();
+
     // Closing the read-end of the pipe before the write-end closes
     // or fails will notify the writer that the reader is no longer
     // interested. Returns false if the read-end was already closed.
@@ -365,6 +332,11 @@ public:
     };
 
     explicit Reader(const std::shared_ptr<Data>& _data) : data(_data) {}
+
+    // Continuation for `readAll()`.
+    static Future<std::string> _readAll(
+        Pipe::Reader reader,
+        const std::shared_ptr<std::string>& buffer);
 
     std::shared_ptr<Data> data;
   };
@@ -447,6 +419,68 @@ private:
   };
 
   std::shared_ptr<Data> data;
+};
+
+
+struct Request
+{
+  Request()
+    : keepAlive(false), type(BODY) {}
+
+  std::string method;
+
+  // TODO(benh): Add major/minor version.
+
+  // For client requests, the URL should be a URI.
+  // For server requests, the URL may be a URI or a relative reference.
+  URL url;
+
+  Headers headers;
+
+  // TODO(bmahler): Ensure this is consistent with the 'Connection'
+  // header; perhaps make this a function that checks the header.
+  //
+  // TODO(anand): Ideally, this could default to 'true' since
+  // persistent connections are the default since HTTP 1.1.
+  // Perhaps, we need to go from `keepAlive` to `closeConnection`
+  // to reflect the header more accurately, and to have an
+  // intuitive default of false.
+  //
+  // Default: false.
+  bool keepAlive;
+
+  // For server requests, this contains the address of the client.
+  // Note that this may correspond to a proxy or load balancer address.
+  network::Address client;
+
+  // Clients can choose to provide the entire body at once
+  // via BODY or can choose to stream the body over to the
+  // server via PIPE.
+  //
+  // Default: BODY.
+  enum
+  {
+    BODY,
+    PIPE
+  } type;
+
+  // TODO(bmahler): Add a 'query' field which contains both
+  // the URL query and the parsed form data from the body.
+
+  std::string body;
+  Option<Pipe::Reader> reader;
+
+  /**
+   * Returns whether the encoding is considered acceptable in the
+   * response. See RFC 2616 section 14.3 for details.
+   */
+  bool acceptsEncoding(const std::string& encoding) const;
+
+  /**
+   * Returns whether the media type is considered acceptable in the
+   * response. See RFC 2616, section 14.1 for the details.
+   */
+  bool acceptsMediaType(const std::string& mediaType) const;
 };
 
 

@@ -717,7 +717,7 @@ TEST_F(SubprocessTest, Flags)
   Flags flags2;
   Try<flags::Warnings> load = flags2.load(None(), argc, argv);
   ASSERT_SOME(load);
-  EXPECT_EQ(0, load->warnings.size());
+  EXPECT_EQ(0u, load->warnings.size());
 
   EXPECT_EQ(flags.b, flags2.b);
   EXPECT_EQ(flags.i, flags2.i);
@@ -879,17 +879,6 @@ TEST_F(SubprocessTest, EnvironmentOverride)
   AWAIT_EXPECT_WEXITSTATUS_EQ(0, s.get().status());
 }
 #endif // __WINDOWS__
-
-
-static int setupChdir(const string& directory)
-{
-  // Keep everything async-signal safe.
-  if (::chdir(directory.c_str()) == -1) {
-    return errno;
-  }
-
-  return 0;
-}
 
 
 // TODO(joerg84): Consider adding tests for setsid, working_directory,
