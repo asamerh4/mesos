@@ -14,8 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//mesos-batch command line tool (executes tasks from JSON file based on TaskGroupInfo proto)
-//Code base derived from https://github.com/apache/mesos/blob/master/src/cli/execute.cpp
+// mesos-batch command line tool (executes tasks from JSON file based on
+// TaskGroupInfo proto)
+// Code base derived from
+// https://github.com/apache/mesos/blob/master/src/cli/execute.cpp
 
 #include <iostream>
 #include <queue>
@@ -137,7 +139,6 @@ public:
         "     ]\n"
         "}");
 
-    
     add(&Flags::framework_name,
         "framework_name",
         "name of the framework",
@@ -152,18 +153,6 @@ public:
         "framework_capabilities",
         "Comma separated list of optional framework capabilities to enable.\n"
         "(the only valid value is currently 'GPU_RESOURCES')");
-
-    add(&Flags::capabilities,
-        "capabilities",
-        "JSON representation of system capabilities needed to execute \n"
-        "the command.\n"
-        "Example:\n"
-        "{\n"
-        "   \"capabilities\": [\n"
-        "       \"NET_RAW\",\n"
-        "       \"SYS_ADMIN\"\n"
-        "     ]\n"
-        "}");
 
     add(&Flags::role,
         "role",
@@ -183,6 +172,11 @@ public:
         "secret",
         "The secret to use for framework authentication.");
 
+    add(&Flags::content_type,
+        "content_type",
+        "The content type to use for scheduler protocol messages. 'json'\n"
+        "and 'protobuf' are valid choices.",
+        "protobuf");
   }
 
   string master;
@@ -190,11 +184,11 @@ public:
   Option<TaskGroupInfo> task_list;
   bool checkpoint;
   Option<std::set<string>> framework_capabilities;
-  Option<CapabilityInfo> capabilities;
   string role;
   Option<Duration> kill_after;
   Option<string> principal;
   Option<string> secret;
+  string content_type;
 };
 
 
@@ -204,12 +198,14 @@ public:
   CommandScheduler(
       const FrameworkInfo& _frameworkInfo,
       const string& _master,
+      mesos::ContentType _contentType,
       const Option<Duration>& _killAfter,
       const Option<Credential>& _credential,
       const Option<TaskGroupInfo>& _taskGroup)
     : state(DISCONNECTED),
       frameworkInfo(_frameworkInfo),
       master(_master),
+      contentType(_contentType),
       killAfter(_killAfter),
       credential(_credential),
       taskGroup(_taskGroup),
@@ -226,7 +222,7 @@ protected:
     // after the process has spawned.
     mesos.reset(new Mesos(
       master,
-      mesos::ContentType::PROTOBUF,
+      contentType,
       process::defer(self(), &Self::connected),
       process::defer(self(), &Self::disconnected),
       process::defer(self(), &Self::received, lambda::_1),
@@ -283,16 +279,14 @@ protected:
 
     mesos->send(call);
   }
-  
+
   void offers(const vector<Offer>& offers)
   {
     CHECK_EQ(SUBSCRIBED, state);
-    //loop all offers and place tasks...
+    // loop all offers and place tasks...
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
       Resources requiredResources;
-        
-        
       cout << "Received offer " << offer.id() << " from agent "
           << offer.agent_id() << " (" << offer.hostname() << ") "
           << "with " << offer.resources() << endl;
@@ -302,7 +296,7 @@ protected:
       foreach (TaskInfo _task, taskGroup->tasks()) {
           tasks.push_back(_task);
       }
-      //Iterate over TaskGroupInfo content and push to runnable_tasks
+      // Iterate over TaskGroupInfo content and push to runnable_tasks
       while (dTasksLaunched < (int) tasks.size()) {
           TaskInfo _task = tasks[dTasksLaunched];
           requiredResources = Resources(_task.resources());
@@ -335,7 +329,6 @@ protected:
         }
 
       mesos->send(call);
-
     }
   }
 
@@ -436,11 +429,9 @@ protected:
 
     if (mesos::internal::protobuf::isTerminalState(devolve(status).state())) {
         terminatedTaskCount++;
-        
         if (terminatedTaskCount == taskGroup->tasks().size()) {
           terminate(self());
         }
-      
     }
   }
 
@@ -454,6 +445,7 @@ private:
 
   FrameworkInfo frameworkInfo;
   const string master;
+  mesos::ContentType contentType;
   const Option<Duration> killAfter;
   const Option<Credential> credential;
   const Option<TaskGroupInfo> taskGroup;
@@ -467,6 +459,9 @@ private:
 int main(int argc, char** argv)
 {
   Flags flags;
+  mesos::ContentType contentType = mesos::ContentType::PROTOBUF;
+
+  // Load flags from command line only.
   Try<flags::Warnings> load = flags.load(None(), argc, argv);
 
   if (load.isError()) {
@@ -482,6 +477,17 @@ int main(int argc, char** argv)
   // Log any flag warnings.
   foreach (const flags::Warning& warning, load->warnings) {
     LOG(WARNING) << warning.message;
+  }
+
+  if (flags.content_type == "json" ||
+      flags.content_type == mesos::APPLICATION_JSON) {
+    contentType = mesos::ContentType::JSON;
+  } else if (flags.content_type == "protobuf" ||
+             flags.content_type == mesos::APPLICATION_PROTOBUF) {
+    contentType = mesos::ContentType::PROTOBUF;
+  } else {
+    cerr << "Invalid content type '" << flags.content_type << "'" << endl;
+    return EXIT_FAILURE;
   }
 
   Result<string> user = os::user();
@@ -548,13 +554,13 @@ int main(int argc, char** argv)
   if (flags.task_list.isNone()) {
       cout << flags.usage() << endl;
       return EXIT_FAILURE;
-    
   }
 
   Owned<CommandScheduler> scheduler(
       new CommandScheduler(
         frameworkInfo,
         flags.master,
+        contentType,
         flags.kill_after,
         credential,
         flags.task_list));
