@@ -1198,16 +1198,6 @@ void finalize()
   delete processes_route;
   processes_route = nullptr;
 
-  // Terminate all running processes and prevent further processes from
-  // being spawned. This will also clean up any metadata for running
-  // processes held by the `SocketManager`. After this method returns,
-  // libprocess should be single-threaded.
-  process_manager->finalize();
-
-  // This clears any remaining timers. Because the event loop has been
-  // stopped, no timers will fire.
-  Clock::finalize();
-
   // Close the server socket.
   // This will prevent any further connections managed by the `SocketManager`.
   synchronized (socket_mutex) {
@@ -1219,6 +1209,21 @@ void finalize()
     delete __s__;
     __s__ = nullptr;
   }
+
+  // Terminate all running processes and prevent further processes from
+  // being spawned. This will also clean up any metadata for running
+  // processes held by the `SocketManager`. After this method returns,
+  // libprocess should be single-threaded.
+  process_manager->finalize();
+
+  // Now that all threads except for the main thread have joined, we should
+  // delete the one remaining `_executor_` pointer.
+  delete _executor_;
+  _executor_ = nullptr;
+
+  // This clears any remaining timers. Because the event loop has been
+  // stopped, no timers will fire.
+  Clock::finalize();
 
   // Clean up the socket manager.
   // Terminating processes above will also clean up any links between
@@ -2492,15 +2497,15 @@ void SocketManager::swap_implementing_socket(
     addresses[to_fd] = addresses[from_fd];
     addresses.erase(from_fd);
 
-    // If this address is a temporary link.
-    if (temps.count(addresses[to_fd]) > 0) {
-      temps[addresses[to_fd]] = to_fd;
-      // No need to erase as we're changing the value, not the key.
-    }
-
-    // If this address is a persistent link.
-    if (persists.count(addresses[to_fd]) > 0) {
+    // If this address is a persistent or temporary link
+    // that matches the original FD.
+    if (persists.count(addresses[to_fd]) > 0 &&
+        persists.at(addresses[to_fd]) == from_fd) {
       persists[addresses[to_fd]] = to_fd;
+      // No need to erase as we're changing the value, not the key.
+    } else if (temps.count(addresses[to_fd]) > 0 &&
+        temps.at(addresses[to_fd]) == from_fd) {
+      temps[addresses[to_fd]] = to_fd;
       // No need to erase as we're changing the value, not the key.
     }
 
@@ -2661,6 +2666,11 @@ long ProcessManager::init_threads()
         }
         process_manager->resume(process);
       } while (true);
+
+      // Threads are joining. Delete the thread local `_executor_`
+      // pointer to prevent a memory leak.
+      delete _executor_;
+      _executor_ = nullptr;
     }
 
     // We hold a constant reference to `joining_threads` to make it clear that
