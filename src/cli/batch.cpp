@@ -216,7 +216,6 @@ public:
       killAfter(_killAfter),
       credential(_credential),
       taskGroup(_taskGroup),
-      launched(false),
       terminatedTaskCount(0),
       dTasksLaunched(0) {}
 
@@ -290,19 +289,23 @@ protected:
   void offers(const vector<Offer>& offers)
   {
     CHECK_EQ(SUBSCRIBED, state);
+    // fill up task-container
+    vector<TaskInfo> tasks;
+
+    foreach (TaskInfo _task, taskGroup->tasks()) {
+          tasks.push_back(_task);
+      }
     // loop all offers and place tasks...
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
       Resources requiredResources;
-      cout << "Received offer " << offer.id() << " from agent "
-          << offer.agent_id() << " (" << offer.hostname() << ") "
-          << "with " << offer.resources() << endl;
-      vector<TaskInfo> tasks;
+      cout << "Received offer from agent "
+           << offer.hostname()
+           << " with: " << offer.resources() << endl;
+
+      // container for runnable tasks within current offer
       vector<TaskInfo> runnable_tasks;
 
-      foreach (TaskInfo _task, taskGroup->tasks()) {
-          tasks.push_back(_task);
-      }
       // Iterate over TaskGroupInfo content and push to runnable_tasks
       while (dTasksLaunched < (int) tasks.size()) {
           TaskInfo _task = tasks[dTasksLaunched];
@@ -334,7 +337,6 @@ protected:
       foreach (const TaskInfo& task, runnable_tasks) {
          operation->mutable_launch()->add_task_infos()->CopyFrom(task);
         }
-
       mesos->send(call);
     }
   }
@@ -352,7 +354,9 @@ protected:
 
           state = SUBSCRIBED;
 
-          cout << "Subscribed with ID " << frameworkInfo.id() << endl;
+          cout << "Subscribed batch framework: \033[1;33m**"
+               << frameworkInfo.name()
+               << "-->" << frameworkInfo.id() << "\033[0m" << endl;
           break;
         }
 
@@ -456,7 +460,6 @@ private:
   const Option<Duration> killAfter;
   const Option<Credential> credential;
   const Option<TaskGroupInfo> taskGroup;
-  bool launched;
   int terminatedTaskCount;
   int dTasksLaunched;
   Owned<Mesos> mesos;
