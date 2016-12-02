@@ -32,6 +32,7 @@
 #include <stout/error.hpp>
 #include <stout/flags.hpp>
 #include <stout/json.hpp>
+#include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/try.hpp>
@@ -277,19 +278,7 @@ public:
   void error(ExecutorDriver* driver, const string& message) {}
 
 protected:
-  virtual void initialize()
-  {
-    install<TaskHealthStatus>(
-        &Self::taskHealthUpdated,
-        &TaskHealthStatus::task_id,
-        &TaskHealthStatus::healthy,
-        &TaskHealthStatus::kill_task);
-  }
-
-  void taskHealthUpdated(
-      const TaskID& taskID,
-      const bool& healthy,
-      const bool& initiateTaskKill)
+  void taskHealthUpdated(const TaskHealthStatus& healthStatus)
   {
     if (driver.isNone()) {
       return;
@@ -297,16 +286,16 @@ protected:
 
     // This check prevents us from sending `TASK_RUNNING` updates
     // after the task has been transitioned to `TASK_KILLING`.
-    if (killed) {
+    if (killed || terminated) {
       return;
     }
 
     cout << "Received task health update, healthy: "
-         << stringify(healthy) << endl;
+         << stringify(healthStatus.healthy()) << endl;
 
     TaskStatus status;
-    status.mutable_task_id()->CopyFrom(taskID);
-    status.set_healthy(healthy);
+    status.mutable_task_id()->CopyFrom(healthStatus.task_id());
+    status.set_healthy(healthStatus.healthy());
     status.set_state(TASK_RUNNING);
 
     if (containerNetworkInfo.isSome()) {
@@ -316,9 +305,9 @@ protected:
 
     driver.get()->sendStatusUpdate(status);
 
-    if (initiateTaskKill) {
+    if (healthStatus.kill_task()) {
       killedByHealthCheck = true;
-      killTask(driver.get(), taskID);
+      killTask(driver.get(), healthStatus.task_id());
     }
   }
 
@@ -376,6 +365,11 @@ private:
         driver.get()->sendStatusUpdate(status);
       }
 
+      // Stop health checking the task.
+      if (checker.get() != nullptr) {
+        checker->stop();
+      }
+
       // TODO(bmahler): Replace this with 'docker kill' so
       // that we can adjust the grace period in the case of
       // a `KillPolicy` override.
@@ -386,6 +380,11 @@ private:
   void reaped(const Future<Option<int>>& run)
   {
     terminated = true;
+
+    // Stop health checking the task.
+    if (checker.get() != nullptr) {
+      checker->stop();
+    }
 
     // In case the stop is stuck, discard it.
     stop.discard();
@@ -526,13 +525,14 @@ private:
       namespaces.push_back("net");
     }
 
-    Try<Owned<health::HealthChecker>> _checker = health::HealthChecker::create(
-        healthCheck,
-        launcherDir,
-        self(),
-        task.task_id(),
-        containerPid,
-        namespaces);
+    Try<Owned<health::HealthChecker>> _checker =
+      health::HealthChecker::create(
+          healthCheck,
+          launcherDir,
+          defer(self(), &Self::taskHealthUpdated, lambda::_1),
+          task.task_id(),
+          containerPid,
+          namespaces);
 
     if (_checker.isError()) {
       // TODO(gilbert): Consider ABORT and return a TASK_FAILED here.
@@ -540,14 +540,6 @@ private:
            << _checker.error() << endl;
     } else {
       checker = _checker.get();
-
-      checker->healthCheck()
-        .onAny([](const Future<Nothing>& future) {
-          // Only possible to be a failure.
-          if (future.isFailed()) {
-            cerr << "Health check failed:" << future.failure() << endl;
-          }
-        });
     }
   }
 

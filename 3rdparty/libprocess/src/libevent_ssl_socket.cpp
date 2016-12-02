@@ -31,6 +31,7 @@
 #include "libevent.hpp"
 #include "libevent_ssl_socket.hpp"
 #include "openssl.hpp"
+#include "poll_socket.hpp"
 
 // Locking:
 //
@@ -77,8 +78,9 @@ static Synchronized<bufferevent> synchronize(bufferevent* bev)
 
 namespace process {
 namespace network {
+namespace internal {
 
-Try<std::shared_ptr<Socket::Impl>> LibeventSSLSocketImpl::create(int s)
+Try<std::shared_ptr<SocketImpl>> LibeventSSLSocketImpl::create(int s)
 {
   openssl::initialize();
 
@@ -436,7 +438,7 @@ void LibeventSSLSocketImpl::event_callback(short events)
 
 
 LibeventSSLSocketImpl::LibeventSSLSocketImpl(int _s)
-  : Socket::Impl(_s),
+  : SocketImpl(_s),
     bev(nullptr),
     listener(nullptr),
     recv_request(nullptr),
@@ -449,7 +451,7 @@ LibeventSSLSocketImpl::LibeventSSLSocketImpl(
     int _s,
     bufferevent* _bev,
     Option<string>&& _peer_hostname)
-  : Socket::Impl(_s),
+  : SocketImpl(_s),
     bev(_bev),
     listener(nullptr),
     recv_request(nullptr),
@@ -492,20 +494,24 @@ Future<Nothing> LibeventSSLSocketImpl::connect(const Address& address)
     return Failure("Failed to connect: bufferevent_openssl_socket_new");
   }
 
-  // Try and determine the 'peer_hostname' from the address we're
-  // connecting to in order to properly verify the certificate later.
-  const Try<string> hostname = address.hostname();
+  if (address.family() == Address::Family::INET) {
+    // Try and determine the 'peer_hostname' from the address we're
+    // connecting to in order to properly verify the certificate
+    // later.
+    const Try<string> hostname =
+      network::convert<inet::Address>(address)->hostname();
 
-  if (hostname.isError()) {
-    VLOG(2) << "Could not determine hostname of peer: " << hostname.error();
-  } else {
-    VLOG(2) << "Connecting to " << hostname.get();
-    peer_hostname = hostname.get();
+    if (hostname.isError()) {
+      VLOG(2) << "Could not determine hostname of peer: " << hostname.error();
+    } else {
+      VLOG(2) << "Connecting to " << hostname.get();
+      peer_hostname = hostname.get();
+    }
+
+    // Determine the 'peer_ip' from the address we're connecting to in
+    // order to properly verify the certificate later.
+    peer_ip = network::convert<inet::Address>(address)->ip;
   }
-
-  // Determine the 'peer_ip' from the address we're connecting to in
-  // order to properly verify the certificate later.
-  peer_ip = address.ip;
 
   // Optimistically construct a 'ConnectRequest' and future.
   Owned<ConnectRequest> request(new ConnectRequest());
@@ -531,8 +537,7 @@ Future<Nothing> LibeventSSLSocketImpl::connect(const Address& address)
 
   run_in_event_loop(
       [self, address]() {
-        sockaddr_storage addr =
-          net::createSockaddrStorage(address.ip, address.port);
+        sockaddr_storage addr = address;
 
           // Assign the callbacks for the bufferevent. We do this
           // before the 'bufferevent_socket_connect()' call to avoid
@@ -898,14 +903,15 @@ Try<Nothing> LibeventSSLSocketImpl::listen(int backlog)
 }
 
 
-Future<Socket> LibeventSSLSocketImpl::accept()
+Future<std::shared_ptr<SocketImpl>> LibeventSSLSocketImpl::accept()
 {
   // We explicitly specify the return type to avoid a type deduction
   // issue in some versions of clang. See MESOS-2943.
   return accept_queue.get()
-    .then([](const Future<Socket>& socket) -> Future<Socket> {
-      CHECK(!socket.isPending());
-      return socket;
+    .then([](const Future<std::shared_ptr<SocketImpl>>& impl)
+      -> Future<std::shared_ptr<SocketImpl>> {
+      CHECK(!impl.isPending());
+      return impl;
     });
 }
 
@@ -964,12 +970,12 @@ void LibeventSSLSocketImpl::peek_callback(
   if (ssl) {
     accept_SSL_callback(request);
   } else {
-    // Downgrade to a non-SSL socket.
-    Try<Socket> create = Socket::create(Socket::POLL, fd);
-    if (create.isError()) {
-      request->promise.fail(create.error());
+    // Downgrade to a non-SSL socket implementation.
+    Try<std::shared_ptr<SocketImpl>> impl = PollSocketImpl::create(fd);
+    if (impl.isError()) {
+      request->promise.fail(impl.error());
     } else {
-      request->promise.set(create.get());
+      request->promise.set(impl.get());
     }
 
     delete request;
@@ -981,14 +987,14 @@ void LibeventSSLSocketImpl::accept_callback(AcceptRequest* request)
 {
   CHECK(__in_event_loop__);
 
-  Queue<Future<Socket>> accept_queue_ = accept_queue;
+  Queue<Future<std::shared_ptr<SocketImpl>>> accept_queue_ = accept_queue;
 
   // After the socket is accepted, it must complete the SSL
   // handshake (or be downgraded to a regular socket) before
   // we put it in the queue of connected sockets.
   request->promise.future()
-    .onAny([accept_queue_](Future<Socket> socket) mutable {
-      accept_queue_.put(socket);
+    .onAny([accept_queue_](Future<std::shared_ptr<SocketImpl>> impl) mutable {
+      accept_queue_.put(impl);
     });
 
   // If we support downgrading the connection, first wait for this
@@ -1119,9 +1125,7 @@ void LibeventSSLSocketImpl::accept_SSL_callback(AcceptRequest* request)
               &LibeventSSLSocketImpl::event_callback,
               CHECK_NOTNULL(impl->event_loop_handle));
 
-          Socket socket = Socket::Impl::socket(std::move(impl));
-
-          request->promise.set(socket);
+          request->promise.set(std::dynamic_pointer_cast<SocketImpl>(impl));
         } else if (events & BEV_EVENT_ERROR) {
           std::ostringstream stream;
           if (EVUTIL_SOCKET_ERROR() != 0) {
@@ -1158,5 +1162,6 @@ void LibeventSSLSocketImpl::accept_SSL_callback(AcceptRequest* request)
       request);
 }
 
+} // namespace internal {
 } // namespace network {
 } // namespace process {

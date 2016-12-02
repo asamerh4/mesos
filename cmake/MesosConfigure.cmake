@@ -64,6 +64,13 @@ if (WIN32)
   file(WRITE ${CMAKE_BINARY_DIR}/make.bat ${MESOS_BUILD_CMD})
 endif (WIN32)
 
+if (WIN32)
+  set(MESOS_DEFAULT_LIBRARY_LINKAGE "STATIC")
+else (WIN32)
+  set(MESOS_DEFAULT_LIBRARY_LINKAGE "SHARED")
+  set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+endif (WIN32)
+
 # DEFINE DIRECTORY STRUCTURE MESOS PROJECT.
 ###########################################
 set(MESOS_SRC_DIR     ${CMAKE_SOURCE_DIR}/src)
@@ -73,6 +80,14 @@ set(MESOS_BIN_SRC_DIR ${MESOS_BIN}/src)
 # Convenience variables for include directories of third-party dependencies.
 set(MESOS_PUBLIC_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(MESOS_BIN_INCLUDE_DIR    ${CMAKE_BINARY_DIR}/include)
+
+set(
+  MESOS_PROTOBUF_HEADER_INCLUDE_DIRS
+  ${MESOS_BIN_INCLUDE_DIR}
+  ${MESOS_BIN_INCLUDE_DIR}/mesos
+  ${MESOS_BIN_SRC_DIR}
+  ${MESOS_SRC_DIR}
+  )
 
 # Make directories that generated Mesos code goes into.
 add_custom_target(
@@ -85,17 +100,25 @@ add_custom_target(
 
 # CONFIGURE AGENT.
 ##################
-include(SlaveConfigure)
+include(AgentConfigure)
 
 # CONFIGURE MASTER.
 ##################
 include(MasterConfigure)
+
+# CONFIGURE EXAMPLE MODULES AND FRAMEWORKS.
+###########################################
+include(ExamplesConfigure)
 
 # DEFINE MESOS BUILD TARGETS.
 #############################
 set(
   AGENT_TARGET mesos-agent
   CACHE STRING "Target we use to refer to agent executable")
+
+set(
+  DEFAULT_EXECUTOR_TARGET mesos-default-executor
+  CACHE STRING "Target for the default executor")
 
 set(
   MESOS_CONTAINERIZER mesos-containerizer
@@ -114,6 +137,10 @@ set(
   CACHE STRING "Target for fetcher")
 
 set(
+  MESOS_IO_SWITCHBOARD mesos-io-switchboard
+  CACHE STRING "Target for the IO switchboard")
+
+set(
   MESOS_MASTER mesos-master
   CACHE STRING "Target for master")
 
@@ -127,7 +154,14 @@ set(
 
 # MESOS LIBRARY CONFIGURATION.
 ##############################
-set(MESOS_TARGET mesos-${MESOS_PACKAGE_VERSION})
+set(
+  MESOS_TARGET mesos-and-binaries
+  CACHE STRING "Target that includes libmesos and all required binaries")
+
+add_custom_target(${MESOS_TARGET} ALL)
+
+set(MESOS_LIBS_TARGET mesos-${MESOS_PACKAGE_VERSION}
+    CACHE STRING "Library of master and agent code")
+
 set(MESOS_PROTOBUF_TARGET mesos-protobufs
-    CACHE STRING "Library of protobuf definitions used by Mesos"
-    )
+    CACHE STRING "Library of protobuf definitions used by Mesos")

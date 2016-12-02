@@ -31,11 +31,14 @@
 
 #include <process/collect.hpp>
 #include <process/delay.hpp>
+#include <process/dispatch.hpp>
 #include <process/http.hpp>
 #include <process/io.hpp>
 #include <process/subprocess.hpp>
 
 #include <stout/duration.hpp>
+#include <stout/json.hpp>
+#include <stout/jsonify.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -53,14 +56,13 @@
 #endif
 
 using process::delay;
+using process::dispatch;
 using process::Clock;
 using process::Failure;
 using process::Future;
 using process::Owned;
-using process::Promise;
 using process::Subprocess;
 using process::Time;
-using process::UPID;
 
 using std::map;
 using std::string;
@@ -119,7 +121,7 @@ pid_t cloneWithSetns(
 Try<Owned<HealthChecker>> HealthChecker::create(
     const HealthCheck& check,
     const string& launcherDir,
-    const UPID& executor,
+    const lambda::function<void(const TaskHealthStatus&)>& callback,
     const TaskID& taskID,
     Option<pid_t> taskPid,
     const vector<string>& namespaces)
@@ -133,7 +135,7 @@ Try<Owned<HealthChecker>> HealthChecker::create(
   Owned<HealthCheckerProcess> process(new HealthCheckerProcess(
       check,
       launcherDir,
-      executor,
+      callback,
       taskID,
       taskPid,
       namespaces));
@@ -157,29 +159,47 @@ HealthChecker::~HealthChecker()
 }
 
 
-Future<Nothing> HealthChecker::healthCheck()
+void HealthChecker::stop()
 {
-  return dispatch(process.get(), &HealthCheckerProcess::healthCheck);
+  LOG(INFO) << "Health checking stopped";
+
+  terminate(process.get(), true);
 }
 
 
 HealthCheckerProcess::HealthCheckerProcess(
     const HealthCheck& _check,
     const string& _launcherDir,
-    const UPID& _executor,
+    const lambda::function<void(const TaskHealthStatus&)>& _callback,
     const TaskID& _taskID,
     Option<pid_t> _taskPid,
     const vector<string>& _namespaces)
   : ProcessBase(process::ID::generate("health-checker")),
     check(_check),
     launcherDir(_launcherDir),
-    initializing(true),
-    executor(_executor),
+    healthUpdateCallback(_callback),
     taskID(_taskID),
     taskPid(_taskPid),
     namespaces(_namespaces),
-    consecutiveFailures(0)
+    consecutiveFailures(0),
+    initializing(true)
 {
+  Try<Duration> create = Duration::create(check.delay_seconds());
+  CHECK_SOME(create);
+  checkDelay = create.get();
+
+  create = Duration::create(check.interval_seconds());
+  CHECK_SOME(create);
+  checkInterval = create.get();
+
+  create = Duration::create(check.grace_period_seconds());
+  CHECK_SOME(create);
+  checkGracePeriod = create.get();
+
+  create = Duration::create(check.timeout_seconds());
+  CHECK_SOME(create);
+  checkTimeout = create.get();
+
 #ifdef __linux__
   if (!namespaces.empty()) {
     clone = lambda::bind(&cloneWithSetns, lambda::_1, taskPid, namespaces);
@@ -188,29 +208,24 @@ HealthCheckerProcess::HealthCheckerProcess(
 }
 
 
-Future<Nothing> HealthCheckerProcess::healthCheck()
+void HealthCheckerProcess::initialize()
 {
-  VLOG(1) << "Health check starting in "
-          << Seconds(static_cast<int64_t>(check.delay_seconds()))
-          << ", grace period "
-          << Seconds(static_cast<int64_t>(check.grace_period_seconds()));
+  VLOG(1) << "Health check configuration:"
+          << " '" << jsonify(JSON::Protobuf(check)) << "'";
 
   startTime = Clock::now();
 
-  delay(Seconds(static_cast<int64_t>(check.delay_seconds())),
-        self(),
-        &Self::_healthCheck);
-  return promise.future();
+  scheduleNext(checkDelay);
 }
 
 
 void HealthCheckerProcess::failure(const string& message)
 {
   if (initializing &&
-      check.grace_period_seconds() > 0 &&
-      (Clock::now() - startTime).secs() <= check.grace_period_seconds()) {
+      checkGracePeriod.secs() > 0 &&
+      (Clock::now() - startTime) <= checkGracePeriod) {
     LOG(INFO) << "Ignoring failure as health check still in grace period";
-    reschedule();
+    scheduleNext(checkInterval);
     return;
   }
 
@@ -229,13 +244,12 @@ void HealthCheckerProcess::failure(const string& message)
   // We assume this is a local send, i.e. the health checker library
   // is not used in a binary external to the executor and hence can
   // not exit before the data is sent to the executor.
-  send(executor, taskHealthStatus);
+  healthUpdateCallback(taskHealthStatus);
 
-  if (killTask) {
-    promise.fail(message);
-  } else {
-    reschedule();
-  }
+  // Even if we set the `kill_task` flag, it is an executor who kills the task
+  // and honors the flag (or not). We have no control over the task's lifetime,
+  // hence we should continue until we are explicitly asked to stop.
+  scheduleNext(checkInterval);
 }
 
 
@@ -249,32 +263,32 @@ void HealthCheckerProcess::success()
     TaskHealthStatus taskHealthStatus;
     taskHealthStatus.set_healthy(true);
     taskHealthStatus.mutable_task_id()->CopyFrom(taskID);
-    send(executor, taskHealthStatus);
+    healthUpdateCallback(taskHealthStatus);
     initializing = false;
   }
 
   consecutiveFailures = 0;
-  reschedule();
+  scheduleNext(checkInterval);
 }
 
 
-void HealthCheckerProcess::_healthCheck()
+void HealthCheckerProcess::performSingleCheck()
 {
   Future<Nothing> checkResult;
 
   switch (check.type()) {
     case HealthCheck::COMMAND: {
-      checkResult = _commandHealthCheck();
+      checkResult = commandHealthCheck();
       break;
     }
 
     case HealthCheck::HTTP: {
-      checkResult = _httpHealthCheck();
+      checkResult = httpHealthCheck();
       break;
     }
 
     case HealthCheck::TCP: {
-      checkResult = _tcpHealthCheck();
+      checkResult = tcpHealthCheck();
       break;
     }
 
@@ -283,11 +297,11 @@ void HealthCheckerProcess::_healthCheck()
     }
   }
 
-  checkResult.onAny(defer(self(), &Self::__healthCheck, lambda::_1));
+  checkResult.onAny(defer(self(), &Self::processCheckResult, lambda::_1));
 }
 
 
-void HealthCheckerProcess::__healthCheck(const Future<Nothing>& future)
+void HealthCheckerProcess::processCheckResult(const Future<Nothing>& future)
 {
   if (future.isReady()) {
     success();
@@ -302,7 +316,7 @@ void HealthCheckerProcess::__healthCheck(const Future<Nothing>& future)
 }
 
 
-Future<Nothing> HealthCheckerProcess::_commandHealthCheck()
+Future<Nothing> HealthCheckerProcess::commandHealthCheck()
 {
   CHECK_EQ(HealthCheck::COMMAND, check.type());
   CHECK(check.has_command());
@@ -356,10 +370,12 @@ Future<Nothing> HealthCheckerProcess::_commandHealthCheck()
   }
 
   pid_t commandPid = external->pid();
-  Duration timeout = Seconds(static_cast<int64_t>(check.timeout_seconds()));
+  const Duration timeout = checkTimeout;
 
   return external->status()
-    .after(timeout, [timeout, commandPid](Future<Option<int>> future) {
+    .after(
+        timeout,
+        [timeout, commandPid](Future<Option<int>> future) {
       future.discard();
 
       if (commandPid != -1) {
@@ -388,7 +404,7 @@ Future<Nothing> HealthCheckerProcess::_commandHealthCheck()
 }
 
 
-Future<Nothing> HealthCheckerProcess::_httpHealthCheck()
+Future<Nothing> HealthCheckerProcess::httpHealthCheck()
 {
   CHECK_EQ(HealthCheck::HTTP, check.type());
   CHECK(check.has_http());
@@ -430,16 +446,17 @@ Future<Nothing> HealthCheckerProcess::_httpHealthCheck()
   }
 
   pid_t curlPid = s->pid();
-  Duration timeout = Seconds(static_cast<int64_t>(check.timeout_seconds()));
+  const Duration timeout = checkTimeout;
 
   return await(
       s->status(),
       process::io::read(s->out().get()),
       process::io::read(s->err().get()))
-    .after(timeout,
-      [timeout, curlPid](Future<tuple<Future<Option<int>>,
-                                      Future<string>,
-                                      Future<string>>> future) {
+    .after(
+        timeout,
+        [timeout, curlPid](Future<tuple<Future<Option<int>>,
+                                        Future<string>,
+                                        Future<string>>> future) {
       future.discard();
 
       if (curlPid != -1) {
@@ -453,11 +470,11 @@ Future<Nothing> HealthCheckerProcess::_httpHealthCheck()
           string(HTTP_CHECK_COMMAND) + " has not returned after " +
           stringify(timeout) + "; aborting");
     })
-    .then(defer(self(), &Self::__httpHealthCheck, lambda::_1));
+    .then(defer(self(), &Self::_httpHealthCheck, lambda::_1));
 }
 
 
-Future<Nothing> HealthCheckerProcess::__httpHealthCheck(
+Future<Nothing> HealthCheckerProcess::_httpHealthCheck(
     const tuple<
         Future<Option<int>>,
         Future<string>,
@@ -516,7 +533,7 @@ Future<Nothing> HealthCheckerProcess::__httpHealthCheck(
 }
 
 
-Future<Nothing> HealthCheckerProcess::_tcpHealthCheck()
+Future<Nothing> HealthCheckerProcess::tcpHealthCheck()
 {
   CHECK_EQ(HealthCheck::TCP, check.type());
   CHECK(check.has_tcp());
@@ -553,16 +570,17 @@ Future<Nothing> HealthCheckerProcess::_tcpHealthCheck()
   }
 
   pid_t tcpConnectPid = s->pid();
-  Duration timeout = Seconds(static_cast<int64_t>(check.timeout_seconds()));
+  const Duration timeout = checkTimeout;
 
   return await(
       s->status(),
       process::io::read(s->out().get()),
       process::io::read(s->err().get()))
-    .after(timeout,
-      [timeout, tcpConnectPid](Future<tuple<Future<Option<int>>,
-                                            Future<string>,
-                                            Future<string>>> future) {
+    .after(
+        timeout,
+        [timeout, tcpConnectPid](Future<tuple<Future<Option<int>>,
+                                              Future<string>,
+                                              Future<string>>> future) {
       future.discard();
 
       if (tcpConnectPid != -1) {
@@ -576,11 +594,11 @@ Future<Nothing> HealthCheckerProcess::_tcpHealthCheck()
           string(TCP_CHECK_COMMAND) + " has not returned after " +
           stringify(timeout) + "; aborting");
     })
-    .then(defer(self(), &Self::__tcpHealthCheck, lambda::_1));
+    .then(defer(self(), &Self::_tcpHealthCheck, lambda::_1));
 }
 
 
-Future<Nothing> HealthCheckerProcess::__tcpHealthCheck(
+Future<Nothing> HealthCheckerProcess::_tcpHealthCheck(
     const tuple<
         Future<Option<int>>,
         Future<string>,
@@ -617,14 +635,11 @@ Future<Nothing> HealthCheckerProcess::__tcpHealthCheck(
 }
 
 
-void HealthCheckerProcess::reschedule()
+void HealthCheckerProcess::scheduleNext(const Duration& duration)
 {
-  VLOG(1) << "Rescheduling health check in "
-          << Seconds(static_cast<int64_t>(check.interval_seconds()));
+  VLOG(1) << "Scheduling health check in " << duration;
 
-  delay(Seconds(static_cast<int64_t>(check.interval_seconds())),
-        self(),
-        &Self::_healthCheck);
+  delay(duration, self(), &Self::performSingleCheck);
 }
 
 

@@ -30,7 +30,6 @@
 #include <stout/hashmap.hpp>
 #include <stout/multihashmap.hpp>
 
-#include <mesos/slave/container_logger.hpp>
 #include <mesos/slave/isolator.hpp>
 
 #include "slave/state.hpp"
@@ -39,9 +38,11 @@
 
 #include "slave/containerizer/mesos/launcher.hpp"
 
-#include "slave/containerizer/mesos/provisioner/provisioner.hpp"
+#include "slave/containerizer/mesos/io/switchboard.hpp"
 
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
+
+#include "slave/containerizer/mesos/provisioner/provisioner.hpp"
 
 namespace mesos {
 namespace internal {
@@ -60,17 +61,13 @@ public:
       Fetcher* fetcher,
       const Option<NvidiaComponents>& nvidia = None());
 
-  MesosContainerizer(
+  static Try<MesosContainerizer*> create(
       const Flags& flags,
       bool local,
       Fetcher* fetcher,
-      const process::Owned<mesos::slave::ContainerLogger>& logger,
       const process::Owned<Launcher>& launcher,
       const process::Shared<Provisioner>& provisioner,
       const std::vector<process::Owned<mesos::slave::Isolator>>& isolators);
-
-  // Used for testing.
-  MesosContainerizer(const process::Owned<MesosContainerizerProcess>& _process);
 
   virtual ~MesosContainerizer();
 
@@ -117,6 +114,9 @@ public:
   virtual process::Future<hashset<ContainerID>> containers();
 
 private:
+  explicit MesosContainerizer(
+      const process::Owned<MesosContainerizerProcess>& process);
+
   process::Owned<MesosContainerizerProcess> process;
 };
 
@@ -127,17 +127,15 @@ class MesosContainerizerProcess
 public:
   MesosContainerizerProcess(
       const Flags& _flags,
-      bool _local,
       Fetcher* _fetcher,
-      const process::Owned<mesos::slave::ContainerLogger>& _logger,
+      IOSwitchboard* _ioSwitchboard,
       const process::Owned<Launcher>& _launcher,
       const process::Shared<Provisioner>& _provisioner,
       const std::vector<process::Owned<mesos::slave::Isolator>>& _isolators)
     : ProcessBase(process::ID::generate("mesos-containerizer")),
       flags(_flags),
-      local(_local),
       fetcher(_fetcher),
-      logger(_logger),
+      ioSwitchboard(_ioSwitchboard),
       launcher(_launcher),
       provisioner(_provisioner),
       isolators(_isolators) {}
@@ -294,9 +292,8 @@ private:
       const ContainerID& containerId);
 
   const Flags flags;
-  const bool local;
   Fetcher* fetcher;
-  process::Owned<mesos::slave::ContainerLogger> logger;
+  IOSwitchboard* ioSwitchboard;
   const process::Owned<Launcher> launcher;
   const process::Shared<Provisioner> provisioner;
   const std::vector<process::Owned<mesos::slave::Isolator>> isolators;

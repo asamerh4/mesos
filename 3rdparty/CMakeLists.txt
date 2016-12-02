@@ -134,10 +134,16 @@ endif (NOT WIN32)
 set(LIBEVENT_CMAKE_ARGS
   ${LIBEVENT_CMAKE_ARGS}
   -LH
-  -DCMAKE_C_FLAGS=-fPIC
   -DEVENT__HAVE_SYS_STAT_H=1
   -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS}
   )
+
+if (NOT WIN32)
+  set(LIBEVENT_CMAKE_ARGS
+    ${LIBEVENT_CMAKE_ARGS}
+    -DCMAKE_C_FLAGS=-fPIC
+    )
+endif (NOT WIN32)
 
 # Third-party libraries. Tell the build system how to pull in and build third-
 # party libraries at compile time, using the ExternalProject_Add macro.
@@ -265,7 +271,12 @@ endif (WIN32)
 # library tests (located in `3rdparty/`).
 ###############################################################################
 
-include(ProcessTestsConfigure)
+list(
+  APPEND CMAKE_MODULE_PATH
+  ${CMAKE_SOURCE_DIR}/3rdparty/stout/cmake
+  )
+include(StoutConfigure)
+include(StoutTestsConfigure)
 
 if (REBUNDLED)
   set(GMOCK_URL    ${REBUNDLED_DIR}/gmock-${GMOCK_VERSION}.tar.gz)
@@ -334,13 +345,6 @@ ExternalProject_Add(
 #
 # Builds, configures, and compiles the Stout tests.
 ###################################################
-
-list(
-  APPEND CMAKE_MODULE_PATH
-  ${CMAKE_SOURCE_DIR}/3rdparty/stout/cmake
-  )
-include(StoutConfigure)
-include(StoutTestsConfigure)
 add_subdirectory(stout/tests)
 
 
@@ -425,7 +429,7 @@ ExternalProject_Add(
 
 if (NOT WIN32)
   set(LEVELDB_CONFIG_CMD  cd ${LEVELDB_ROOT} && ./configure --prefix=${LEVELDB_ROOT}-lib)
-  set(LEVELDB_BUILD_CMD   cd ${LEVELDB_ROOT} && make)
+  set(LEVELDB_BUILD_CMD   cd ${LEVELDB_ROOT} && make OPT=-O2\ -g\ -fPIC)
   set(LEVELDB_INSTALL_CMD cd ${LEVELDB_ROOT} && make install)
   PATCH_CMD(
     ${MESOS_3RDPARTY_SRC}/leveldb-${LEVELDB_VERSION}.patch

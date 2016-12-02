@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# COMPILE PROTOBUF STRUCTS REQUIRED TO BUILD MESOS.
-###################################################
+# GENERATE PUBLIC AND INTERNAL PROTOBUFS.
+#########################################
 include(MesosProtobuf)
 
 # Build the protobuf structs.
@@ -31,6 +31,7 @@ PROTOC_TO_INCLUDE_DIR(DOCKER_V1        mesos/docker/v1)
 PROTOC_TO_INCLUDE_DIR(DOCKER_V2        mesos/docker/v2)
 PROTOC_TO_INCLUDE_DIR(EXECUTOR         mesos/executor/executor)
 PROTOC_TO_INCLUDE_DIR(FETCHER          mesos/fetcher/fetcher)
+PROTOC_TO_INCLUDE_DIR(HOOK             mesos/module/hook)
 PROTOC_TO_INCLUDE_DIR(MAINTENANCE      mesos/maintenance/maintenance)
 PROTOC_TO_INCLUDE_DIR(MASTER           mesos/master/master)
 PROTOC_TO_INCLUDE_DIR(MESOS            mesos/mesos)
@@ -49,16 +50,16 @@ PROTOC_TO_INCLUDE_DIR(V1_MESOS         mesos/v1/mesos)
 PROTOC_TO_INCLUDE_DIR(V1_QUOTA         mesos/v1/quota/quota)
 PROTOC_TO_INCLUDE_DIR(V1_SCHEDULER     mesos/v1/scheduler/scheduler)
 
-PROTOC_TO_SRC_DIR(REGISTRY                      master/registry)
-PROTOC_TO_SRC_DIR(INTERNAL_MESSAGES             messages/messages)
 PROTOC_TO_SRC_DIR(INTERNAL_FLAGS                messages/flags)
 PROTOC_TO_SRC_DIR(INTERNAL_LOG                  messages/log)
+PROTOC_TO_SRC_DIR(INTERNAL_MESSAGES             messages/messages)
 PROTOC_TO_SRC_DIR(INTERNAL_STATE                messages/state)
-PROTOC_TO_SRC_DIR(PROVISIONER_DOCKER            slave/containerizer/mesos/provisioner/docker/message)
 PROTOC_TO_SRC_DIR(ISOLATOR_CNI_SPEC             slave/containerizer/mesos/isolators/network/cni/spec)
 PROTOC_TO_SRC_DIR(ISOLATOR_DOCKER_VOLUME_STATE  slave/containerizer/mesos/isolators/docker/volume/state)
+PROTOC_TO_SRC_DIR(PROVISIONER_DOCKER            slave/containerizer/mesos/provisioner/docker/message)
+PROTOC_TO_SRC_DIR(REGISTRY                      master/registry)
 
-set(MESOS_PROTOBUF_SRC
+set(PUBLIC_PROTOBUF_SRC
   ${ACLS_PROTO_CC}
   ${AGENT_PROTO_CC}
   ${ALLOCATOR_PROTO_CC}
@@ -71,20 +72,13 @@ set(MESOS_PROTOBUF_SRC
   ${DOCKER_V2_PROTO_CC}
   ${EXECUTOR_PROTO_CC}
   ${FETCHER_PROTO_CC}
-  ${INTERNAL_FLAGS_PROTO_CC}
-  ${INTERNAL_LOG_PROTO_CC}
-  ${INTERNAL_MESSAGES_PROTO_CC}
-  ${INTERNAL_STATE_PROTO_CC}
-  ${ISOLATOR_CNI_SPEC_PROTO_CC}
-  ${ISOLATOR_DOCKER_VOLUME_STATE_PROTO_CC}
+  ${HOOK_PROTO_CC}
   ${MAINTENANCE_PROTO_CC}
   ${MASTER_PROTO_CC}
   ${MESOS_PROTO_CC}
   ${MODULE_PROTO_CC}
-  ${QUOTA_PROTO_CC}
   ${OVERSUBSCRIPTION_PROTO_CC}
-  ${PROVISIONER_DOCKER_PROTO_CC}
-  ${REGISTRY_PROTO_CC}
+  ${QUOTA_PROTO_CC}
   ${SCHEDULER_PROTO_CC}
   ${STATE_PROTO_CC}
   ${URI_PROTO_CC}
@@ -98,6 +92,38 @@ set(MESOS_PROTOBUF_SRC
   ${V1_SCHEDULER_PROTO_CC}
   )
 
+set(INTERNAL_PROTOBUF_SRC
+  ${INTERNAL_FLAGS_PROTO_CC}
+  ${INTERNAL_LOG_PROTO_CC}
+  ${INTERNAL_MESSAGES_PROTO_CC}
+  ${INTERNAL_STATE_PROTO_CC}
+  ${ISOLATOR_CNI_SPEC_PROTO_CC}
+  ${ISOLATOR_DOCKER_VOLUME_STATE_PROTO_CC}
+  ${PROVISIONER_DOCKER_PROTO_CC}
+  ${REGISTRY_PROTO_CC}
+  )
+
+
+# BUILD PROTOBUFS.
+##################
+include_directories(
+  ${MESOS_PROTOBUF_HEADER_INCLUDE_DIRS}
+  ${PROTOBUF_INCLUDE_DIR})
+
+link_directories(${PROTOBUF_LIB_DIR})
+
+add_library(
+  ${MESOS_PROTOBUF_TARGET}
+  ${MESOS_DEFAULT_LIBRARY_LINKAGE}
+  ${PUBLIC_PROTOBUF_SRC}
+  ${INTERNAL_PROTOBUF_SRC}
+  )
+
+add_dependencies(${MESOS_PROTOBUF_TARGET} ${PROTOBUF_TARGET})
+
+target_link_libraries(${MESOS_PROTOBUF_TARGET} ${PROTOBUF_LFLAG})
+
+
 # Configure Mesos files.
 ########################
 configure_file(
@@ -107,6 +133,68 @@ configure_file(
 
 # SOURCE FILES FOR THE MESOS LIBRARY.
 #####################################
+set(AGENT_SRC
+  ${AGENT_SRC}
+  slave/constants.cpp
+  slave/container_logger.cpp
+  slave/flags.cpp
+  slave/gc.cpp
+  slave/http.cpp
+  slave/metrics.cpp
+  slave/paths.cpp
+  slave/qos_controller.cpp
+  slave/qos_controllers/noop.cpp
+  slave/resource_estimator.cpp
+  slave/slave.cpp
+  slave/state.cpp
+  slave/status_update_manager.cpp
+  slave/validation.cpp
+  slave/container_loggers/sandbox.cpp
+  slave/containerizer/composing.cpp
+  slave/containerizer/containerizer.cpp
+  slave/containerizer/docker.cpp
+  slave/containerizer/fetcher.cpp
+  slave/containerizer/mesos/containerizer.cpp
+  slave/containerizer/mesos/isolator.cpp
+  slave/containerizer/mesos/launch.cpp
+  slave/containerizer/mesos/launcher.cpp
+  slave/containerizer/mesos/mount.cpp
+  slave/containerizer/mesos/paths.cpp
+  slave/containerizer/mesos/utils.cpp
+  slave/containerizer/mesos/io/switchboard.cpp
+  slave/containerizer/mesos/provisioner/backend.cpp
+  slave/containerizer/mesos/provisioner/paths.cpp
+  slave/containerizer/mesos/provisioner/provisioner.cpp
+  slave/containerizer/mesos/provisioner/store.cpp
+  slave/containerizer/mesos/provisioner/utils.cpp
+  slave/containerizer/mesos/provisioner/appc/cache.cpp
+  slave/containerizer/mesos/provisioner/appc/fetcher.cpp
+  slave/containerizer/mesos/provisioner/appc/paths.cpp
+  slave/containerizer/mesos/provisioner/appc/store.cpp
+  slave/containerizer/mesos/provisioner/backends/copy.cpp
+  slave/containerizer/mesos/provisioner/docker/local_puller.cpp
+  slave/containerizer/mesos/provisioner/docker/metadata_manager.cpp
+  slave/containerizer/mesos/provisioner/docker/paths.cpp
+  slave/containerizer/mesos/provisioner/docker/puller.cpp
+  slave/containerizer/mesos/provisioner/docker/registry_puller.cpp
+  slave/containerizer/mesos/provisioner/docker/store.cpp
+  slave/resource_estimators/noop.cpp
+  )
+
+if (NOT WIN32)
+  set(AGENT_SRC
+    ${AGENT_SRC}
+    slave/containerizer/mesos/isolators/docker/volume/driver.cpp
+    slave/containerizer/mesos/isolators/docker/volume/paths.cpp
+    slave/containerizer/mesos/isolators/filesystem/posix.cpp
+    slave/containerizer/mesos/isolators/network/cni/paths.cpp
+    slave/containerizer/mesos/isolators/network/cni/spec.cpp
+    slave/containerizer/mesos/isolators/posix/disk.cpp
+    slave/containerizer/mesos/isolators/posix/rlimits.cpp
+    slave/containerizer/mesos/isolators/volume/sandbox_path.cpp
+    )
+endif (NOT WIN32)
+
 set(APPC_SRC
   appc/spec.cpp
   )
@@ -143,9 +231,33 @@ set(COMMON_SRC
   common/values.cpp
   )
 
+set(DOCKER_SRC
+  docker/docker.cpp
+  docker/spec.cpp
+  )
+
+set(EXECUTOR_SRC
+  exec/exec.cpp
+  executor/executor.cpp
+  executor/v0_v1executor.cpp
+  )
+
+set(FILES_SRC
+  files/files.cpp
+  )
+
 set(HDFS_SRC
   ${HDFS_SRC}
   hdfs/hdfs.cpp
+  )
+
+set(HEALTH_CHECK_SRC
+  health-check/health_checker.cpp
+  )
+
+set(INTERNAL_SRC
+  internal/devolve.cpp
+  internal/evolve.cpp
   )
 
 set(LINUX_SRC
@@ -167,7 +279,6 @@ set(LINUX_SRC
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.cpp
   slave/containerizer/mesos/isolators/docker/runtime.cpp
-  slave/containerizer/mesos/isolators/docker/volume/driver.cpp
   slave/containerizer/mesos/isolators/docker/volume/isolator.cpp
   slave/containerizer/mesos/isolators/filesystem/linux.cpp
   slave/containerizer/mesos/isolators/filesystem/shared.cpp
@@ -178,49 +289,11 @@ set(LINUX_SRC
   slave/containerizer/mesos/isolators/linux/capabilities.cpp
   slave/containerizer/mesos/isolators/namespaces/pid.cpp
   slave/containerizer/mesos/isolators/network/cni/cni.cpp
+  slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.cpp
   slave/containerizer/mesos/isolators/volume/image.cpp
   slave/containerizer/mesos/provisioner/backends/aufs.cpp
   slave/containerizer/mesos/provisioner/backends/bind.cpp
   slave/containerizer/mesos/provisioner/backends/overlay.cpp
-  )
-
-set(WIN32_SRC
-  ${WIN32_SRC}
-  slave/containerizer/mesos/isolators/filesystem/posix.cpp
-  slave/containerizer/mesos/isolators/filesystem/windows.cpp
-  )
-
-set(DOCKER_SRC
-  docker/docker.hpp
-  docker/docker.cpp
-  docker/executor.hpp
-  docker/spec.cpp
-  )
-
-set(EXEC_SRC
-  exec/exec.cpp
-  )
-
-set(EXECUTOR_SRC
-  executor/executor.cpp
-  executor/v0_v1executor.cpp
-  )
-
-set(FILES_SRC
-  files/files.cpp
-  )
-
-set(HEALTH_CHECK_SRC
-  health-check/health_checker.cpp
-  )
-
-set(HOOK_SRC
-  hook/manager.cpp
-  )
-
-set(INTERNAL_SRC
-  internal/devolve.cpp
-  internal/evolve.cpp
   )
 
 set(LOCAL_SRC
@@ -265,7 +338,6 @@ if (NOT WIN32)
     master/metrics.cpp
     master/quota.cpp
     master/quota_handler.cpp
-    master/registry.hpp
     master/registrar.cpp
     master/weights.cpp
     master/weights_handler.cpp
@@ -280,90 +352,31 @@ if (NOT WIN32)
     )
 endif (NOT WIN32)
 
+set(MESSAGES_SRC
+  ${MESSAGES_SRC}
+  messages/messages.cpp
+  )
+
 set(MODULE_SRC
+  hook/manager.cpp
   module/manager.cpp
   )
 
-set(SCHED_SRC
-  sched/sched.cpp
+set(POSIX_SRC
+  posix/rlimits.cpp
   )
 
 set(SCHEDULER_SRC
+  sched/sched.cpp
   scheduler/scheduler.cpp
   )
 
 set(STATE_SRC
   ${STATE_SRC}
   state/in_memory.cpp
+  state/leveldb.cpp
   state/log.cpp
   )
-
-set(AGENT_SRC
-  ${AGENT_SRC}
-  slave/constants.cpp
-  slave/flags.cpp
-  slave/gc.cpp
-  slave/http.cpp
-  slave/metrics.cpp
-  slave/paths.cpp
-  slave/slave.cpp
-  slave/qos_controller.cpp
-  slave/qos_controllers/noop.cpp
-  slave/resource_estimator.cpp
-  slave/resource_estimators/noop.cpp
-  slave/state.cpp
-  slave/status_update_manager.cpp
-  slave/validation.cpp
-  slave/containerizer/mesos/launch.cpp
-  slave/containerizer/fetcher.cpp
-  slave/containerizer/containerizer.cpp
-  slave/containerizer/composing.cpp
-  slave/containerizer/mesos/containerizer.cpp
-  slave/container_logger.cpp
-  slave/container_loggers/sandbox.cpp
-  slave/containerizer/mesos/isolator.cpp
-  slave/containerizer/mesos/launcher.cpp
-  slave/containerizer/mesos/mount.cpp
-  slave/containerizer/mesos/paths.cpp
-  slave/containerizer/mesos/utils.cpp
-  slave/containerizer/mesos/provisioner/paths.cpp
-  slave/containerizer/mesos/provisioner/provisioner.cpp
-  slave/containerizer/mesos/provisioner/store.cpp
-  slave/containerizer/mesos/provisioner/utils.cpp
-  slave/containerizer/mesos/provisioner/appc/cache.cpp
-  slave/containerizer/mesos/provisioner/appc/fetcher.cpp
-  slave/containerizer/mesos/provisioner/appc/paths.cpp
-  slave/containerizer/mesos/provisioner/appc/store.cpp
-  slave/containerizer/mesos/provisioner/backend.cpp
-  slave/containerizer/mesos/provisioner/backends/copy.cpp
-  slave/containerizer/mesos/provisioner/docker/local_puller.cpp
-  slave/containerizer/mesos/provisioner/docker/message.proto
-  slave/containerizer/mesos/provisioner/docker/metadata_manager.cpp
-  slave/containerizer/mesos/provisioner/docker/paths.cpp
-  slave/containerizer/mesos/provisioner/docker/puller.cpp
-  slave/containerizer/mesos/provisioner/docker/registry_puller.cpp
-  slave/containerizer/mesos/provisioner/docker/store.cpp
-  slave/containerizer/docker.cpp
-  )
-
-if (NOT WIN32)
-  set(AGENT_SRC
-    ${AGENT_SRC}
-    slave/container_logger.cpp
-    slave/container_loggers/sandbox.cpp
-    slave/resource_estimator.cpp
-    slave/slave.cpp
-    slave/containerizer/docker.cpp
-    slave/containerizer/mesos/mount.cpp
-    slave/containerizer/mesos/isolators/filesystem/posix.cpp
-    slave/containerizer/mesos/isolators/posix/disk.cpp
-    slave/containerizer/mesos/isolators/posix/rlimits.cpp
-    slave/containerizer/mesos/isolators/docker/volume/paths.cpp
-    slave/containerizer/mesos/isolators/network/cni/paths.cpp
-    slave/containerizer/mesos/isolators/network/cni/spec.cpp
-    slave/containerizer/mesos/isolators/volume/sandbox_path.cpp
-    )
-endif (NOT WIN32)
 
 set(URI_SRC
   uri/fetcher.cpp
@@ -379,10 +392,6 @@ if (NOT WIN32)
     uri/fetchers/hadoop.cpp
     )
 endif (NOT WIN32)
-
-set(POSIX_SRC
-  posix/rlimits.cpp
-  )
 
 set(USAGE_SRC
   usage/usage.cpp
@@ -403,42 +412,41 @@ set(WATCHER_SRC
   watcher/whitelist_watcher.cpp
   )
 
+set(WIN32_SRC
+  ${WIN32_SRC}
+  slave/containerizer/mesos/isolators/filesystem/posix.cpp
+  slave/containerizer/mesos/isolators/filesystem/windows.cpp
+  )
+
 set(ZOOKEEPER_SRC
+  zookeeper/authentication.cpp
   zookeeper/contender.cpp
   zookeeper/detector.cpp
   zookeeper/zookeeper.cpp
-  zookeeper/authentication.cpp
   zookeeper/group.cpp
-  )
-
-set(MESSAGES_SRC
-  ${MESSAGES_SRC}
-  messages/messages.cpp
   )
 
 set(MESOS_SRC
   ${MESOS_SRC}
-  ${AUTHENTICATION_SRC}
-  ${AUTHORIZER_SRC}
   ${AGENT_SRC}
   ${APPC_SRC}
-  ${MODULE_SRC}
+  ${AUTHENTICATION_SRC}
+  ${AUTHORIZER_SRC}
   ${COMMON_SRC}
+  ${DOCKER_SRC}
   ${EXECUTOR_SRC}
-  ${V1_SRC}
-  ${HOOK_SRC}
-  ${INTERNAL_SRC}
   ${FILES_SRC}
   ${HEALTH_CHECK_SRC}
-  ${MESSAGES_SRC}
+  ${INTERNAL_SRC}
   ${LOGGING_SRC}
+  ${MASTER_SRC}
+  ${MESSAGES_SRC}
+  ${MODULE_SRC}
+  ${URI_SRC}
+  ${USAGE_SRC}
+  ${V1_SRC}
   ${VERSION_SRC}
   ${ZOOKEEPER_SRC}
-  ${MASTER_SRC}
-  ${EXEC_SRC}
-  ${DOCKER_SRC}
-  ${USAGE_SRC}
-  ${URI_SRC}
   )
 
 if (NOT WIN32)
@@ -448,7 +456,6 @@ if (NOT WIN32)
     ${LOCAL_SRC}
     ${LOG_SRC}
     ${POSIX_SRC}
-    ${SCHED_SRC}
     ${SCHEDULER_SRC}
     ${STATE_SRC}
     ${WATCHER_SRC}
@@ -487,6 +494,13 @@ if (WIN32)
   SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/src)
 endif (WIN32)
 
+# Generate all libraries in the same folder to conform with the Automake build.
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/src/.libs)
+if (WIN32)
+  SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/src/.libs)
+  SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/src/.libs)
+endif (WIN32)
+
 # LINKING LIBRARIES BY DIRECTORY (might generate, e.g., -L/path/to/thing on
 # Linux).
 ###########################################################################
@@ -494,36 +508,31 @@ link_directories(${AGENT_LIB_DIRS})
 
 # THE MESOS LIBRARY (generates, e.g., libmesos.so, etc., on Linux).
 ###################################################################
-add_library(${MESOS_TARGET} STATIC ${MESOS_SRC})
+add_library(${MESOS_LIBS_TARGET} ${MESOS_DEFAULT_LIBRARY_LINKAGE} ${MESOS_SRC})
 set_target_properties(
-  ${MESOS_TARGET} PROPERTIES
+  ${MESOS_LIBS_TARGET} PROPERTIES
   VERSION ${MESOS_PACKAGE_VERSION}
   SOVERSION ${MESOS_PACKAGE_SOVERSION}
-  COMPILE_FLAGS "-fPIC"
-  )
-
-add_library(${MESOS_PROTOBUF_TARGET} STATIC ${MESOS_PROTOBUF_SRC})
-set_target_properties(
-  ${MESOS_PROTOBUF_TARGET} PROPERTIES
-  VERSION ${MESOS_PACKAGE_VERSION}
-  SOVERSION ${MESOS_PACKAGE_SOVERSION}
-  COMPILE_FLAGS "-fPIC"
   )
 
 # ADD LIBRARY DEPENDENCIES (tells CMake what to compile/build first).
 ####################################################################
-add_dependencies(${MESOS_TARGET} ${MESOS_PROTOBUF_TARGET})
-add_dependencies(${MESOS_PROTOBUF_TARGET} ${AGENT_DEPENDENCIES})
+add_dependencies(${MESOS_TARGET} ${MESOS_LIBS_TARGET})
+add_dependencies(
+  ${MESOS_LIBS_TARGET}
+  ${MESOS_PROTOBUF_TARGET}
+  ${AGENT_DEPENDENCIES}
+  )
 
 # ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
 ######################################################
-target_link_libraries(${MESOS_TARGET} ${MESOS_PROTOBUF_TARGET} ${AGENT_LIBS})
-target_link_libraries(${MESOS_PROTOBUF_TARGET} ${AGENT_LIBS})
+target_link_libraries(${MESOS_LIBS_TARGET} ${MESOS_PROTOBUF_TARGET} ${AGENT_LIBS})
 
 # BUILD THE MESOS EXECUTABLES.
 ##############################
 add_subdirectory(cli/)
 add_subdirectory(docker/)
+add_subdirectory(examples/)
 add_subdirectory(health-check/)
 add_subdirectory(launcher/)
 add_subdirectory(local/)

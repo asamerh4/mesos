@@ -134,8 +134,10 @@ using process::http::authentication::AuthenticatorManager;
 
 using process::http::authorization::AuthorizationCallbacks;
 
-using process::network::Address;
-using process::network::Socket;
+using process::network::inet::Address;
+using process::network::inet::Socket;
+
+using process::network::internal::SocketImpl;
 
 using std::deque;
 using std::find;
@@ -371,7 +373,7 @@ public:
   void link(ProcessBase* process,
             const UPID& to,
             const ProcessBase::RemoteConnection remote,
-            const Socket::Kind& kind = Socket::DEFAULT_KIND());
+            const SocketImpl::Kind& kind = SocketImpl::DEFAULT_KIND());
 
   // Test-only method to fetch the file descriptor behind a
   // persistent socket.
@@ -384,12 +386,12 @@ public:
   // This generally happens when `process::finalize` is called.
   void unproxy(const Socket& socket);
 
-  void send(Encoder* encoder, bool persist);
+  void send(Encoder* encoder, bool persist, const Socket& socket);
   void send(const Response& response,
             const Request& request,
             const Socket& socket);
   void send(Message* message,
-            const Socket::Kind& kind = Socket::DEFAULT_KIND());
+            const SocketImpl::Kind& kind = SocketImpl::DEFAULT_KIND());
 
   Encoder* next(int s);
 
@@ -440,24 +442,24 @@ private:
   set<int> dispose;
 
   // Map from socket to socket address for outbound sockets.
-  map<int, Address> addresses;
+  hashmap<int, Address> addresses;
 
   // Map from socket address to temporary sockets (outbound sockets
   // that will be closed once there is no more data to send on them).
-  map<Address, int> temps;
+  hashmap<Address, int> temps;
 
   // Map from socket address (ip, port) to persistent sockets
   // (outbound sockets that will remain open even if there is no more
   // data to send on them).  We distinguish these from the 'temps'
   // collection so we can tell when a persistent socket has been lost
   // (and thus generate ExitedEvents).
-  map<Address, int> persists;
+  hashmap<Address, int> persists;
 
   // Map from outbound socket to outgoing queue.
-  map<int, queue<Encoder*>> outgoing;
+  hashmap<int, queue<Encoder*>> outgoing;
 
   // HTTP proxies.
-  map<int, HttpProxy*> proxies;
+  hashmap<int, HttpProxy*> proxies;
 
   // Protects instance variables.
   std::recursive_mutex mutex;
@@ -578,7 +580,7 @@ static std::mutex* socket_mutex = new std::mutex();
 static Future<Socket> future_accept;
 
 // Local socket address.
-static Address __address__;
+static Address __address__ = Address::ANY_ANY();
 
 // Active SocketManager (eventually will probably be thread-local).
 static SocketManager* socket_manager = nullptr;
@@ -1070,7 +1072,7 @@ bool initialize(
   Clock::initialize(lambda::bind(&timedout, lambda::_1));
 
   // Fill in the local IP and port for inter-libprocess communication.
-  __address__ = Address::LOCALHOST_ANY();
+  __address__ = Address::ANY_ANY();
 
   // Fetch and parse the libprocess environment variables.
   internal::Flags flags;
@@ -1308,7 +1310,7 @@ void finalize()
   // Clear the public address of the server socket.
   // NOTE: This variable is necessary for process communication, so it
   // cannot be cleared until after the `ProcessManager` is deleted.
-  __address__ = Address::LOCALHOST_ANY();
+  __address__ = Address::ANY_ANY();
 }
 
 
@@ -1490,13 +1492,15 @@ bool HttpProxy::process(const Future<Response>& future, const Request& request)
         // TODO(benh): Consider a way to have the socket manager turn
         // on TCP_CORK for both sends and then turn it off.
         socket_manager->send(
-            new HttpResponseEncoder(socket, response, request),
-            true);
+            new HttpResponseEncoder(response, request),
+            true,
+            socket);
 
         // Note the file descriptor gets closed by FileEncoder.
         socket_manager->send(
-            new FileEncoder(socket, fd, s.st_size),
-            request.keepAlive);
+            new FileEncoder(fd, s.st_size),
+            request.keepAlive,
+            socket);
       }
     }
   } else if (response.type == Response::PIPE) {
@@ -1511,8 +1515,9 @@ bool HttpProxy::process(const Future<Response>& future, const Request& request)
     VLOG(3) << "Starting \"chunked\" streaming";
 
     socket_manager->send(
-        new HttpResponseEncoder(socket, response, request),
-        true);
+        new HttpResponseEncoder(response, request),
+        true,
+        socket);
 
     CHECK_SOME(response.reader);
     http::Pipe::Reader reader = response.reader.get();
@@ -1567,8 +1572,9 @@ void HttpProxy::stream(
 
     // Always persist the connection when streaming is not finished.
     socket_manager->send(
-        new DataEncoder(socket, out.str()),
-        finished ? request->keepAlive : true);
+        new DataEncoder(out.str()),
+        finished ? request->keepAlive : true,
+        socket);
   } else if (chunk.isFailed()) {
     VLOG(1) << "Failed to read from stream: " << chunk.failure();
     // TODO(bmahler): Have to close connection if headers were sent!
@@ -1683,7 +1689,7 @@ void SocketManager::link_connect(
       future.isFailed() &&
       network::openssl::flags().enabled &&
       network::openssl::flags().support_downgrade &&
-      socket.kind() == Socket::SSL;
+      socket.kind() == SocketImpl::Kind::SSL;
 
     Option<Socket> poll_socket = None();
 
@@ -1699,7 +1705,7 @@ void SocketManager::link_connect(
           return;
         }
 
-        Try<Socket> create = Socket::create(Socket::POLL);
+        Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
         if (create.isError()) {
           VLOG(1) << "Failed to link, create socket: " << create.error();
           socket_manager->close(socket);
@@ -1779,7 +1785,7 @@ void SocketManager::link(
     ProcessBase* process,
     const UPID& to,
     const ProcessBase::RemoteConnection remote,
-    const Socket::Kind& kind)
+    const SocketImpl::Kind& kind)
 {
   // TODO(benh): The semantics we want to support for link are such
   // that if there is nobody to link to (local or remote) then an
@@ -1820,9 +1826,9 @@ void SocketManager::link(
         CHECK(sockets.count(s) == 0);
         sockets.emplace(s, socket.get());
 
-        addresses[s] = to.address;
+        addresses.emplace(s, to.address);
 
-        persists[to.address] = s;
+        persists.emplace(to.address, s);
 
         // Initialize 'outgoing' to prevent a race with
         // SocketManager::send() while the socket is not yet connected.
@@ -2031,12 +2037,11 @@ void _send(
 } // namespace internal {
 
 
-void SocketManager::send(Encoder* encoder, bool persist)
+void SocketManager::send(Encoder* encoder, bool persist, const Socket& socket)
 {
   CHECK(encoder != nullptr);
 
   synchronized (mutex) {
-    Socket socket = encoder->socket();
     if (sockets.count(socket) > 0) {
       // Update whether or not this socket should get disposed after
       // there is no more data to send.
@@ -2059,7 +2064,7 @@ void SocketManager::send(Encoder* encoder, bool persist)
   }
 
   if (encoder != nullptr) {
-    internal::send(encoder, encoder->socket());
+    internal::send(encoder, socket);
   }
 }
 
@@ -2079,7 +2084,7 @@ void SocketManager::send(
     }
   }
 
-  send(new HttpResponseEncoder(socket, response, request), persist);
+  send(new HttpResponseEncoder(response, request), persist, socket);
 }
 
 
@@ -2101,7 +2106,7 @@ void SocketManager::send_connect(
       future.isFailed() &&
       network::openssl::flags().enabled &&
       network::openssl::flags().support_downgrade &&
-      socket.kind() == Socket::SSL;
+      socket.kind() == SocketImpl::Kind::SSL;
 
     Option<Socket> poll_socket = None();
 
@@ -2109,7 +2114,7 @@ void SocketManager::send_connect(
     // POLL socket.
     if (attempt_downgrade) {
       synchronized (mutex) {
-        Try<Socket> create = Socket::create(Socket::POLL);
+        Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
         if (create.isError()) {
           VLOG(1) << "Failed to link, create socket: " << create.error();
           socket_manager->close(socket);
@@ -2148,7 +2153,7 @@ void SocketManager::send_connect(
     return;
   }
 
-  Encoder* encoder = new MessageEncoder(socket, message);
+  Encoder* encoder = new MessageEncoder(message);
 
   // Receive and ignore data from this socket. Note that we don't
   // expect to receive anything other than HTTP '202 Accepted'
@@ -2168,7 +2173,7 @@ void SocketManager::send_connect(
 }
 
 
-void SocketManager::send(Message* message, const Socket::Kind& kind)
+void SocketManager::send(Message* message, const SocketImpl::Kind& kind)
 {
   CHECK(message != nullptr);
 
@@ -2193,7 +2198,7 @@ void SocketManager::send(Message* message, const Socket::Kind& kind)
       }
 
       if (outgoing.count(socket.get()) > 0) {
-        outgoing[socket.get()].push(new MessageEncoder(socket.get(), message));
+        outgoing[socket.get()].push(new MessageEncoder(message));
         return;
       } else {
         // Initialize the outgoing queue.
@@ -2218,8 +2223,8 @@ void SocketManager::send(Message* message, const Socket::Kind& kind)
       CHECK(sockets.count(s) == 0);
       sockets.emplace(s, socket.get());
 
-      addresses[s] = address;
-      temps[address] = s;
+      addresses.emplace(s, address);
+      temps.emplace(address, s);
 
       dispose.insert(s);
 
@@ -2242,9 +2247,7 @@ void SocketManager::send(Message* message, const Socket::Kind& kind)
   } else {
     // If we're not connecting and we haven't added the encoder to
     // the 'outgoing' queue then schedule it to be sent.
-    internal::send(
-        new MessageEncoder(socket.get(), message),
-        socket.get());
+    internal::send(new MessageEncoder(message), socket.get());
   }
 }
 
@@ -2283,10 +2286,10 @@ Encoder* SocketManager::next(int s)
           // This is either a temporary socket we created or it's a
           // socket that we were receiving data from and possibly
           // sending HTTP responses back on. Clean up either way.
-          if (addresses.count(s) > 0) {
-            const Address& address = addresses[s];
-            CHECK(temps.count(address) > 0 && temps[address] == s);
-            temps.erase(address);
+          Option<Address> address = addresses.get(s);
+          if (address.isSome()) {
+            CHECK(temps.count(address.get()) > 0 && temps[address.get()] == s);
+            temps.erase(address.get());
             addresses.erase(s);
           }
 
@@ -2354,15 +2357,15 @@ void SocketManager::close(int s)
       }
 
       // Clean up after sockets used for remote communication.
-      if (addresses.count(s) > 0) {
-        const Address& address = addresses[s];
-
+      Option<Address> address = addresses.get(s);
+      if (address.isSome()) {
         // Don't bother invoking `exited` unless socket was persistent.
-        if (persists.count(address) > 0 && persists[address] == s) {
-          persists.erase(address);
-          exited(address); // Generate ExitedEvent(s)!
-        } else if (temps.count(address) > 0 && temps[address] == s) {
-          temps.erase(address);
+        if (persists.count(address.get()) > 0 && persists[address.get()] == s) {
+          persists.erase(address.get());
+          exited(address.get()); // Generate ExitedEvent(s)!
+        } else if (temps.count(address.get()) > 0 &&
+                   temps[address.get()] == s) {
+          temps.erase(address.get());
         }
 
         addresses.erase(s);
@@ -2549,18 +2552,20 @@ void SocketManager::swap_implementing_socket(
     // Update the fd that this address is associated with. Once we've
     // done this we can update the 'temps' and 'persists'
     // data structures using this updated address.
-    addresses[to_fd] = addresses[from_fd];
+    Option<Address> address = addresses.get(from_fd);
+    CHECK_SOME(address);
+    addresses.emplace(to_fd, address.get());
     addresses.erase(from_fd);
 
     // If this address is a persistent or temporary link
     // that matches the original FD.
-    if (persists.count(addresses[to_fd]) > 0 &&
-        persists.at(addresses[to_fd]) == from_fd) {
-      persists[addresses[to_fd]] = to_fd;
+    if (persists.count(address.get()) > 0 &&
+        persists.at(address.get()) == from_fd) {
+      persists[address.get()] = to_fd;
       // No need to erase as we're changing the value, not the key.
-    } else if (temps.count(addresses[to_fd]) > 0 &&
-        temps.at(addresses[to_fd]) == from_fd) {
-      temps[addresses[to_fd]] = to_fd;
+    } else if (temps.count(address.get()) > 0 &&
+               temps.at(address.get()) == from_fd) {
+      temps[address.get()] = to_fd;
       // No need to erase as we're changing the value, not the key.
     }
 

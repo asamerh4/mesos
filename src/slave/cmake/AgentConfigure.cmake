@@ -21,16 +21,20 @@ if (NOT WIN32)
   find_package(Svn REQUIRED)
 endif (NOT WIN32)
 
+set(LOGROTATE_CONTAINER_LOGGER_TARGET logrotate_container_logger
+  CACHE STRING "Library containing the logrotate container logger."
+  )
+
+set(MESOS_LOGROTATE_LOGGER_TARGET mesos-logrotate-logger
+  CACHE STRING "Executable used by the logrotate container logger."
+  )
+
 set(QOS_CONTROLLER_TARGET load_qos_controller
   CACHE STRING "Library containing the load qos controller."
   )
 
 set(RESOURCE_ESTIMATOR_TARGET fixed_resource_estimator
   CACHE STRING "Library containing the fixed resource estimator."
-  )
-
-set(MESOS_LOGROTATE_LOGGER_TARGET mesos-logrotate-logger
-  CACHE STRING "Executable used by the logrotate container logger."
   )
 
 # Define process library dependencies. Tells the process library build targets
@@ -107,13 +111,6 @@ set(
   CACHE STRING "Agent target")
 
 
-# COMPILER CONFIGURATION.
-#########################
-if (APPLE)
-  # GTEST on OSX needs its own tr1 tuple.
-  add_definitions(-DGTEST_USE_OWN_TR1_TUPLE=1 -DGTEST_LANG_CXX11)
-endif (APPLE)
-
 # DEFINE PROCESS AGENT LIBRARY DEPENDENCIES. Tells the process library build
 # tests target download/configure/build all third-party libraries before
 # attempting to build.
@@ -121,7 +118,6 @@ endif (APPLE)
 set(PROCESS_AGENT_DEPENDENCIES
   ${PROCESS_AGENT_DEPENDENCIES}
   ${PROCESS_DEPENDENCIES}
-  ${GMOCK_TARGET}
   )
 
 if (WIN32)

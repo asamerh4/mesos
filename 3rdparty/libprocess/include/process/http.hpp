@@ -30,6 +30,7 @@
 #include <process/future.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
+#include <process/socket.hpp>
 
 #include <stout/error.hpp>
 #include <stout/hashmap.hpp>
@@ -49,12 +50,7 @@ namespace process {
 template <typename T>
 class Future;
 
-namespace network {
-class Socket;
-} // namespace network {
-
 namespace http {
-
 namespace authentication {
 
 class Authenticator;
@@ -451,7 +447,7 @@ struct Request
 
   // For server requests, this contains the address of the client.
   // Note that this may correspond to a proxy or load balancer address.
-  network::Address client;
+  Option<network::Address> client;
 
   // Clients can choose to provide the entire body at once
   // via BODY or can choose to stream the body over to the
@@ -854,6 +850,7 @@ public:
 
 private:
   Connection(const network::Socket& s);
+  friend Future<Connection> connect(const network::Address& address);
   friend Future<Connection> connect(const URL&);
 
   // Forward declaration.
@@ -863,7 +860,68 @@ private:
 };
 
 
+// TODO(benh): Currently we don't support SSL for this version of
+// connect. We should support this, perhaps with an enum or a bool and
+// then update the `connect(URL)` variant to just call this function
+// instead.
+Future<Connection> connect(const network::Address& address);
+
+
 Future<Connection> connect(const URL& url);
+
+
+namespace internal {
+
+Future<Nothing> serve(
+    network::Socket s,
+    std::function<Future<Response>(const Request&)>&& f);
+
+} // namespace internal {
+
+
+// Serves HTTP requests on the specified socket using the specified
+// handler.
+//
+// Returns `Nothing` after serving has completed, either because (1) a
+// failure occured receiving requests or sending responses or (2) the
+// HTTP connection was not persistent (i.e., a 'Connection: close'
+// header existed either on the request or the response) or (3)
+// serving was discarded.
+//
+// Doing a `discard()` on the Future returned from `serve` will
+// discard any current socket receiving and any current socket
+// sending and shutdown the socket in both directions.
+//
+// NOTE: HTTP pipelining is automatically performed. If you don't want
+// pipelining you must explicitly sequence/serialize the requests to
+// wait for previous responses yourself.
+template <typename F>
+Future<Nothing> serve(const network::Socket& s, F&& f)
+{
+  return internal::serve(s, std::function<Future<Response>(const Request&)>(f));
+}
+
+
+// TODO(benh): Eventually we probably want something like a `Server`
+// that will handle accepting new sockets and then calling `serve`. It
+// would also be valuable to introduce shutdown semantics that are
+// better than the current discard semantics on `serve`. For example:
+//
+// class Server
+// {
+//   struct ShutdownOptions
+//   {
+//     // During the grace period, no new connections will
+//     // be accepted. Existing connections will be closed
+//     // when currently received requests have been handled.
+//     // The server will shut down reads on each connection
+//     // to prevent new requests from arriving.
+//     Duration gracePeriod;
+//   };
+//
+//   // Shuts down the server.
+//   Future<Nothing> shutdown(Sever::ShutdownOptions options);
+// };
 
 
 // Create a http Request from the specified parameters.

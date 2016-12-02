@@ -30,8 +30,8 @@ using process::Message;
 using process::MessageEncoder;
 using process::UPID;
 
-using process::network::Address;
-using process::network::Socket;
+using process::network::inet::Address;
+using process::network::inet::Socket;
 
 
 static const int LISTEN_BACKLOG = 10;
@@ -120,7 +120,7 @@ int main(int argc, char** argv)
   }
 
   // Bind to some random port.
-  Try<Address> bind = __s__->bind(Address::LOCALHOST_ANY());
+  Try<Address> bind = __s__->bind(Address::ANY_ANY());
   if (bind.isError()) {
     EXIT(EXIT_FAILURE) << "Failed to bind: " << bind.error();
   }

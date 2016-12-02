@@ -648,7 +648,9 @@ void Slave::initialize()
       &Slave::ping,
       &PingSlaveMessage::connected);
 
-
+  // Setup the '/api/v1' handler for streaming requests.
+  RouteOptions options;
+  options.requestStreaming = true;
   route("/api/v1",
         // TODO(benh): Is this authentication realm sufficient or do
         // we need some kind of hybrid if we expect both executors
@@ -659,7 +661,8 @@ void Slave::initialize()
                const Option<string>& principal) {
           Http::log(request);
           return http.api(request, principal);
-        });
+        },
+        options);
 
   route("/api/v1/executor",
         Http::EXECUTOR_HELP(),
@@ -6953,16 +6956,6 @@ map<string, string> executorEnvironment(
       environment[key] = value.as<JSON::String>().value;
     }
   }
-
-#ifndef __WINDOWS__
-  // Include a default $PATH if there isn't.
-  // On Windows, we ensure the path is set by checking the system environment.
-  // See `createProcessEnvironment` in `process/windows/subprocess.hpp`.
-  if (environment.count("PATH") == 0) {
-    environment["PATH"] =
-      "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-  }
-#endif // __WINDOWS__
 
   // Set LIBPROCESS_PORT so that we bind to a random free port (since
   // this might have been set via --port option). We do this before

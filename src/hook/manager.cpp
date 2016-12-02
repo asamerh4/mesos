@@ -208,84 +208,47 @@ Environment HookManager::slaveExecutorEnvironmentDecorator(
 }
 
 
-Future<map<string, string>>
-  HookManager::slavePreLaunchDockerEnvironmentDecorator(
+Future<DockerTaskExecutorPrepareInfo>
+  HookManager::slavePreLaunchDockerTaskExecutorDecorator(
       const Option<TaskInfo>& taskInfo,
       const ExecutorInfo& executorInfo,
       const string& containerName,
-      const string& sandboxDirectory,
-      const string& mappedDirectory,
+      const string& containerWorkDirectory,
+      const string& mappedSandboxDirectory,
       const Option<map<string, string>>& env)
 {
   // We execute these hooks according to their ordering so any conflicting
-  // environment variables can be deterministically resolved
+  // `DockerTaskExecutorPrepareInfo` can be deterministically resolved
   // (the last hook takes priority).
-  list<Future<Option<Environment>>> futures;
+  list<Future<Option<DockerTaskExecutorPrepareInfo>>> futures;
 
   foreach (const string& name, availableHooks.keys()) {
     Hook* hook = availableHooks[name];
 
     // Chain together each hook.
     futures.push_back(
-        hook->slavePreLaunchDockerEnvironmentDecorator(
+        hook->slavePreLaunchDockerTaskExecutorDecorator(
             taskInfo,
             executorInfo,
             containerName,
-            sandboxDirectory,
-            mappedDirectory,
+            containerWorkDirectory,
+            mappedSandboxDirectory,
             env));
   }
 
   return collect(futures)
-    .then([](const list<Option<Environment>>& results)
-        -> Future<map<string, string>> {
-      // Combine all the Environments.
-      map<string, string> environment;
+    .then([](const list<Option<DockerTaskExecutorPrepareInfo>>& results)
+        -> Future<DockerTaskExecutorPrepareInfo> {
+      DockerTaskExecutorPrepareInfo taskExecutorDecoratorInfo;
 
-      foreach (const Option<Environment>& result, results) {
-        if (result.isNone()) {
-          continue;
-        }
-
-        foreach (const Environment::Variable& variable, result->variables()) {
-          environment[variable.name()] = variable.value();
+      foreach (const Option<DockerTaskExecutorPrepareInfo>& result, results) {
+        if (result.isSome()) {
+          taskExecutorDecoratorInfo.MergeFrom(result.get());
         }
       }
 
-      return environment;
+      return taskExecutorDecoratorInfo;
     });
-}
-
-
-void HookManager::slavePreLaunchDockerHook(
-    const ContainerInfo& containerInfo,
-    const CommandInfo& commandInfo,
-    const Option<TaskInfo>& taskInfo,
-    const ExecutorInfo& executorInfo,
-    const string& containerName,
-    const string& sandboxDirectory,
-    const string& mappedDirectory,
-    const Option<Resources>& resources,
-    const Option<map<string, string>>& env)
-{
-  foreach (const string& name, availableHooks.keys()) {
-    Hook* hook = availableHooks[name];
-    Try<Nothing> result =
-      hook->slavePreLaunchDockerHook(
-          containerInfo,
-          commandInfo,
-          taskInfo,
-          executorInfo,
-          containerName,
-          sandboxDirectory,
-          mappedDirectory,
-          resources,
-          env);
-    if (result.isError()) {
-      LOG(WARNING) << "Agent pre launch docker hook failed for module '"
-                   << name << "': " << result.error();
-    }
-  }
 }
 
 

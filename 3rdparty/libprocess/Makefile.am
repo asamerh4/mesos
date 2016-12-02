@@ -224,6 +224,7 @@ libprocess_tests_SOURCES =					\
   src/tests/http_tests.cpp					\
   src/tests/io_tests.cpp					\
   src/tests/limiter_tests.cpp					\
+  src/tests/loop_tests.cpp					\
   src/tests/main.cpp						\
   src/tests/metrics_tests.cpp					\
   src/tests/mutex_tests.cpp					\
@@ -232,6 +233,7 @@ libprocess_tests_SOURCES =					\
   src/tests/profiler_tests.cpp					\
   src/tests/queue_tests.cpp					\
   src/tests/reap_tests.cpp					\
+  src/tests/socket_tests.cpp					\
   src/tests/sequence_tests.cpp					\
   src/tests/shared_tests.cpp					\
   src/tests/statistics_tests.cpp				\

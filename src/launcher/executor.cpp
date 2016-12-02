@@ -259,12 +259,6 @@ public:
 protected:
   virtual void initialize()
   {
-    install<TaskHealthStatus>(
-        &CommandExecutor::taskHealthUpdated,
-        &TaskHealthStatus::task_id,
-        &TaskHealthStatus::healthy,
-        &TaskHealthStatus::kill_task);
-
     Option<string> value = os::getenv("MESOS_HTTP_COMMAND_EXECUTOR");
 
     // We initialize the library here to ensure that callbacks are only invoked
@@ -297,25 +291,22 @@ protected:
     }
   }
 
-  void taskHealthUpdated(
-      const TaskID& _taskId,
-      const bool healthy,
-      const bool initiateTaskKill)
+  void taskHealthUpdated(const TaskHealthStatus& healthStatus)
   {
     // This check prevents us from sending `TASK_RUNNING` updates
     // after the task has been transitioned to `TASK_KILLING`.
-    if (killed) {
+    if (killed || terminated) {
       return;
     }
 
     cout << "Received task health update, healthy: "
-         << stringify(healthy) << endl;
+         << stringify(healthStatus.healthy()) << endl;
 
-    update(_taskId, TASK_RUNNING, healthy);
+    update(healthStatus.task_id(), TASK_RUNNING, healthStatus.healthy());
 
-    if (initiateTaskKill) {
+    if (healthStatus.kill_task()) {
       killedByHealthCheck = true;
-      kill(_taskId);
+      kill(healthStatus.task_id());
     }
   }
 
@@ -454,7 +445,7 @@ protected:
         health::HealthChecker::create(
             task->health_check(),
             launcherDir,
-            self(),
+            defer(self(), &Self::taskHealthUpdated, lambda::_1),
             task->task_id(),
             pid,
             namespaces);
@@ -465,14 +456,6 @@ protected:
              << _checker.error() << endl;
       } else {
         checker = _checker.get();
-
-        checker->healthCheck()
-          .onAny([](const Future<Nothing>& future) {
-            // Only possible to be a failure.
-            if (future.isFailed()) {
-              cerr << "Health check failed" << endl;
-            }
-          });
       }
     }
 
@@ -602,6 +585,11 @@ private:
         update(taskId.get(), TASK_KILLING);
       }
 
+      // Stop health checking the task.
+      if (checker.get() != nullptr) {
+        checker->stop();
+      }
+
       // Now perform signal escalation to begin killing the task.
       CHECK_GT(pid, 0);
 
@@ -636,6 +624,11 @@ private:
   void reaped(pid_t pid, const Future<Option<int>>& status_)
   {
     terminated = true;
+
+    // Stop health checking the task.
+    if (checker.get() != nullptr) {
+      checker->stop();
+    }
 
     TaskState taskState;
     string message;

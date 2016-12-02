@@ -24,7 +24,6 @@
 
 #include <mesos/mesos.hpp>
 
-#include <mesos/slave/container_logger.hpp>
 #include <mesos/slave/isolator.hpp>
 
 #include <process/future.hpp>
@@ -58,6 +57,7 @@ using namespace process;
 using mesos::internal::master::Master;
 
 using mesos::internal::slave::Fetcher;
+using mesos::internal::slave::FetcherProcess;
 using mesos::internal::slave::Launcher;
 using mesos::internal::slave::MesosContainerizer;
 using mesos::internal::slave::MesosContainerizerProcess;
@@ -75,7 +75,6 @@ using mesos::internal::slave::state::SlaveState;
 using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
-using mesos::slave::ContainerLogger;
 using mesos::slave::ContainerState;
 using mesos::slave::ContainerTermination;
 using mesos::slave::Isolator;
@@ -287,26 +286,15 @@ public:
 
     Owned<Launcher> launcher(launcher_.get());
 
-    // Create and initialize a new container logger.
-    Try<ContainerLogger*> logger_ =
-      ContainerLogger::create(flags.container_logger);
-
-    if (logger_.isError()) {
-      return Error("Failed to create container logger: " + logger_.error());
-    }
-
-    Owned<ContainerLogger> logger(logger_.get());
-
     Try<Owned<Provisioner>> provisioner = Provisioner::create(flags);
     if (provisioner.isError()) {
       return Error("Failed to create provisioner: " + provisioner.error());
     }
 
-    return new MesosContainerizer(
+    return MesosContainerizer::create(
         flags,
-        false,
+        true,
         fetcher,
-        std::move(logger),
         std::move(launcher),
         provisioner->share(),
         isolators);
@@ -717,50 +705,6 @@ TEST_F(MesosContainerizerExecuteTest, ROOT_SandboxFileOwnership)
 class MesosContainerizerDestroyTest : public MesosTest {};
 
 
-class MockMesosContainerizerProcess : public MesosContainerizerProcess
-{
-public:
-  MockMesosContainerizerProcess(
-      const slave::Flags& flags,
-      bool local,
-      Fetcher* fetcher,
-      const Owned<ContainerLogger>& logger,
-      const Owned<Launcher>& launcher,
-      const Shared<Provisioner>& provisioner,
-      const vector<Owned<Isolator>>& isolators)
-    : MesosContainerizerProcess(
-          flags,
-          local,
-          fetcher,
-          logger,
-          launcher,
-          provisioner,
-          isolators)
-  {
-    // NOTE: See TestContainerizer::setup for why we use
-    // 'EXPECT_CALL' and 'WillRepeatedly' here instead of
-    // 'ON_CALL' and 'WillByDefault'.
-    EXPECT_CALL(*this, exec(_, _))
-      .WillRepeatedly(Invoke(this, &MockMesosContainerizerProcess::_exec));
-  }
-
-  MOCK_METHOD2(
-      exec,
-      Future<bool>(
-          const ContainerID& containerId,
-          int pipeWrite));
-
-  Future<bool> _exec(
-      const ContainerID& containerId,
-      int pipeWrite)
-  {
-    return MesosContainerizerProcess::exec(
-        containerId,
-        pipeWrite);
-  }
-};
-
-
 // Destroying a mesos containerizer while it is fetching should
 // complete without waiting for the fetching to finish.
 TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
@@ -773,36 +717,32 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
 
   Owned<Launcher> launcher(launcher_.get());
 
-  Fetcher fetcher;
-
-  Try<ContainerLogger*> logger_ =
-    ContainerLogger::create(flags.container_logger);
-
-  ASSERT_SOME(logger_);
-
-  Owned<ContainerLogger> logger(logger_.get());
+  MockFetcherProcess* mockFetcherProcess = new MockFetcherProcess();
+  Owned<FetcherProcess> fetcherProcess(mockFetcherProcess);
+  Fetcher fetcher(fetcherProcess);
 
   Try<Owned<Provisioner>> provisioner = Provisioner::create(flags);
   ASSERT_SOME(provisioner);
 
-  MockMesosContainerizerProcess* process = new MockMesosContainerizerProcess(
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
       flags,
       true,
       &fetcher,
-      std::move(logger),
-      std::move(launcher),
+      launcher,
       provisioner->share(),
       vector<Owned<Isolator>>());
 
-  Future<Nothing> exec;
-  Promise<bool> promise;
+  ASSERT_SOME(_containerizer);
+
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
+
+  Future<Nothing> fetch;
+  Promise<Nothing> promise;
 
   // Letting exec hang to simulate a long fetch.
-  EXPECT_CALL(*process, exec(_, _))
-    .WillOnce(DoAll(FutureSatisfy(&exec),
+  EXPECT_CALL(*mockFetcherProcess, _fetch(_, _, _, _, _, _))
+    .WillOnce(DoAll(FutureSatisfy(&fetch),
                     Return(promise.future())));
-
-  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -811,7 +751,7 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
 
-  containerizer.launch(
+  containerizer->launch(
       containerId,
       taskInfo,
       createExecutorInfo("executor", "exit 0"),
@@ -822,11 +762,11 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
       false);
 
   Future<Option<ContainerTermination>> wait =
-    containerizer.wait(containerId);
+    containerizer->wait(containerId);
 
-  AWAIT_READY(exec);
+  AWAIT_READY(fetch);
 
-  containerizer.destroy(containerId);
+  containerizer->destroy(containerId);
 
   // The container should still exit even if fetch didn't complete.
   AWAIT_READY(wait);
@@ -858,26 +798,20 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
 
   Fetcher fetcher;
 
-  Try<ContainerLogger*> logger_ =
-    ContainerLogger::create(flags.container_logger);
-
-  ASSERT_SOME(logger_);
-
-  Owned<ContainerLogger> logger(logger_.get());
-
   Try<Owned<Provisioner>> provisioner = Provisioner::create(flags);
   ASSERT_SOME(provisioner);
 
-  MockMesosContainerizerProcess* process = new MockMesosContainerizerProcess(
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
       flags,
       true,
       &fetcher,
-      std::move(logger),
-      std::move(launcher),
+      launcher,
       provisioner->share(),
       {Owned<Isolator>(isolator)});
 
-  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+  ASSERT_SOME(_containerizer);
+
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -886,7 +820,7 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
 
-  containerizer.launch(
+  containerizer->launch(
       containerId,
       taskInfo,
       createExecutorInfo("executor", "exit 0"),
@@ -897,11 +831,11 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
       false);
 
   Future<Option<ContainerTermination>> wait =
-    containerizer.wait(containerId);
+    containerizer->wait(containerId);
 
   AWAIT_READY(prepare);
 
-  containerizer.destroy(containerId);
+  containerizer->destroy(containerId);
 
   // The container should not exit until prepare is complete.
   ASSERT_TRUE(wait.isPending());
@@ -990,21 +924,15 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
 
   Fetcher fetcher;
 
-  Try<ContainerLogger*> logger =
-    ContainerLogger::create(flags.container_logger);
-
-  ASSERT_SOME(logger);
-
-  MesosContainerizerProcess* process = new MesosContainerizerProcess(
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
       flags,
       true,
       &fetcher,
-      Owned<ContainerLogger>(logger.get()),
-      std::move(launcher),
+      launcher,
       Shared<Provisioner>(provisioner),
       vector<Owned<Isolator>>());
 
-  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -1030,7 +958,7 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
   executorInfo.mutable_container()->CopyFrom(containerInfo);
 
-  Future<bool> launch = containerizer.launch(
+  Future<bool> launch = containerizer->launch(
       containerId,
       taskInfo,
       executorInfo,
@@ -1044,10 +972,9 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
 
   AWAIT_FAILED(launch);
 
-  Future<Option<ContainerTermination>> wait =
-    containerizer.wait(containerId);
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
-  containerizer.destroy(containerId);
+  containerizer->destroy(containerId);
 
   AWAIT_READY(wait);
   ASSERT_SOME(wait.get());
@@ -1085,21 +1012,15 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
 
   Fetcher fetcher;
 
-  Try<ContainerLogger*> logger =
-    ContainerLogger::create(flags.container_logger);
-
-  ASSERT_SOME(logger);
-
-  MesosContainerizerProcess* process = new MesosContainerizerProcess(
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
       flags,
       true,
       &fetcher,
-      Owned<ContainerLogger>(logger.get()),
-      std::move(launcher),
+      launcher,
       Shared<Provisioner>(provisioner),
       vector<Owned<Isolator>>());
 
-  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -1125,7 +1046,7 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
   executorInfo.mutable_container()->CopyFrom(containerInfo);
 
-  Future<bool> launch = containerizer.launch(
+  Future<bool> launch = containerizer->launch(
       containerId,
       taskInfo,
       executorInfo,
@@ -1135,12 +1056,11 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
       map<string, string>(),
       false);
 
-  Future<Option<ContainerTermination>> wait =
-    containerizer.wait(containerId);
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
   AWAIT_READY(provision);
 
-  containerizer.destroy(containerId);
+  containerizer->destroy(containerId);
 
   ASSERT_TRUE(wait.isPending());
   promise.set(ProvisionInfo{"rootfs", None()});
@@ -1187,21 +1107,15 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
 
   Fetcher fetcher;
 
-  Try<ContainerLogger*> logger =
-    ContainerLogger::create(flags.container_logger);
-
-  ASSERT_SOME(logger);
-
-  MesosContainerizerProcess* process = new MesosContainerizerProcess(
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
       flags,
       true,
       &fetcher,
-      Owned<ContainerLogger>(logger.get()),
-      std::move(launcher),
+      launcher,
       Shared<Provisioner>(provisioner),
       {Owned<Isolator>(isolator)});
 
-  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -1227,7 +1141,7 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
   executorInfo.mutable_container()->CopyFrom(containerInfo);
 
-  Future<bool> launch = containerizer.launch(
+  Future<bool> launch = containerizer->launch(
       containerId,
       taskInfo,
       executorInfo,
@@ -1237,12 +1151,11 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
       map<string, string>(),
       false);
 
-  Future<Option<ContainerTermination>> wait =
-    containerizer.wait(containerId);
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
   AWAIT_READY(provision);
 
-  containerizer.destroy(containerId);
+  containerizer->destroy(containerId);
 
   ASSERT_TRUE(wait.isPending());
   promise.set(ProvisionInfo{"rootfs", None()});
@@ -1284,24 +1197,18 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
 
   Fetcher fetcher;
 
-  Try<ContainerLogger*> logger =
-    ContainerLogger::create(flags.container_logger);
-
-  ASSERT_SOME(logger);
-
   Try<Owned<Provisioner>> provisioner = Provisioner::create(flags);
   ASSERT_SOME(provisioner);
 
-  MesosContainerizerProcess* process = new MesosContainerizerProcess(
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
       flags,
       true,
       &fetcher,
-      Owned<ContainerLogger>(logger.get()),
-      std::move(launcher),
+      launcher,
       provisioner->share(),
       vector<Owned<Isolator>>());
 
-  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -1316,7 +1223,7 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
     .WillOnce(DoAll(InvokeDestroyAndWait(testLauncher),
                     Return(Failure("Destroy failure"))));
 
-  Future<bool> launch = containerizer.launch(
+  Future<bool> launch = containerizer->launch(
       containerId,
       taskInfo,
       createExecutorInfo("executor", "sleep 1000"),
@@ -1328,10 +1235,9 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
 
   AWAIT_READY(launch);
 
-  Future<Option<ContainerTermination>> wait =
-    containerizer.wait(containerId);
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
-  containerizer.destroy(containerId);
+  containerizer->destroy(containerId);
 
   // The container destroy should fail.
   AWAIT_FAILED(wait);

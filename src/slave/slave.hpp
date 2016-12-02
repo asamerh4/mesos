@@ -38,6 +38,7 @@
 
 #include <mesos/module/authenticatee.hpp>
 
+#include <mesos/slave/containerizer.hpp>
 #include <mesos/slave/qos_controller.hpp>
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -63,6 +64,7 @@
 
 #include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
+#include "common/recordio.hpp"
 
 #include "files/files.hpp"
 
@@ -523,6 +525,17 @@ private:
   private:
     JSON::Object _flags() const;
 
+    // Continuation for `/api` endpoint that handles streaming and non-streaming
+    // requests. In case of a streaming request, `call` would be the first
+    // record and additional records can be read using the `reader`. For
+    // non-streaming requests, `reader` would be set to `None()`.
+    process::Future<process::http::Response> _api(
+        const agent::Call& call,
+        Option<process::Owned<recordio::Reader<agent::Call>>>&& reader,
+        ContentType contentTye,
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
+
     // Make continuation for `statistics` `static` as it might
     // execute when the invoking `Http` is already destructed.
     process::http::Response _statistics(
@@ -543,61 +556,61 @@ private:
 
     process::Future<process::http::Response> getFlags(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> getHealth(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> getVersion(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> getMetrics(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> getLoggingLevel(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> setLoggingLevel(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> listFiles(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> getContainers(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> readFile(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> getFrameworks(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     mesos::agent::Response::GetFrameworks _getFrameworks(
         const process::Owned<ObjectApprover>& frameworksApprover) const;
 
     process::Future<process::http::Response> getExecutors(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     mesos::agent::Response::GetExecutors _getExecutors(
         const process::Owned<ObjectApprover>& frameworksApprover,
@@ -605,8 +618,8 @@ private:
 
     process::Future<process::http::Response> getTasks(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     mesos::agent::Response::GetTasks _getTasks(
         const process::Owned<ObjectApprover>& frameworksApprover,
@@ -615,8 +628,8 @@ private:
 
     process::Future<process::http::Response> getState(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     mesos::agent::Response::GetState _getState(
         const process::Owned<ObjectApprover>& frameworksApprover,
@@ -625,18 +638,45 @@ private:
 
     process::Future<process::http::Response> launchNestedContainer(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> _launchNestedContainer(
+        const ContainerID& containerId,
+        const CommandInfo& commandInfo,
+        const Option<ContainerInfo>& containerInfo,
+        const Option<mesos::slave::ContainerClass>& containerClass,
+        ContentType acceptType,
+        const Owned<ObjectApprover>& approver) const;
 
     process::Future<process::http::Response> waitNestedContainer(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> killNestedContainer(
         const mesos::agent::Call& call,
-        const Option<std::string>& principal,
-        ContentType contentType) const;
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> launchNestedContainerSession(
+        const mesos::agent::Call& call,
+        ContentType contentType,
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> attachContainerInput(
+        const mesos::agent::Call& call,
+        process::Owned<recordio::Reader<agent::Call>>&& decoder,
+        ContentType contentType,
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> attachContainerOutput(
+        const mesos::agent::Call& call,
+        ContentType contentType,
+        ContentType acceptType,
+        const Option<std::string>& principal) const;
 
     Slave* slave;
 

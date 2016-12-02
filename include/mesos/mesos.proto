@@ -245,9 +245,19 @@ message FrameworkInfo {
   // the cost of a (usually small) increase in disk I/O.
   optional bool checkpoint = 5 [default = false];
 
-  // Used to group frameworks for allocation decisions, depending on
-  // the allocation policy being used.
-  optional string role = 6 [default = "*"];
+  // Roles are the entities to which allocations are made.
+  // The framework must have at least one role in order to
+  // be offered resources. Note that `role` is deprecated
+  // in favor of `roles` and only one of these fields must
+  // be used. Since we cannot distinguish between empty
+  // `roles` and the default unset `role`, we require that
+  // frameworks set the `MULTI_ROLE` capability if
+  // setting the `roles` field.
+  //
+  // NOTE: The implmentation for supporting `roles`
+  // is not complete, DO NOT USE the `roles` field.
+  optional string role = 6 [default = "*", deprecated=true];
+  repeated string roles = 12; // EXPERIMENTAL.
 
   // Used to indicate the current host from which the scheduler is
   // registered in the Mesos Web UI. If set to an empty string Mesos
@@ -318,6 +328,18 @@ message FrameworkInfo {
       // Mesos when the agent reregisters (unless the master has
       // failed over).
       PARTITION_AWARE = 5;
+
+      // This expresses the ability for the framework to be
+      // "multi-tenant" via using the newly introduced `roles`
+      // field, and examining `Offer.allocation_info` to determine
+      // which role the offers are being made to. We also
+      // expect that "single-tenant" schedulers eventually
+      // provide this and move away from the deprecated
+      // `role` field.
+      //
+      // NOTE: The implementation for supporting multiple
+      // roles is not complete, DO NOT USE THIS.
+      MULTI_ROLE = 6; // EXPERIMENTAL.
     }
 
     // Enum fields should be optional, see: MESOS-4997.
@@ -399,19 +421,24 @@ message HealthCheck {
   // allows doing something similar to the HTTP strategy but
   // encapsulates all the details in a single string field.
 
-  // Amount of time to wait until starting the health checks.
+  // Amount of time to wait until starting health checking the task.
   optional double delay_seconds = 2 [default = 15.0];
 
   // Interval between health checks.
   optional double interval_seconds = 3 [default = 10.0];
 
-  // Amount of time to wait for the health check to complete.
+  // Amount of time to wait for the health check to complete. After this
+  // timeout, the health check is aborted and treated as a failure.
   optional double timeout_seconds = 4 [default = 20.0];
 
-  // Number of consecutive failures until signaling kill task.
+  // Number of consecutive failures until the task is killed by the executor.
   optional uint32 consecutive_failures = 5 [default = 3];
 
-  // Amount of time to allow failed health checks since launch.
+  // Amount of time after the task is launched during which health check
+  // failures are ignored. Once the a check succeeds for the first time,
+  // the grace period does not apply anymore. Note that it includes
+  // `delay_seconds`, i.e., setting `grace_period_seconds` < `delay_seconds`
+  // has no effect.
   optional double grace_period_seconds = 6 [default = 10.0];
 
   // TODO(alexr): Add an optional `KillPolicy` that should be used
@@ -761,6 +788,24 @@ message Resource {
   // that the resource is unreserved. Otherwise, the resource will only
   // be offered to frameworks that belong to this role.
   optional string role = 6 [default = "*"];
+
+  // This was initially introduced to support MULTI_ROLE capable
+  // frameworks. Frameworks that are not MULTI_ROLE capable can
+  // continue to assume that the offered resources are allocated
+  // to their role.
+  //
+  // NOTE: Implementation of this is in-progress, DO NOT USE!
+  message AllocationInfo {
+    // If set, this resource is allocated to a role. Note that in the
+    // future, this may be unset and the scheduler may be responsible
+    // for allocating to one of its roles.
+    optional string role = 1;
+
+    // In the future, we may add additional fields here, e.g. priority
+    // tier, type of allocation (quota / fair share).
+  }
+
+  optional AllocationInfo allocation_info = 11;
 
   message ReservationInfo {
     // Describes a dynamic reservation. A dynamic reservation is

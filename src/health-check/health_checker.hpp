@@ -30,6 +30,8 @@
 #include <process/protobuf.hpp>
 #include <process/time.hpp>
 
+#include <stout/duration.hpp>
+#include <stout/lambda.hpp>
 #include <stout/nothing.hpp>
 
 #include "messages/messages.hpp"
@@ -45,30 +47,37 @@ class HealthChecker
 {
 public:
   /**
-   * Attempts to create a `HealthChecker` object.
+   * Attempts to create a `HealthChecker` object. In case of success, health
+   * checking starts immediately after initialization.
    *
    * @param check The protobuf message definition of health check.
-   * @param executor The executor UPID to which health check results will be
-   *     reported.
    * @param launcherDir A directory where Mesos helper binaries are located.
+   * @param callback A callback HealthChecker uses to send health status
+   *     updates to its owner (usually an executor).
    * @param taskID The TaskID of the target task.
    * @param taskPid The target task's pid used to enter the specified
    *     namespaces.
    * @param namespaces The namespaces to enter prior performing a single health
    *     check.
    * @return A `HealthChecker` object or an error if `create` fails.
+   *
+   * @todo A better approach would be to return a stream of updates, e.g.,
+   * `process::Stream<TaskHealthStatus>` rather than invoking a callback.
    */
   static Try<process::Owned<HealthChecker>> create(
       const HealthCheck& check,
       const std::string& launcherDir,
-      const process::UPID& executor,
+      const lambda::function<void(const TaskHealthStatus&)>& callback,
       const TaskID& taskID,
       Option<pid_t> taskPid,
       const std::vector<std::string>& namespaces);
 
   ~HealthChecker();
 
-  process::Future<Nothing> healthCheck();
+  /**
+   * Immediately stops health checking. Any in-flight health checks are dropped.
+   */
+  void stop();
 
 private:
   explicit HealthChecker(process::Owned<HealthCheckerProcess> process);
@@ -83,54 +92,61 @@ public:
   HealthCheckerProcess(
       const HealthCheck& _check,
       const std::string& _launcherDir,
-      const process::UPID& _executor,
+      const lambda::function<void(const TaskHealthStatus&)>& _callback,
       const TaskID& _taskID,
       Option<pid_t> _taskPid,
       const std::vector<std::string>& _namespaces);
 
   virtual ~HealthCheckerProcess() {}
 
-  process::Future<Nothing> healthCheck();
+protected:
+  virtual void initialize() override;
 
 private:
   void failure(const std::string& message);
   void success();
 
-  void _healthCheck();
+  void performSingleCheck();
+  void processCheckResult(const process::Future<Nothing>& future);
 
-  void __healthCheck(const process::Future<Nothing>& future);
+  process::Future<Nothing> commandHealthCheck();
 
-  process::Future<Nothing> _commandHealthCheck();
+  process::Future<Nothing> httpHealthCheck();
 
-  process::Future<Nothing> _httpHealthCheck();
-
-  process::Future<Nothing> __httpHealthCheck(
+  process::Future<Nothing> _httpHealthCheck(
       const std::tuple<
           process::Future<Option<int>>,
           process::Future<std::string>,
           process::Future<std::string>>& t);
 
-  process::Future<Nothing> _tcpHealthCheck();
+  process::Future<Nothing> tcpHealthCheck();
 
-  process::Future<Nothing> __tcpHealthCheck(
+  process::Future<Nothing> _tcpHealthCheck(
       const std::tuple<
           process::Future<Option<int>>,
           process::Future<std::string>,
           process::Future<std::string>>& t);
 
-  void reschedule();
+  void scheduleNext(const Duration& duration);
 
-  process::Promise<Nothing> promise;
   HealthCheck check;
-  std::string launcherDir;
-  bool initializing;
-  process::UPID executor;
-  TaskID taskID;
-  Option<pid_t> taskPid;
-  std::vector<std::string> namespaces;
+  Duration checkDelay;
+  Duration checkInterval;
+  Duration checkGracePeriod;
+  Duration checkTimeout;
+
+  // Contains a binary for TCP health checks.
+  const std::string launcherDir;
+
+  const lambda::function<void(const TaskHealthStatus&)> healthUpdateCallback;
+  const TaskID taskID;
+  const Option<pid_t> taskPid;
+  const std::vector<std::string> namespaces;
   Option<lambda::function<pid_t(const lambda::function<int()>&)>> clone;
+
   uint32_t consecutiveFailures;
   process::Time startTime;
+  bool initializing;
 };
 
 

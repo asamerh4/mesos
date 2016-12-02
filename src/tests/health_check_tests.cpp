@@ -643,8 +643,7 @@ TEST_F(HealthCheckTest, HealthyTaskNonShell)
 
 
 // This test creates a task whose health flaps, and verifies that the
-// health status updates are sent to the framework and reflected in the
-// state endpoint of both the master and the agent.
+// health status updates are sent to the framework scheduler.
 TEST_F(HealthCheckTest, HealthStatusChange)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -712,125 +711,13 @@ TEST_F(HealthCheckTest, HealthStatusChange)
   EXPECT_EQ(TASK_RUNNING, statusHealthy.get().state());
   EXPECT_TRUE(statusHealthy.get().healthy());
 
-  // Verify that task health is exposed in the master's state endpoint.
-  {
-    Future<http::Response> response = http::get(
-        master.get()->pid,
-        "state",
-        None(),
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
-
-    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
-    ASSERT_SOME(parse);
-
-    Result<JSON::Value> find = parse.get().find<JSON::Value>(
-        "frameworks[0].tasks[0].statuses[0].healthy");
-    EXPECT_SOME_TRUE(find);
-  }
-
-  // Verify that task health is exposed in the agent's state endpoint.
-  {
-    Future<http::Response> response = http::get(
-        agent.get()->pid,
-        "state",
-        None(),
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
-
-    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
-    ASSERT_SOME(parse);
-
-    Result<JSON::Value> find = parse.get().find<JSON::Value>(
-        "frameworks[0].executors[0].tasks[0].statuses[0].healthy");
-    EXPECT_SOME_TRUE(find);
-  }
-
   AWAIT_READY(statusUnhealthy);
   EXPECT_EQ(TASK_RUNNING, statusUnhealthy.get().state());
   EXPECT_FALSE(statusUnhealthy.get().healthy());
 
-  // Verify that the task health change is reflected in the master's
-  // state endpoint.
-  {
-    Future<http::Response> response = http::get(
-        master.get()->pid,
-        "state",
-        None(),
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
-
-    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
-    ASSERT_SOME(parse);
-
-    Result<JSON::Value> find = parse.get().find<JSON::Value>(
-        "frameworks[0].tasks[0].statuses[0].healthy");
-    EXPECT_SOME_FALSE(find);
-  }
-
-  // Verify that the task health change is reflected in the agent's
-  // state endpoint.
-  {
-    Future<http::Response> response = http::get(
-        agent.get()->pid,
-        "state",
-        None(),
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
-
-    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
-    ASSERT_SOME(parse);
-
-    Result<JSON::Value> find = parse.get().find<JSON::Value>(
-        "frameworks[0].executors[0].tasks[0].statuses[0].healthy");
-    EXPECT_SOME_FALSE(find);
-  }
-
   AWAIT_READY(statusHealthyAgain);
   EXPECT_EQ(TASK_RUNNING, statusHealthyAgain.get().state());
   EXPECT_TRUE(statusHealthyAgain.get().healthy());
-
-  // Verify through master's state endpoint that the task is back to a
-  // healthy state.
-  {
-    Future<http::Response> response = http::get(
-        master.get()->pid,
-        "state",
-        None(),
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
-
-    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
-    ASSERT_SOME(parse);
-
-    Result<JSON::Value> find = parse.get().find<JSON::Value>(
-        "frameworks[0].tasks[0].statuses[0].healthy");
-    EXPECT_SOME_TRUE(find);
-  }
-
-  // Verify through agent's state endpoint that the task is back to a
-  // healthy state.
-  {
-    Future<http::Response> response = http::get(
-        agent.get()->pid,
-        "state",
-        None(),
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
-
-    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
-    ASSERT_SOME(parse);
-
-    Result<JSON::Value> find = parse.get().find<JSON::Value>(
-        "frameworks[0].executors[0].tasks[0].statuses[0].healthy");
-    EXPECT_SOME_TRUE(find);
-  }
 
   driver.stop();
   driver.join();
@@ -839,7 +726,7 @@ TEST_F(HealthCheckTest, HealthStatusChange)
 
 // This test creates a task that uses the Docker executor and whose
 // health flaps. It then verifies that the health status updates are
-// sent to the scheduler.
+// sent to the framework scheduler.
 TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
 {
   Shared<Docker> docker(new MockDocker(
@@ -901,8 +788,8 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
   dockerInfo.set_image("alpine");
   containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
-  // Create a temporary file in host and then we could this file to make sure
-  // the health check command is run in docker container.
+  // Create a temporary file in host and then we could this file to
+  // make sure the health check command is run in docker container.
   string tmpPath = path::join(os::getcwd(), "foobar");
   ASSERT_SOME(os::write(tmpPath, "bar"));
 
@@ -916,11 +803,12 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
   //
   // Case 1:
   //   - Remove the temporary file.
-  string alt = "rm " + tmpPath + " || (mkdir -p " + os::getcwd() +
-               " && echo foo >" + tmpPath + " && exit 1)";
+  const string healthCheckCmd =
+    "rm " + tmpPath + " || "
+    "(mkdir -p " + os::getcwd() + " && echo foo >" + tmpPath + " && exit 1)";
 
   vector<TaskInfo> tasks = populateTasks(
-      "sleep 120", alt, offers.get()[0], 0, 3, None(), containerInfo);
+      "sleep 60", healthCheckCmd, offers.get()[0], 0, 3, None(), containerInfo);
 
   Future<ContainerID> containerId;
   EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
@@ -929,35 +817,36 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
                            &MockDockerContainerizer::_launch)));
 
   Future<TaskStatus> statusRunning;
-  Future<TaskStatus> statusHealth1;
-  Future<TaskStatus> statusHealth2;
-  Future<TaskStatus> statusHealth3;
+  Future<TaskStatus> statusUnhealthy;
+  Future<TaskStatus> statusHealthy;
+  Future<TaskStatus> statusUnhealthyAgain;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
-    .WillOnce(FutureArg<1>(&statusHealth1))
-    .WillOnce(FutureArg<1>(&statusHealth2))
-    .WillOnce(FutureArg<1>(&statusHealth3));
+    .WillOnce(FutureArg<1>(&statusUnhealthy))
+    .WillOnce(FutureArg<1>(&statusHealthy))
+    .WillOnce(FutureArg<1>(&statusUnhealthyAgain))
+    .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
 
-  AWAIT_READY(statusHealth1);
-  EXPECT_EQ(TASK_RUNNING, statusHealth1.get().state());
-  EXPECT_FALSE(statusHealth1.get().healthy());
+  AWAIT_READY(statusUnhealthy);
+  EXPECT_EQ(TASK_RUNNING, statusUnhealthy.get().state());
+  EXPECT_FALSE(statusUnhealthy.get().healthy());
 
-  AWAIT_READY(statusHealth2);
-  EXPECT_EQ(TASK_RUNNING, statusHealth2.get().state());
-  EXPECT_TRUE(statusHealth2.get().healthy());
+  AWAIT_READY(statusHealthy);
+  EXPECT_EQ(TASK_RUNNING, statusHealthy.get().state());
+  EXPECT_TRUE(statusHealthy.get().healthy());
 
-  AWAIT_READY(statusHealth3);
-  EXPECT_EQ(TASK_RUNNING, statusHealth3.get().state());
-  EXPECT_FALSE(statusHealth3.get().healthy());
+  AWAIT_READY(statusUnhealthyAgain);
+  EXPECT_EQ(TASK_RUNNING, statusUnhealthyAgain.get().state());
+  EXPECT_FALSE(statusUnhealthyAgain.get().healthy());
 
-  // Check the temporary file created in host still exists and the content
-  // don't change.
+  // Check the temporary file created in host still
+  // exists and the content has not changed.
   ASSERT_SOME(os::read(tmpPath));
   EXPECT_EQ("bar", os::read(tmpPath).get());
 
@@ -1339,7 +1228,7 @@ TEST_F(HealthCheckTest, HealthyTaskViaHTTP)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use `test-helper` to launch a simple HTTP
   // server to respond to HTTP health checks.
@@ -1421,7 +1310,7 @@ TEST_F(HealthCheckTest, HealthyTaskViaHTTPWithoutType)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use `test-helper` to launch a simple HTTP
   // server to respond to HTTP health checks.
@@ -1498,7 +1387,7 @@ TEST_F(HealthCheckTest, HealthyTaskViaTCP)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use `test-helper` to launch a simple HTTP
   // server to respond to TCP health checks.
@@ -1578,7 +1467,7 @@ TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaHTTPWithContainerImage)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use Netcat to launch a HTTP server.
   const string command = strings::format(
@@ -1663,7 +1552,7 @@ TEST_F(HealthCheckTest,
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   const string command = strings::format(
       "python https_server.py %u",
@@ -1755,7 +1644,7 @@ TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaTCPWithContainerImage)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use Netcat to launch a HTTP server.
   const string command = strings::format(
@@ -1851,7 +1740,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use Netcat to launch a HTTP server.
   const string command = strings::format(
@@ -1978,7 +1867,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   const string command = strings::format(
       "python https_server.py %u",
@@ -2110,7 +1999,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaTCP)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
-  const uint16_t testPort = 31001;
+  const uint16_t testPort = getFreePort().get();
 
   // Use Netcat to launch a HTTP server.
   const string command = strings::format(

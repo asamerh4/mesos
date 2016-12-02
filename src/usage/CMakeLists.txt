@@ -21,24 +21,15 @@ set(USAGE_EXECUTABLE_SRC
   main.cpp
   )
 
-# INCLUDE DIRECTIVES FOR USAGE EXECUTABLE (generates, e.g., -I/path/to/thing
-# on Linux).
-############################################################################
-include_directories(${AGENT_INCLUDE_DIRS})
-
-# LINKING LIBRARIES BY DIRECTORY (might generate, e.g., -L/path/to/thing on
-# Linux).
-###########################################################################
-link_directories(${AGENT_LIB_DIRS})
-
 # THE USAGE EXECUTABLE.
 #######################
 add_executable(${MESOS_USAGE} ${USAGE_EXECUTABLE_SRC})
 
 # ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
 ######################################################
-target_link_libraries(${MESOS_USAGE} ${AGENT_LIBS} ${MESOS_TARGET})
+target_link_libraries(${MESOS_USAGE} ${AGENT_LIBS} ${MESOS_LIBS_TARGET})
 
 # ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
 ####################################################################
-add_dependencies(${MESOS_USAGE} ${MESOS_TARGET})
+add_dependencies(${MESOS_TARGET} ${MESOS_USAGE})
+add_dependencies(${MESOS_USAGE} ${MESOS_LIBS_TARGET})

@@ -37,6 +37,7 @@
 
 #include <stout/flags.hpp>
 #include <stout/fs.hpp>
+#include <stout/lambda.hpp>
 #include <stout/linkedhashmap.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
@@ -201,12 +202,6 @@ public:
 protected:
   virtual void initialize()
   {
-    install<TaskHealthStatus>(
-        &Self::taskHealthUpdated,
-        &TaskHealthStatus::task_id,
-        &TaskHealthStatus::healthy,
-        &TaskHealthStatus::kill_task);
-
     mesos.reset(new Mesos(
         contentType,
         defer(self(), &Self::connected),
@@ -407,7 +402,7 @@ protected:
           health::HealthChecker::create(
               task.health_check(),
               launcherDirectory,
-              self(),
+              defer(self(), &Self::taskHealthUpdated, lambda::_1),
               taskId,
               None(),
               vector<string>());
@@ -420,20 +415,7 @@ protected:
           return;
         }
 
-        Owned<health::HealthChecker> checker = _checker.get();
-
-        checker->healthCheck()
-          .onAny(defer(self(), [this, taskId](const Future<Nothing>& future) {
-            if (!future.isReady()) {
-              LOG(ERROR)
-                << "Health check for task '" << taskId << "' failed due to: "
-                << (future.isFailed() ? future.failure() : "discarded");
-
-              __shutdown();
-            }
-          }));
-
-        checkers.push_back(checker);
+        checkers[taskId] = _checker.get();
       }
 
       // Currently, the Mesos agent does not expose the mapping from
@@ -630,6 +612,17 @@ protected:
       deserialize<agent::Response>(contentType, response->body);
     CHECK_SOME(waitResponse);
 
+    // If the task has been health checked, stop the associated checker.
+    //
+    // TODO(alexr): Once we support `TASK_KILLING` in this executor, health
+    // checking should be stopped right before sending the `TASK_KILLING`
+    // update to avoid subsequent `TASK_RUNNING` updates.
+    if (checkers.contains(taskId)) {
+      CHECK_NOTNULL(checkers.at(taskId).get());
+      checkers.at(taskId)->stop();
+      checkers.erase(taskId);
+    }
+
     TaskState taskState;
     Option<string> message;
 
@@ -694,6 +687,12 @@ protected:
     LOG(INFO) << "Shutting down";
 
     shuttingDown = true;
+
+    // Stop health checking all tasks because we are shutting down.
+    foreach (const Owned<health::HealthChecker>& checker, checkers.values()) {
+      checker->stop();
+    }
+    checkers.clear();
 
     if (!launched) {
       __shutdown();
@@ -826,20 +825,25 @@ protected:
     shutdown();
   }
 
-  void taskHealthUpdated(
-      const TaskID& taskId,
-      bool healthy,
-      bool initiateTaskKill)
+  void taskHealthUpdated(const TaskHealthStatus& healthStatus)
   {
-    LOG(INFO) << "Received task health update for task '" << taskId
-              << "', task is "
-              << (healthy ? "healthy" : "not healthy");
+    // This prevents us from sending `TASK_RUNNING` after a terminal status
+    // update, because we may receive an update from a health check scheduled
+    // before the task has been waited on.
+    if (!checkers.contains(healthStatus.task_id())) {
+      return;
+    }
 
-    update(taskId, TASK_RUNNING, None(), healthy);
+    LOG(INFO) << "Received task health update for task"
+              << " '" << healthStatus.task_id() << "', task is "
+              << (healthStatus.healthy() ? "healthy" : "not healthy");
 
-    if (initiateTaskKill) {
+    update(
+        healthStatus.task_id(), TASK_RUNNING, None(), healthStatus.healthy());
+
+    if (healthStatus.kill_task()) {
       unhealthy = true;
-      killTask(taskId);
+      killTask(healthStatus.task_id());
     }
   }
 
@@ -1022,7 +1026,7 @@ private:
   // a `connected()` callback.
   Option<UUID> connectionId;
 
-  list<Owned<health::HealthChecker>> checkers; // Health checkers.
+  hashmap<TaskID, Owned<health::HealthChecker>> checkers; // Health checkers.
 };
 
 } // namespace internal {

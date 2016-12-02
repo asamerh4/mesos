@@ -633,8 +633,8 @@ TEST_F(HookTest, VerifySlaveTaskStatusDecorator)
 
 
 // This test verifies that the slave pre-launch docker environment
-// decorator can attach environment variables to a task.
-TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerEnvironmentDecorator)
+// decorator can attach environment variables to a task exclusively.
+TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerTaskExecutorDecorator)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -681,9 +681,11 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerEnvironmentDecorator)
   AWAIT_READY(offers);
   ASSERT_EQ(1u, offers.get().size());
 
+  // The task should see `HOOKTEST_TASK` but not `HOOKTEST_EXECUTOR`.
   TaskInfo task = createTask(
       offers.get()[0],
-      "test \"$FOO_DOCKER\" = 'docker_bar'");
+      "test \"$HOOKTEST_TASK\" = 'foo' && "
+      "test ! \"$HOOKTEST_EXECUTOR\" = 'bar'");
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::DOCKER);

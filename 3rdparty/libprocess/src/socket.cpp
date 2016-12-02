@@ -32,89 +32,83 @@ using std::string;
 
 namespace process {
 namespace network {
+namespace internal {
 
-Try<Socket> Socket::create(Kind kind, Option<int> s)
+Try<std::shared_ptr<SocketImpl>> SocketImpl::create(int s, Kind kind)
 {
-  // If the caller passed in a file descriptor, we do
-  // not own its life cycle and must not close it.
-  bool owned = s.isNone();
-
-  if (owned) {
-    // Supported in Linux >= 2.6.27.
-#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
-    Try<int> fd =
-      network::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-
-    if (fd.isError()) {
-      return Error("Failed to create socket: " + fd.error());
-    }
-#else
-    Try<int> fd = network::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd.isError()) {
-      return Error("Failed to create socket: " + fd.error());
-    }
-
-    Try<Nothing> nonblock = os::nonblock(fd.get());
-    if (nonblock.isError()) {
-      os::close(fd.get());
-      return Error("Failed to create socket, nonblock: " + nonblock.error());
-    }
-
-    Try<Nothing> cloexec = os::cloexec(fd.get());
-    if (cloexec.isError()) {
-      os::close(fd.get());
-      return Error("Failed to create socket, cloexec: " + cloexec.error());
-    }
-#endif
-
-    s = fd.get();
-  }
-
   switch (kind) {
-    case POLL: {
-      Try<std::shared_ptr<Socket::Impl>> socket =
-        PollSocketImpl::create(s.get());
-      if (socket.isError()) {
-        if (owned) {
-          os::close(s.get());
-        }
-        return Error(socket.error());
-      }
-      return Socket(socket.get());
-    }
+    case Kind::POLL:
+      return PollSocketImpl::create(s);
 #ifdef USE_SSL_SOCKET
-    case SSL: {
-      Try<std::shared_ptr<Socket::Impl>> socket =
-        LibeventSSLSocketImpl::create(s.get());
-      if (socket.isError()) {
-        if (owned) {
-          os::close(s.get());
-        }
-        return Error(socket.error());
-      }
-      return Socket(socket.get());
-    }
+    case Kind::SSL:
+      return LibeventSSLSocketImpl::create(s);
 #endif
-    // By not setting a default we leverage the compiler errors when
-    // the enumeration is augmented to find all the cases we need to
-    // provide.
   }
 }
 
 
-Socket::Kind Socket::DEFAULT_KIND()
+Try<std::shared_ptr<SocketImpl>> SocketImpl::create(
+    Address::Family family,
+    Kind kind)
+{
+  int domain = [=]() {
+    switch (family) {
+      case Address::Family::INET: return AF_INET;
+#ifndef __WINDOWS__
+      case Address::Family::UNIX: return AF_UNIX;
+#endif // __WINDOWS__
+    }
+  }();
+
+  // Supported in Linux >= 2.6.27.
+#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+  Try<int> s =
+    network::socket(domain, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+
+  if (s.isError()) {
+    return Error("Failed to create socket: " + s.error());
+  }
+#else
+  Try<int> s = network::socket(domain, SOCK_STREAM, 0);
+  if (s.isError()) {
+    return Error("Failed to create socket: " + s.error());
+  }
+
+  Try<Nothing> nonblock = os::nonblock(s.get());
+  if (nonblock.isError()) {
+    os::close(s.get());
+    return Error("Failed to create socket, nonblock: " + nonblock.error());
+  }
+
+  Try<Nothing> cloexec = os::cloexec(s.get());
+  if (cloexec.isError()) {
+    os::close(s.get());
+    return Error("Failed to create socket, cloexec: " + cloexec.error());
+  }
+#endif
+
+  Try<std::shared_ptr<SocketImpl>> impl = create(s.get(), kind);
+  if (impl.isError()) {
+    os::close(s.get());
+  }
+
+  return impl;
+}
+
+
+SocketImpl::Kind SocketImpl::DEFAULT_KIND()
 {
   // NOTE: Some tests may change the OpenSSL flags and reinitialize
   // libprocess. In non-test code, the return value should be constant.
 #ifdef USE_SSL_SOCKET
-      return network::openssl::flags().enabled ? Socket::SSL : Socket::POLL;
+  return network::openssl::flags().enabled ? Kind::SSL : Kind::POLL;
 #else
-      return Socket::POLL;
+  return Kind::POLL;
 #endif
 }
 
 
-Try<Address> Socket::Impl::address() const
+Try<Address> SocketImpl::address() const
 {
   // TODO(benh): Cache this result so that we don't have to make
   // unnecessary system calls each time.
@@ -122,7 +116,7 @@ Try<Address> Socket::Impl::address() const
 }
 
 
-Try<Address> Socket::Impl::peer() const
+Try<Address> SocketImpl::peer() const
 {
   // TODO(benh): Cache this result so that we don't have to make
   // unnecessary system calls each time.
@@ -130,7 +124,7 @@ Try<Address> Socket::Impl::peer() const
 }
 
 
-Try<Address> Socket::Impl::bind(const Address& address)
+Try<Address> SocketImpl::bind(const Address& address)
 {
   Try<Nothing> bind = network::bind(get(), address);
   if (bind.isError()) {
@@ -143,7 +137,7 @@ Try<Address> Socket::Impl::bind(const Address& address)
 
 
 static Future<string> _recv(
-    Socket socket,
+    const std::shared_ptr<SocketImpl>& impl,
     const Option<ssize_t>& size,
     Owned<string> buffer,
     size_t chunk,
@@ -165,9 +159,9 @@ static Future<string> _recv(
     // We've been asked to receive until EOF so keep receiving since
     // according to the 'length == 0' check above we haven't reached
     // EOF yet.
-    return socket.recv(data.get(), chunk)
+    return impl->recv(data.get(), chunk)
       .then(lambda::bind(&_recv,
-                         socket,
+                         impl,
                          size,
                          buffer,
                          chunk,
@@ -176,9 +170,9 @@ static Future<string> _recv(
   } else if (static_cast<string::size_type>(size.get()) > buffer->size()) {
     // We've been asked to receive a particular amount of data and we
     // haven't yet received that much data so keep receiving.
-    return socket.recv(data.get(), size.get() - buffer->size())
+    return impl->recv(data.get(), size.get() - buffer->size())
       .then(lambda::bind(&_recv,
-                         socket,
+                         impl,
                          size,
                          buffer,
                          chunk,
@@ -191,7 +185,7 @@ static Future<string> _recv(
 }
 
 
-Future<string> Socket::Impl::recv(const Option<ssize_t>& size)
+Future<string> SocketImpl::recv(const Option<ssize_t>& size)
 {
   // Default chunk size to attempt to receive when nothing is
   // specified represents roughly 16 pages.
@@ -206,7 +200,7 @@ Future<string> Socket::Impl::recv(const Option<ssize_t>& size)
 
   return recv(data.get(), chunk)
     .then(lambda::bind(&_recv,
-                       socket(),
+                       shared_from_this(),
                        size,
                        buffer,
                        chunk,
@@ -216,7 +210,7 @@ Future<string> Socket::Impl::recv(const Option<ssize_t>& size)
 
 
 static Future<Nothing> _send(
-    Socket socket,
+    const std::shared_ptr<SocketImpl>& impl,
     Owned<string> data,
     size_t index,
     size_t length)
@@ -230,19 +224,19 @@ static Future<Nothing> _send(
   }
 
   // Keep sending!
-  return socket.send(data->data() + index, data->size() - index)
-    .then(lambda::bind(&_send, socket, data, index, lambda::_1));
+  return impl->send(data->data() + index, data->size() - index)
+    .then(lambda::bind(&_send, impl, data, index, lambda::_1));
 }
 
 
-Future<Nothing> Socket::Impl::send(const string& _data)
+Future<Nothing> SocketImpl::send(const string& _data)
 {
   Owned<string> data(new string(_data));
 
   return send(data->data(), data->size())
-    .then(lambda::bind(&_send, socket(), data, 0, lambda::_1));
+    .then(lambda::bind(&_send, shared_from_this(), data, 0, lambda::_1));
 }
 
-
+} // namespace internal {
 } // namespace network {
 } // namespace process {

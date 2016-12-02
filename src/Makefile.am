@@ -222,6 +222,7 @@ DOCKER_V1_PROTO = $(top_srcdir)/include/mesos/docker/v1.proto
 DOCKER_V2_PROTO = $(top_srcdir)/include/mesos/docker/v2.proto
 EXECUTOR_PROTO = $(top_srcdir)/include/mesos/executor/executor.proto
 FETCHER_PROTO = $(top_srcdir)/include/mesos/fetcher/fetcher.proto
+HOOK_PROTO = $(top_srcdir)/include/mesos/module/hook.proto
 MAINTENANCE_PROTO = $(top_srcdir)/include/mesos/maintenance/maintenance.proto
 MASTER_PROTO = $(top_srcdir)/include/mesos/master/master.proto
 MESOS_PROTO = $(top_srcdir)/include/mesos/mesos.proto
@@ -270,6 +271,8 @@ CXX_PROTOS =								\
   ../include/mesos/maintenance/maintenance.pb.h				\
   ../include/mesos/master/master.pb.cc					\
   ../include/mesos/master/master.pb.h					\
+  ../include/mesos/module/hook.pb.cc					\
+  ../include/mesos/module/hook.pb.h					\
   ../include/mesos/module/module.pb.cc					\
   ../include/mesos/module/module.pb.h					\
   ../include/mesos/quota/quota.pb.cc					\
@@ -566,6 +569,7 @@ module_HEADERS =							\
   $(top_srcdir)/include/mesos/module/authorizer.hpp			\
   $(top_srcdir)/include/mesos/module/container_logger.hpp		\
   $(top_srcdir)/include/mesos/module/hook.hpp				\
+  $(top_srcdir)/include/mesos/module/hook.proto				\
   $(top_srcdir)/include/mesos/module/http_authenticator.hpp		\
   $(top_srcdir)/include/mesos/module/isolator.hpp			\
   $(top_srcdir)/include/mesos/module/module.hpp				\
@@ -576,6 +580,7 @@ module_HEADERS =							\
   $(top_srcdir)/include/mesos/module/detector.hpp
 
 nodist_module_HEADERS =							\
+  ../include/mesos/module/hook.pb.h					\
   ../include/mesos/module/module.pb.h
 
 quotadir = $(pkgincludedir)/quota
@@ -830,6 +835,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/mount.cpp					\
   slave/containerizer/mesos/paths.cpp					\
   slave/containerizer/mesos/utils.cpp					\
+  slave/containerizer/mesos/io/switchboard.cpp				\
   slave/containerizer/mesos/isolators/docker/volume/driver.cpp		\
   slave/containerizer/mesos/isolators/docker/volume/paths.cpp		\
   slave/containerizer/mesos/isolators/filesystem/posix.cpp		\
@@ -960,6 +966,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/mount.hpp					\
   slave/containerizer/mesos/paths.hpp					\
   slave/containerizer/mesos/utils.hpp					\
+  slave/containerizer/mesos/io/switchboard.hpp				\
   slave/containerizer/mesos/isolators/posix.hpp				\
   slave/containerizer/mesos/isolators/filesystem/posix.hpp		\
   slave/containerizer/mesos/isolators/filesystem/windows.hpp		\
@@ -1283,6 +1290,7 @@ libmesos_la_SOURCES =							\
   $(DOCKER_V1_PROTO)							\
   $(DOCKER_V2_PROTO)							\
   $(FETCHER_PROTO)							\
+  $(HOOK_PROTO)								\
   $(MAINTENANCE_PROTO)							\
   $(MASTER_PROTO)							\
   $(MESOS_PROTO)							\
@@ -1380,6 +1388,12 @@ mesos_logrotate_logger_SOURCES =		\
   slave/container_loggers/logrotate.cpp
 mesos_logrotate_logger_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_logrotate_logger_LDADD = libmesos.la $(LDADD)
+
+pkglibexec_PROGRAMS += mesos-io-switchboard
+mesos_io_switchboard_SOURCES =	\
+  slave/containerizer/mesos/io/switchboard_main.cpp
+mesos_io_switchboard_CPPFLAGS = $(MESOS_CPPFLAGS)
+mesos_io_switchboard_LDADD = libmesos.la $(LDADD)
 
 if WITH_NETWORK_ISOLATOR
 pkglibexec_PROGRAMS += mesos-network-helper
@@ -2187,6 +2201,7 @@ mesos_tests_SOURCES =						\
   tests/containerizer/docker_containerizer_tests.cpp		\
   tests/containerizer/docker_spec_tests.cpp			\
   tests/containerizer/docker_tests.cpp				\
+  tests/containerizer/io_switchboard_tests.cpp			\
   tests/containerizer/isolator_tests.cpp			\
   tests/containerizer/launcher.cpp				\
   tests/containerizer/memory_isolator_tests.cpp			\
@@ -2242,7 +2257,6 @@ mesos_tests_SOURCES +=						\
   tests/containerizer/docker_volume_isolator_tests.cpp		\
   tests/containerizer/linux_filesystem_isolator_tests.cpp	\
   tests/containerizer/fs_tests.cpp				\
-  tests/containerizer/launch_tests.cpp				\
   tests/containerizer/memory_pressure_tests.cpp			\
   tests/containerizer/nested_mesos_containerizer_tests.cpp	\
   tests/containerizer/ns_tests.cpp				\

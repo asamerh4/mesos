@@ -23,12 +23,13 @@ set(QOS_CONTROLLER_SRC
 
 # THE AGENT EXECUTABLE.
 #######################
-add_library(${QOS_CONTROLLER_TARGET} SHARED ${QOS_CONTROLLER_SRC})
+add_library(${QOS_CONTROLLER_TARGET} ${MESOS_DEFAULT_LIBRARY_LINKAGE} ${QOS_CONTROLLER_SRC})
 
 # ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
 ######################################################
-target_link_libraries(${QOS_CONTROLLER_TARGET} ${AGENT_LIBS} ${MESOS_TARGET})
+target_link_libraries(${QOS_CONTROLLER_TARGET} ${AGENT_LIBS} ${MESOS_LIBS_TARGET})
 
 # ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
 ####################################################################
-add_dependencies(${QOS_CONTROLLER_TARGET} ${MESOS_TARGET})
+add_dependencies(${MESOS_TARGET} ${QOS_CONTROLLER_TARGET})
+add_dependencies(${QOS_CONTROLLER_TARGET} ${MESOS_LIBS_TARGET})

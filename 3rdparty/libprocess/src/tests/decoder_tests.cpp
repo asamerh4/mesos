@@ -17,7 +17,6 @@
 
 #include <process/gtest.hpp>
 #include <process/owned.hpp>
-#include <process/socket.hpp>
 
 #include <stout/gtest.hpp>
 
@@ -31,10 +30,6 @@ using process::Owned;
 using process::ResponseDecoder;
 using process::StreamingRequestDecoder;
 using process::StreamingResponseDecoder;
-
-using process::http::Request;
-
-using process::network::Socket;
 
 using std::deque;
 using std::string;
@@ -78,7 +73,7 @@ TYPED_TEST(RequestDecoderTest, Request)
   EXPECT_SOME_EQ("value2", request->url.query.get("key2"));
 
   Future<string> body = [&request]() -> Future<string> {
-    if (request->type == Request::BODY) {
+    if (request->type == http::Request::BODY) {
       return request->body;
     }
 

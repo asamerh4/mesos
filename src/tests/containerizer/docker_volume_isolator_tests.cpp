@@ -63,7 +63,6 @@ using mesos::internal::slave::Slave;
 
 using mesos::master::detector::MasterDetector;
 
-using mesos::slave::ContainerLogger;
 using mesos::slave::Isolator;
 
 using slave::docker::volume::DriverClient;
@@ -192,31 +191,26 @@ protected:
 
     Owned<Launcher> launcher(launcher_.get());
 
-    Try<ContainerLogger*> logger_ =
-      ContainerLogger::create(flags.container_logger);
-
-    if (logger_.isError()) {
-      return Error("Failed to create container logger: " + logger_.error());
-    }
-
-    Owned<ContainerLogger> logger(logger_.get());
-
     Try<Owned<Provisioner>> provisioner = Provisioner::create(flags);
     if (provisioner.isError()) {
       return Error("Failed to create provisioner: " + provisioner.error());
     }
 
-    return Owned<MesosContainerizer>(
-        new MesosContainerizer(
-            flags,
-            false,
-            &fetcher,
-            std::move(logger),
-            std::move(launcher),
-            provisioner->share(),
-            {std::move(linuxIsolator),
-             std::move(runtimeIsolator),
-             std::move(volumeIsolator)}));
+    Try<MesosContainerizer*> containerizer = MesosContainerizer::create(
+        flags,
+        true,
+        &fetcher,
+        std::move(launcher),
+        provisioner->share(),
+        {std::move(linuxIsolator),
+         std::move(runtimeIsolator),
+         std::move(volumeIsolator)});
+
+    if (containerizer.isError()) {
+      return Error("Failed to create containerizer: " + containerizer.error());
+    }
+
+    return Owned<MesosContainerizer>(containerizer.get());
   }
 
 private:

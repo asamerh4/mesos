@@ -23,12 +23,13 @@ set(RESOURCE_ESTIMATOR_SRC
 
 # THE AGENT EXECUTABLE.
 #######################
-add_library(${RESOURCE_ESTIMATOR_TARGET} SHARED ${RESOURCE_ESTIMATOR_SRC})
+add_library(${RESOURCE_ESTIMATOR_TARGET} ${MESOS_DEFAULT_LIBRARY_LINKAGE} ${RESOURCE_ESTIMATOR_SRC})
 
 # ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
 ######################################################
-target_link_libraries(${RESOURCE_ESTIMATOR_TARGET} ${AGENT_LIBS} ${MESOS_TARGET})
+target_link_libraries(${RESOURCE_ESTIMATOR_TARGET} ${AGENT_LIBS} ${MESOS_LIBS_TARGET})
 
 # ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
 ####################################################################
-add_dependencies(${RESOURCE_ESTIMATOR_TARGET} ${MESOS_TARGET})
+add_dependencies(${MESOS_TARGET} ${RESOURCE_ESTIMATOR_TARGET})
+add_dependencies(${RESOURCE_ESTIMATOR_TARGET} ${MESOS_LIBS_TARGET})

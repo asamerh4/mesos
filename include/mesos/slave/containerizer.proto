@@ -148,6 +148,21 @@ message ContainerConfig {
 }
 
 
+// This message is used to describe how to handle standard
+// input/output/error for the container.
+message ContainerIO {
+  enum Type {
+    UNKNOWN = 0;
+    FD = 1;       // File descriptor. Ownership will be transferred.
+    PATH = 2;     // File path.
+  }
+
+  optional Type type = 1;
+  optional int32 fd = 2;
+  optional string path = 3;
+}
+
+
 /**
  * Protobuf returned by Isolator::prepare(). The command is executed
  * by the Launcher in the containerized context.
@@ -161,19 +176,19 @@ message ContainerLaunchInfo {
   repeated CommandInfo pre_exec_commands = 1;
   optional Environment environment = 2;
 
-  // The root filesystem for the container.
-  //
-  // This field is not used since 0.28, and it is deprecated
-  // since 1.0.1.
-  optional string rootfs = 3 [deprecated = true]; // Since 1.0.1.
+  // (Linux only) The root filesystem for the container.
+  optional string rootfs = 3;
 
   // (Linux only) The namespaces a nested container
   // should enter in its parent before cloning.
-  optional uint32 enter_namespaces = 9 [default = 0];
+  repeated int32 enter_namespaces = 9;
 
   // (Linux only) The namespaces that should be cloned for the container.
   // The namespaces are created while launching the executor.
-  optional uint32 clone_namespaces = 4 [default = 0];
+  repeated int32 clone_namespaces = 4;
+
+  // (POSIX only) The user to launch the command as.
+  optional string user = 10;
 
   // If specified, it'll become the launch command for the custom
   // executor, or the launch command for the user task in the case of
@@ -191,6 +206,12 @@ message ContainerLaunchInfo {
   // (POSIX only) The rlimits requested for the container.
   // The rlimits are set while launching the container.
   optional RLimitInfo rlimits = 8;
+
+  // I/O information about the container to be launched. If not set,
+  // the container will inherit the agent standard input/output/error.
+  optional ContainerIO in = 11;
+  optional ContainerIO out = 12;
+  optional ContainerIO err = 13;
 }
 
 

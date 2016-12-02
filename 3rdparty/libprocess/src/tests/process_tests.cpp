@@ -93,8 +93,8 @@ using process::UPID;
 using process::firewall::DisabledEndpointsFirewallRule;
 using process::firewall::FirewallRule;
 
-using process::network::Address;
-using process::network::Socket;
+using process::network::inet::Address;
+using process::network::inet::Socket;
 
 using std::move;
 using std::string;
@@ -1412,7 +1412,7 @@ TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, Http2)
 
   Socket socket = create.get();
 
-  ASSERT_SOME(socket.bind(Address()));
+  ASSERT_SOME(socket.bind(Address::ANY_ANY()));
 
   // Create a UPID for 'Libprocess-From' based on the IP and port we
   // got assigned.
