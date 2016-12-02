@@ -221,6 +221,12 @@ public:
 
   virtual ~CommandScheduler() {}
 
+  // Vector for reporting failed tasks.
+  vector<mesos::v1::TaskID> failedTasks;
+
+  // Vector holding task_list.
+  vector<TaskInfo> tasks;
+
 protected:
   virtual void initialize()
   {
@@ -233,6 +239,11 @@ protected:
       process::defer(self(), &Self::disconnected),
       process::defer(self(), &Self::received, lambda::_1),
       credential));
+
+      // Fill up tasks vector from task_list.
+      foreach (TaskInfo _task, taskGroup->tasks()) {
+          tasks.push_back(_task);
+      }
   }
 
   void connected()
@@ -289,12 +300,7 @@ protected:
   void offers(const vector<Offer>& offers)
   {
     CHECK_EQ(SUBSCRIBED, state);
-    // fill up task-container
-    vector<TaskInfo> tasks;
 
-    foreach (TaskInfo _task, taskGroup->tasks()) {
-          tasks.push_back(_task);
-      }
     // loop all offers and place tasks...
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
@@ -444,6 +450,12 @@ protected:
           terminate(self());
         }
     }
+
+    if (status.state() == TaskState::TASK_FAILED ||
+         status.state() == TaskState::TASK_LOST ||
+         status.state() == TaskState::TASK_KILLED){
+       failedTasks.push_back(status.task_id());
+    }
   }
 
 private:
@@ -577,6 +589,19 @@ int main(int argc, char** argv)
 
   process::spawn(scheduler.get());
   process::wait(scheduler.get());
+
+  cout << "Unsubscribed batch framework: \033[1;33m**"
+               << frameworkInfo.name()
+               << "-->END\033[0m" << endl;
+  // Report failed tasks if any.
+  foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
+         cerr << "**failed-->" << failedTaskId << " with command: '";
+         foreach (const TaskInfo& task, scheduler->tasks){
+             if(task.task_id() == failedTaskId && task.has_command()){
+                 cerr << task.command().value() << "'" << endl;
+             }
+         }
+  }
 
   return EXIT_SUCCESS;
 }
