@@ -35,6 +35,8 @@
 #include <unistd.h>
 #include <utime.h>
 
+#include <sys/ioctl.h>
+
 #ifdef __linux__
 #include <linux/version.h>
 #include <sys/sysinfo.h>
@@ -45,9 +47,12 @@
 
 #include <list>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
+
+#include <stout/synchronized.hpp>
 
 #include <stout/os/close.hpp>
 #include <stout/os/environment.hpp>
@@ -464,6 +469,45 @@ inline std::string temp()
 inline Try<Nothing> pipe(int pipe_fd[2])
 {
   if (::pipe(pipe_fd) == -1) {
+    return ErrnoError();
+  }
+  return Nothing();
+}
+
+
+inline Try<Nothing> dup2(int oldFd, int newFd)
+{
+  while (::dup2(oldFd, newFd) == -1) {
+    if (errno == EINTR) {
+      continue;
+    } else {
+      return ErrnoError();
+    }
+  }
+  return Nothing();
+}
+
+
+inline Try<std::string> ptsname(int master)
+{
+  // 'ptsname' is not thread safe. Therefore, we use mutex here to
+  // make this method thread safe.
+  // TODO(jieyu): Consider using ptsname_r for linux.
+  static std::mutex* mutex = new std::mutex;
+
+  synchronized (mutex) {
+    const char* slavePath = ::ptsname(master);
+    if (slavePath == nullptr) {
+      return ErrnoError();
+    }
+    return slavePath;
+  }
+}
+
+
+inline Try<Nothing> setctty(int fd)
+{
+  if (ioctl(fd, TIOCSCTTY, nullptr) == -1) {
     return ErrnoError();
   }
   return Nothing();

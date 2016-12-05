@@ -860,6 +860,8 @@ protected:
   // Remove an inverse offer and optionally rescind it as well.
   void removeInverseOffer(InverseOffer* inverseOffer, bool rescind = false);
 
+  bool isCompletedFramework(const FrameworkID& frameworkId);
+
   Framework* getFramework(const FrameworkID& frameworkId);
   Offer* getOffer(const OfferID& offerId);
   InverseOffer* getInverseOffer(const OfferID& inverseOfferId);
@@ -1701,9 +1703,7 @@ private:
     } registered;
 
     // Slaves that are in the process of being removed from the
-    // registrar. Think of these as being partially removed: we must
-    // not answer questions related to these until they are removed
-    // from the registry.
+    // registrar.
     hashset<SlaveID> removing;
 
     // Slaves that are in the process of being marked unreachable.
@@ -2597,7 +2597,7 @@ private:
 };
 
 
-  inline std::ostream& operator<<(
+inline std::ostream& operator<<(
     std::ostream& stream,
     const Framework& framework)
 {

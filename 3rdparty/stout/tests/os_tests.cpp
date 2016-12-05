@@ -67,21 +67,6 @@ using std::string;
 using std::vector;
 
 
-#ifdef __FreeBSD__
-static bool isJailed() {
-  int mib[4];
-  size_t len = 4;
-  ::sysctlnametomib("security.jail.jailed", mib, &len);
-  Try<int> jailed = os::sysctl(mib[0], mib[1], mib[2]).integer();
-  if (jailed.isSome()) {
-      return jailed.get() == 1;
-  }
-
-  return false;
-}
-#endif
-
-
 class OsTest : public TemporaryDirectoryTest {};
 
 
@@ -804,6 +789,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(OsTest, Shell)
 #ifndef __WINDOWS__
 TEST_F(OsTest, Mknod)
 {
+#ifdef __FreeBSD__
+  // If we're in a jail on FreeBSD, we can't use mknod.
+  if (isJailed()) {
+      return;
+  }
+#endif
+
   // mknod requires root permission.
   Result<string> user = os::user();
   ASSERT_SOME(user);

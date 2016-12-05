@@ -2359,6 +2359,195 @@ TEST_F(TaskGroupValidationTest, TaskUsesDifferentExecutor)
   driver.join();
 }
 
+
+class FrameworkInfoValidationTest : public MesosTest {};
+
+
+// This tests the role validation for FrameworkInfo.
+TEST_F(FrameworkInfoValidationTest, ValidateRoles)
+{
+  // Not MULTI_ROLE, no 'role' (default to "*"), no 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+
+    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Not MULTI_ROLE, no 'role' (default to "*"), has 'roles' (error!).
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.add_roles("bar");
+    frameworkInfo.add_roles("qux");
+
+    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Not MULTI_ROLE, has 'role', no 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.set_role("foo");
+
+    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Not MULTI_ROLE, has 'role', has 'roles' (error!).
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.add_roles("bar");
+    frameworkInfo.add_roles("qux");
+    frameworkInfo.set_role("foo");
+
+    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Is MULTI_ROLE, no 'role', no 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::MULTI_ROLE);
+
+    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Is MULTI_ROLE, no 'role', has 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::MULTI_ROLE);
+    frameworkInfo.add_roles("bar");
+    frameworkInfo.add_roles("qux");
+
+    EXPECT_NONE(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Is MULTI_ROLE, has 'role' (error!), no 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.set_role("foo");
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::MULTI_ROLE);
+
+    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Is MULTI_ROLE, has 'role' (error!), has 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.set_role("foo");
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::MULTI_ROLE);
+    frameworkInfo.add_roles("bar");
+    frameworkInfo.add_roles("qux");
+
+    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Duplicate items in 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::MULTI_ROLE);
+    frameworkInfo.add_roles("bar");
+    frameworkInfo.add_roles("qux");
+    frameworkInfo.add_roles("bar");
+
+    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+  }
+
+  // Check invalid character in 'roles'.
+  {
+    FrameworkInfo frameworkInfo;
+    frameworkInfo.add_roles("bar");
+    frameworkInfo.add_roles("/x");
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::MULTI_ROLE);
+
+    EXPECT_SOME(::framework::internal::validateRoles(frameworkInfo));
+  }
+}
+
+
+// This test ensures that ia framework cannot use the
+// `FrameworkInfo.roles` field without providing the
+// MULTI_ROLE capability.
+TEST_F(FrameworkInfoValidationTest, MissingMultiRoleCapability)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+  framework.add_roles("role");
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<string> error;
+  EXPECT_CALL(sched, error(&driver, _))
+    .WillOnce(FutureArg<1>(&error));
+
+  driver.start();
+
+  AWAIT_READY(error);
+}
+
+
+// This test ensures subscription succeeds for multi-role
+// framework when MULTI_ROLE capability is enabled.
+TEST_F(FrameworkInfoValidationTest, AcceptMultiRoleFramework)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+  framework.add_roles("role1");
+  framework.add_roles("role2");
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered));
+
+  driver.start();
+
+  AWAIT_READY(registered);
+}
+
+
+// This test ensures subscription fails for multi-role
+// framework with non-whitelisted role.
+TEST_F(FrameworkInfoValidationTest, MultiRoleWhitelist)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.roles = "role1";
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+  framework.add_roles("role1");
+  framework.add_roles("role2");
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<string> error;
+  EXPECT_CALL(sched, error(&driver, _))
+    .WillOnce(FutureArg<1>(&error));
+
+  driver.start();
+
+  AWAIT_READY(error);
+}
+
 } // namespace tests {
 } // namespace internal {
 } // namespace mesos {

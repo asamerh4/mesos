@@ -398,7 +398,7 @@ Future<Response> Slave::Http::api(
             }
 
             if (call.isError()) {
-              return Failure(call.error());
+              return BadRequest(call.error());
             }
 
             return _api(call.get(),
@@ -2322,6 +2322,13 @@ Future<Response> Slave::Http::attachContainerInput(
   CHECK_EQ(mesos::agent::Call::ATTACH_CONTAINER_INPUT, call.type());
   CHECK(call.has_attach_container_input());
 
+  if (call.attach_container_input().type() !=
+      mesos::agent::Call::AttachContainerInput::CONTAINER_ID) {
+    return BadRequest(
+        "Expecting 'attach_container_input.type' to be CONTAINER_ID");
+  }
+
+  CHECK(call.attach_container_input().has_container_id());
   const ContainerID& containerId = call.attach_container_input().container_id();
 
   Pipe pipe;
@@ -2359,18 +2366,16 @@ Future<Response> Slave::Http::attachContainerInput(
       request.url.path = "/";
 
       transform
-        .onAny([reader, writer](
+        .onAny([writer](
             const Future<Nothing>& future) mutable {
           CHECK(!future.isDiscarded());
 
           if (future.isFailed()) {
             writer.fail(future.failure());
-            reader.close();
             return;
           }
 
           writer.close();
-          reader.close();
          });
 
       // This is a non Keep-Alive request which means the connection

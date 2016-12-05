@@ -1262,12 +1262,18 @@ void Master::exited(const UPID& pid)
 
       // The semantics when a registered slave gets disconnected are as
       // follows for each framework running on that slave:
-      // 1) If the framework is checkpointing: No immediate action is taken.
-      //    The slave is given a chance to reconnect until the slave
-      //    observer times out (75s) and removes the slave.
-      // 2) If the framework is not-checkpointing: The slave is not removed
-      //    but the framework is removed from the slave's structs,
-      //    its tasks transitioned to LOST and resources recovered.
+      //
+      // 1) If the framework is checkpointing: No immediate action is
+      //    taken. The slave is given a chance to reconnect until the
+      //    slave observer times out (75s) and removes the slave.
+      //
+      // 2) If the framework is not-checkpointing: The slave is not
+      //    removed but the framework is removed from the slave's
+      //    structs, its tasks transitioned to LOST and resources
+      //    recovered.
+      //
+      // NOTE: If the framework hasn't re-registered since the master
+      // failed over, we assume the framework is checkpointing.
       hashset<FrameworkID> frameworkIds =
         slave->tasks.keys() | slave->executors.keys();
 
@@ -1947,6 +1953,10 @@ void Master::_markUnreachableAfterFailover(
 void Master::sendSlaveLost(const SlaveInfo& slaveInfo)
 {
   foreachvalue (Framework* framework, frameworks.registered) {
+    if (!framework->connected) {
+      continue;
+    }
+
     LOG(INFO) << "Notifying framework " << *framework << " of lost agent "
               << slaveInfo.id() << " (" << slaveInfo.hostname() << ")";
 
@@ -2330,11 +2340,31 @@ void Master::subscribe(
   LOG(INFO) << "Received subscription request for"
             << " HTTP framework '" << frameworkInfo.name() << "'";
 
-  Option<Error> validationError = roles::validate(frameworkInfo.role());
+  Option<Error> validationError =
+    validation::framework::validate(frameworkInfo);
 
-  if (validationError.isNone() && !isWhitelistedRole(frameworkInfo.role())) {
-    validationError = Error("Role '" + frameworkInfo.role() + "' is not" +
-                            " present in the master's --roles");
+  if (validationError.isNone()) {
+    // Check the framework's role(s) against the whitelist.
+    set<string> invalidRoles;
+
+    if (protobuf::frameworkHasCapability(
+            frameworkInfo,
+            FrameworkInfo::Capability::MULTI_ROLE)) {
+      foreach (const string& role, frameworkInfo.roles()) {
+        if (!isWhitelistedRole(role)) {
+          invalidRoles.insert(role);
+        }
+      }
+    } else {
+      if (!isWhitelistedRole(frameworkInfo.role())) {
+        invalidRoles.insert(frameworkInfo.role());
+      }
+    }
+
+    if (!invalidRoles.empty()) {
+      validationError = Error("Roles " + stringify(invalidRoles) +
+                              " are not present in master's --roles");
+    }
   }
 
   // TODO(vinod): Deprecate this in favor of authorization.
@@ -2344,19 +2374,15 @@ void Master::subscribe(
                             " without --root_submissions set");
   }
 
-  if (validationError.isNone() && frameworkInfo.has_id()) {
-    foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
-      if (framework->id() == frameworkInfo.id()) {
-        // This could happen if a framework tries to subscribe after
-        // its failover timeout has elapsed or it unregistered itself
-        // by calling 'stop()' on the scheduler driver.
-        //
-        // TODO(vinod): Master should persist admitted frameworks to the
-        // registry and remove them from it after failover timeout.
-        validationError = Error("Framework has been removed");
-        break;
-      }
-    }
+  if (validationError.isNone() && frameworkInfo.has_id() &&
+      isCompletedFramework(frameworkInfo.id())) {
+    // This could happen if a framework tries to subscribe after its
+    // failover timeout has elapsed or it unregistered itself by
+    // calling 'stop()' on the scheduler driver.
+    //
+    // TODO(vinod): Master should persist admitted frameworks to the
+    // registry and remove them from it after failover timeout.
+    validationError = Error("Framework has been removed");
   }
 
   if (validationError.isNone() && !isValidFailoverTimeout(frameworkInfo)) {
@@ -2559,11 +2585,31 @@ void Master::subscribe(
     return;
   }
 
-  Option<Error> validationError = roles::validate(frameworkInfo.role());
+  Option<Error> validationError =
+    validation::framework::validate(frameworkInfo);
 
-  if (validationError.isNone() && !isWhitelistedRole(frameworkInfo.role())) {
-    validationError = Error("Role '" + frameworkInfo.role() + "' is not" +
-                            " present in the master's --roles");
+  if (validationError.isNone()) {
+    // Check the framework's role(s) against the whitelist.
+    set<string> invalidRoles;
+
+    if (protobuf::frameworkHasCapability(
+            frameworkInfo,
+            FrameworkInfo::Capability::MULTI_ROLE)) {
+      foreach (const string& role, frameworkInfo.roles()) {
+        if (!isWhitelistedRole(role)) {
+          invalidRoles.insert(role);
+        }
+      }
+    } else {
+      if (!isWhitelistedRole(frameworkInfo.role())) {
+        invalidRoles.insert(frameworkInfo.role());
+      }
+    }
+
+    if (!invalidRoles.empty()) {
+      validationError = Error("Roles " + stringify(invalidRoles) +
+                              " are not present in the master's --roles");
+    }
   }
 
   // TODO(vinod): Deprecate this in favor of authorization.
@@ -2573,19 +2619,15 @@ void Master::subscribe(
                             " without --root_submissions set");
   }
 
-  if (validationError.isNone() && frameworkInfo.has_id()) {
-    foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
-      if (framework->id() == frameworkInfo.id()) {
-        // This could happen if a framework tries to subscribe after
-        // its failover timeout has elapsed or it unregistered itself
-        // by calling 'stop()' on the scheduler driver.
-        //
-        // TODO(vinod): Master should persist admitted frameworks to the
-        // registry and remove them from it after failover timeout.
-        validationError = Error("Framework has been removed");
-        break;
-      }
-    }
+  if (validationError.isNone() && frameworkInfo.has_id() &&
+      isCompletedFramework(frameworkInfo.id())) {
+    // This could happen if a framework tries to subscribe after its
+    // failover timeout has elapsed or it unregistered itself by
+    // calling 'stop()' on the scheduler driver.
+    //
+    // TODO(vinod): Master should persist admitted frameworks to the
+    // registry and remove them from it after failover timeout.
+    validationError = Error("Framework has been removed");
   }
 
   if (validationError.isNone() && !isValidFailoverTimeout(frameworkInfo)) {
@@ -6082,7 +6124,7 @@ void Master::_markUnreachable(
           newTaskState,
           TaskStatus::SOURCE_MASTER,
           None(),
-          "Slave " + slave->info.hostname() + " is unreachable",
+          "Agent " + slave->info.hostname() + " is unreachable",
           TaskStatus::REASON_SLAVE_REMOVED,
           (task->has_executor_id() ?
               Option<ExecutorID>(task->executor_id()) : None()),
@@ -7345,7 +7387,7 @@ void Master::removeFramework(Slave* slave, Framework* framework)
         TASK_LOST,
         TaskStatus::SOURCE_MASTER,
         None(),
-        "Slave " + slave->info.hostname() + " disconnected",
+        "Agent " + slave->info.hostname() + " disconnected",
         TaskStatus::REASON_SLAVE_DISCONNECTED,
         (task->has_executor_id()
             ? Option<ExecutorID>(task->executor_id()) : None()));
@@ -7399,20 +7441,24 @@ void Master::addSlave(
 
   // Add the slave's executors to the frameworks.
   foreachkey (const FrameworkID& frameworkId, slave->executors) {
+    Framework* framework = getFramework(frameworkId);
+
+    // The framework might not be re-registered yet.
+    if (framework == nullptr) {
+      continue;
+    }
+
     foreachvalue (const ExecutorInfo& executorInfo,
                   slave->executors[frameworkId]) {
-      Framework* framework = getFramework(frameworkId);
-      // The framework might not be re-registered yet.
-      if (framework != nullptr) {
-        framework->addExecutor(slave->id, executorInfo);
-      }
+      framework->addExecutor(slave->id, executorInfo);
     }
   }
 
   // Add the slave's tasks to the frameworks.
   foreachkey (const FrameworkID& frameworkId, slave->tasks) {
+    Framework* framework = getFramework(frameworkId);
+
     foreachvalue (Task* task, slave->tasks[frameworkId]) {
-      Framework* framework = getFramework(task->framework_id());
       // The framework might not be re-registered yet.
       if (framework != nullptr) {
         framework->addTask(task);
@@ -7563,6 +7609,8 @@ void Master::_removeSlave(
 
   // Transition the tasks to lost and remove them.
   foreachkey (const FrameworkID& frameworkId, utils::copy(slave->tasks)) {
+    Framework* framework = getFramework(frameworkId);
+
     foreachvalue (Task* task, utils::copy(slave->tasks[frameworkId])) {
       const StatusUpdate& update = protobuf::createStatusUpdate(
           task->framework_id(),
@@ -7571,7 +7619,7 @@ void Master::_removeSlave(
           TASK_LOST,
           TaskStatus::SOURCE_MASTER,
           None(),
-          "Slave " + slave->info.hostname() + " removed: " + removalCause,
+          "Agent " + slave->info.hostname() + " removed: " + removalCause,
           TaskStatus::REASON_SLAVE_REMOVED,
           (task->has_executor_id() ?
               Option<ExecutorID>(task->executor_id()) : None()));
@@ -7579,7 +7627,6 @@ void Master::_removeSlave(
       updateTask(task, update);
       removeTask(task);
 
-      Framework* framework = getFramework(frameworkId);
       if (framework == nullptr) {
         LOG(WARNING) << "Dropping update " << update
                      << " for unknown framework " << frameworkId;
@@ -7822,7 +7869,7 @@ void Master::removeTask(Task* task)
 
   // Remove from framework.
   Framework* framework = getFramework(task->framework_id());
-  if (framework != nullptr) { // A framework might not be re-connected yet.
+  if (framework != nullptr) { // A framework might not be re-registered yet.
     framework->removeTask(task);
   }
 
@@ -7987,6 +8034,18 @@ void Master::removeInverseOffer(InverseOffer* inverseOffer, bool rescind)
   // Delete it.
   inverseOffers.erase(inverseOffer->id());
   delete inverseOffer;
+}
+
+
+bool Master::isCompletedFramework(const FrameworkID& frameworkId)
+{
+  foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
+    if (framework->id() == frameworkId) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 
