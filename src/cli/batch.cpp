@@ -595,7 +595,7 @@ int main(int argc, char** argv)
                << "-->END\033[0m" << endl;
   // Report failed tasks if any.
   foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
-         cerr << "**failed-->" << failedTaskId << " with command: '";
+         cerr << "**failed task-->" << failedTaskId << " with command: '";
          foreach (const TaskInfo& task, scheduler->tasks){
              if(task.task_id() == failedTaskId && task.has_command()){
                  cerr << task.command().value() << "'" << endl;
