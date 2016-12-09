@@ -602,6 +602,10 @@ int main(int argc, char** argv)
              }
          }
   }
-
-  return EXIT_SUCCESS;
+  if(scheduler->failedTasks.size() > 0){
+      return EXIT_FAILURE;
+  }
+  else {
+      return EXIT_SUCCESS;
+  }
 }
