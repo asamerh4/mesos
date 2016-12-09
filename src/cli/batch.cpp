@@ -590,9 +590,9 @@ int main(int argc, char** argv)
   process::spawn(scheduler.get());
   process::wait(scheduler.get());
 
-  cout << "Unsubscribed batch framework: \033[1;33m**"
+  cout << "Unsubscribed batch framework: "
                << frameworkInfo.name()
-               << "-->END\033[0m" << endl;
+               << endl;
   // Report failed tasks if any.
   foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
          cerr << "**failed task-->" << failedTaskId << " with command: '";
