@@ -219,7 +219,8 @@ void HierarchicalAllocatorProcess::recover(
 void HierarchicalAllocatorProcess::addFramework(
     const FrameworkID& frameworkId,
     const FrameworkInfo& frameworkInfo,
-    const hashmap<SlaveID, Resources>& used)
+    const hashmap<SlaveID, Resources>& used,
+    bool active)
 {
   CHECK(initialized);
 
@@ -274,7 +275,11 @@ void HierarchicalAllocatorProcess::addFramework(
 
   LOG(INFO) << "Added framework " << frameworkId;
 
-  allocate();
+  if (active) {
+    allocate();
+  } else {
+    deactivateFramework(frameworkId);
+  }
 }
 
 
@@ -461,7 +466,7 @@ void HierarchicalAllocatorProcess::addSlave(
   // leverage state and features such as the FrameworkSorter and OfferFilter.
   if (unavailability.isSome()) {
     slaves[slaveId].maintenance =
-      typename Slave::Maintenance(unavailability.get());
+      Slave::Maintenance(unavailability.get());
   }
 
   // If we have just a number of recovered agents, we cannot distinguish
@@ -852,7 +857,7 @@ void HierarchicalAllocatorProcess::updateUnavailability(
   // If we have a new unavailability.
   if (unavailability.isSome()) {
     slaves[slaveId].maintenance =
-      typename Slave::Maintenance(unavailability.get());
+      Slave::Maintenance(unavailability.get());
   }
 
   allocate(slaveId);
@@ -876,7 +881,7 @@ void HierarchicalAllocatorProcess::updateInverseOffer(
 
   // We use a reference by alias because we intend to modify the
   // `maintenance` and to improve readability.
-  typename Slave::Maintenance& maintenance = slaves[slaveId].maintenance.get();
+  Slave::Maintenance& maintenance = slaves[slaveId].maintenance.get();
 
   // Only handle inverse offers that we currently have outstanding. If it is not
   // currently outstanding this means it is old and can be safely ignored.
@@ -1727,7 +1732,7 @@ void HierarchicalAllocatorProcess::deallocate(
       if (slaves[slaveId].maintenance.isSome()) {
         // We use a reference by alias because we intend to modify the
         // `maintenance` and to improve readability.
-        typename Slave::Maintenance& maintenance =
+        Slave::Maintenance& maintenance =
           slaves[slaveId].maintenance.get();
 
         hashmap<string, Resources> allocation =

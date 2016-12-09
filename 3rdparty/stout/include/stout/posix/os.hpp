@@ -42,6 +42,7 @@
 #include <sys/sysinfo.h>
 #endif // __linux__
 
+#include <sys/ioctl.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 
@@ -459,12 +460,6 @@ inline Option<std::string> which(
 }
 
 
-inline std::string temp()
-{
-  return "/tmp";
-}
-
-
 // Create pipes for interprocess communication.
 inline Try<Nothing> pipe(int pipe_fd[2])
 {
@@ -510,6 +505,26 @@ inline Try<Nothing> setctty(int fd)
   if (ioctl(fd, TIOCSCTTY, nullptr) == -1) {
     return ErrnoError();
   }
+
+  return Nothing();
+}
+
+
+// Update the window size for
+// the terminal represented by fd.
+inline Try<Nothing> setWindowSize(
+    int fd,
+    unsigned short rows,
+    unsigned short columns)
+{
+  struct winsize winsize;
+  winsize.ws_row = rows;
+  winsize.ws_col = columns;
+
+  if (ioctl(fd, TIOCSWINSZ, &winsize) != 0) {
+    return ErrnoError();
+  }
+
   return Nothing();
 }
 

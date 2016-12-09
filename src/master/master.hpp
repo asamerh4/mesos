@@ -643,9 +643,10 @@ protected:
       Framework* framework,
       const std::vector<TaskStatus>& statuses);
 
-  // When a slave that is known to the master re-registers, we need to
-  // reconcile the master's view of the slave's tasks and executors.
-  // This function also sends the `ReregisterSlaveMessage`.
+  // When a slave that was previously registered with this master
+  // re-registers, we need to reconcile the master's view of the
+  // slave's tasks and executors.  This function also sends the
+  // `ReregisterSlaveMessage`.
   void reconcileKnownSlave(
       Slave* slave,
       const std::vector<ExecutorInfo>& executors,
@@ -653,6 +654,23 @@ protected:
 
   // Add a framework.
   void addFramework(Framework* framework);
+
+  // Recover a framework from its `FrameworkInfo`. This happens after
+  // master failover, when an agent running one of the framework's
+  // tasks re-registers or when the framework itself re-registers,
+  // whichever happens first. The result of this function is a
+  // registered, inactive framework with state `RECOVERED`.
+  void recoverFramework(const FrameworkInfo& info);
+
+  // Transition a framework from `RECOVERED` to `CONNECTED` state and
+  // activate it. This happens at most once after master failover, the
+  // first time that the framework re-registers with the new master.
+  // Exactly one of `newPid` or `http` must be provided.
+  void activateRecoveredFramework(
+      Framework* framework,
+      const FrameworkInfo& frameworkInfo,
+      const Option<process::UPID>& pid,
+      const Option<HttpConnection>& http);
 
   // Replace the scheduler for a framework with a new process ID, in
   // the event of a scheduler failover.
@@ -1746,10 +1764,6 @@ private:
 
     hashmap<FrameworkID, Framework*> registered;
 
-    // `recovered` contains 'FrameworkInfo's for frameworks that have
-    // not yet re-registered after master failover.
-    hashmap<FrameworkID, FrameworkInfo> recovered;
-
     boost::circular_buffer<std::shared_ptr<Framework>> completed;
 
     // Principals of frameworks keyed by PID.
@@ -2178,11 +2192,27 @@ private:
 };
 
 
-// Information about a connected or completed framework.
 // TODO(bmahler): Keeping the task and executor information in sync
 // across the Slave and Framework structs is error prone!
 struct Framework
 {
+  enum State
+  {
+    // Framework is currently connected. Note that frameworks must
+    // also be `active` to be eligible to receive offers.
+    CONNECTED,
+
+    // Framework was previously connected to this master. A framework
+    // becomes disconnected when there is a socket error.
+    DISCONNECTED,
+
+    // Framework has never connected to this master. This implies the
+    // master failed over and the framework has not yet re-registered,
+    // but some framework state has been recovered from re-registering
+    // agents that are running tasks for the framework.
+    RECOVERED
+  };
+
   Framework(Master* const _master,
             const Flags& masterFlags,
             const FrameworkInfo& _info,
@@ -2191,7 +2221,7 @@ struct Framework
     : master(_master),
       info(_info),
       pid(_pid),
-      connected(true),
+      state(CONNECTED),
       active(true),
       registeredTime(time),
       reregisteredTime(time),
@@ -2205,10 +2235,19 @@ struct Framework
     : master(_master),
       info(_info),
       http(_http),
-      connected(true),
+      state(CONNECTED),
       active(true),
       registeredTime(time),
       reregisteredTime(time),
+      completedTasks(masterFlags.max_completed_tasks_per_framework) {}
+
+  Framework(Master* const _master,
+            const Flags& masterFlags,
+            const FrameworkInfo& _info)
+    : master(_master),
+      info(_info),
+      state(RECOVERED),
+      active(false),
       completedTasks(masterFlags.max_completed_tasks_per_framework) {}
 
   ~Framework()
@@ -2263,7 +2302,7 @@ struct Framework
   template <typename Message>
   void send(const Message& message)
   {
-    if (!connected) {
+    if (!connected()) {
       LOG(WARNING) << "Master attempted to send message to disconnected"
                    << " framework " << *this;
     }
@@ -2395,7 +2434,7 @@ struct Framework
     // MESOS-703.
 
     if (source.user() != info.user()) {
-      LOG(WARNING) << "Cannot update FrameworkInfo.user to '" << info.user()
+      LOG(WARNING) << "Cannot update FrameworkInfo.user to '" << source.user()
                    << "' for framework " << id() << ". Check MESOS-703";
     }
 
@@ -2409,12 +2448,12 @@ struct Framework
 
     if (source.checkpoint() != info.checkpoint()) {
       LOG(WARNING) << "Cannot update FrameworkInfo.checkpoint to '"
-                   << stringify(info.checkpoint()) << "' for framework " << id()
-                   << ". Check MESOS-703";
+                   << stringify(source.checkpoint()) << "' for framework "
+                   << id() << ". Check MESOS-703";
     }
 
     if (source.role() != info.role()) {
-      LOG(WARNING) << "Cannot update FrameworkInfo.role to '" << info.role()
+      LOG(WARNING) << "Cannot update FrameworkInfo.role to '" << source.role()
                    << "' for framework " << id() << ". Check MESOS-703";
     }
 
@@ -2426,7 +2465,7 @@ struct Framework
 
     if (source.principal() != info.principal()) {
       LOG(WARNING) << "Cannot update FrameworkInfo.principal to '"
-                   << info.principal() << "' for framework " << id()
+                   << source.principal() << "' for framework " << id()
                    << ". Check MESOS-703";
     }
 
@@ -2467,7 +2506,7 @@ struct Framework
       // Wipe the PID if this is an upgrade from PID to HTTP.
       // TODO(benh): unlink(oldPid);
       pid = None();
-    } else {
+    } else if (http.isSome()) {
       // Cleanup the old HTTP connection.
       // Note that master creates a new HTTP connection for every
       // subscribe request, so 'newHttp' should always be different
@@ -2482,13 +2521,13 @@ struct Framework
 
   // Closes the HTTP connection and stops the heartbeat.
   //
-  // TODO(vinod): Currently 'connected' variable is set separately
+  // TODO(vinod): Currently `state` variable is set separately
   // from this method. We need to make sure these are in sync.
   void closeHttpConnection()
   {
     CHECK_SOME(http);
 
-    if (connected && !http.get().close()) {
+    if (connected() && !http.get().close()) {
       LOG(WARNING) << "Failed to close HTTP pipe for " << *this;
     }
 
@@ -2515,23 +2554,29 @@ struct Framework
     process::spawn(heartbeater.get().get());
   }
 
+  bool connected() const { return state == CONNECTED; }
+
+  bool recovered() const { return state == RECOVERED; }
+
   Master* const master;
 
   FrameworkInfo info;
 
-  // Frameworks can either be connected via HTTP or by message
-  // passing (scheduler driver). Exactly one of 'http' and 'pid'
-  // will be set according to the last connection made by the
-  // framework.
+  // Frameworks can either be connected via HTTP or by message passing
+  // (scheduler driver). At most one of `http` and `pid` will be set
+  // according to the last connection made by the framework; neither
+  // field will be set if the framework is in state `RECOVERED`.
   Option<HttpConnection> http;
   Option<process::UPID> pid;
 
-  // Framework becomes disconnected when the socket closes.
-  bool connected;
+  State state;
 
   // Framework becomes deactivated when it is disconnected or
   // the master receives a DeactivateFrameworkMessage.
   // No offers will be made to a deactivated framework.
+  //
+  // TODO(neilc): Consider replacing this with an additional
+  // `state` enumeration value (MESOS-6719).
   bool active;
 
   process::Time registeredTime;

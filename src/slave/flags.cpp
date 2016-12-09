@@ -44,7 +44,7 @@ mesos::internal::slave::Flags::Flags()
       "hostname",
       "The hostname the agent should report.\n"
       "If left unset, the hostname is resolved from the IP address\n"
-      "that the agent binds to; unless the user explicitly prevents\n"
+      "that the agent advertises; unless the user explicitly prevents\n"
       "that, using `--no-hostname_lookup`, in which case the IP itself\n"
       "is used.");
 
@@ -96,14 +96,20 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::isolation,
       "isolation",
-      "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem`, or\n"
+      "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem` (or \n"
+      "`windows/cpu` if you are on Windows), or\n"
       "`cgroups/cpu,cgroups/mem`, or network/port_mapping\n"
       "(configure with flag: `--with-network-isolator` to enable),\n"
       "or `gpu/nvidia` for nvidia specific gpu isolation,\n"
       "or load an alternate isolator module using the `--modules`\n"
       "flag. Note that this flag is only relevant for the Mesos\n"
       "Containerizer.",
-      "posix/cpu,posix/mem");
+#ifndef __WINDOWS__
+      "posix/cpu,posix/mem"
+#else
+      "windows/cpu"
+#endif // !__WINDOWS__
+      );
 
   add(&Flags::launcher,
       "launcher",
@@ -211,14 +217,22 @@ mesos::internal::slave::Flags::Flags()
       "not across reboots). This directory will be cleared on reboot.\n"
       "(Example: `/var/run/mesos`)",
       []() -> string {
+#ifdef __WINDOWS__
+        // TODO(josephw): After adding a platform-dependent helper
+        // for determining the "var" directory, consider removing
+        // this `#ifdef`.
+        return path::join(os::temp(), "mesos", "runtime");
+#else
         Result<string> user = os::user();
         CHECK_SOME(user);
 
+        // TODO(andschwa): Check for permissions instead of user.
         if (user.get() == "root") {
-            return DEFAULT_ROOT_RUNTIME_DIRECTORY;
+          return path::join("/var", "run", "mesos");
         } else {
-            return path::join(os::temp(), "mesos", "runtime");
+          return path::join(os::temp(), "mesos", "runtime");
         }
+#endif // __WINDOWS__
       }());
 
   add(&Flags::launcher_dir, // TODO(benh): This needs a better name.

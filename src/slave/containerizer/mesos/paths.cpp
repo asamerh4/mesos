@@ -139,13 +139,64 @@ Result<int> getContainerStatus(
 
 
 #ifndef __WINDOWS__
-string getContainerIOSwitchboardSocketPath(
+string getContainerIOSwitchboardPath(
     const string& runtimeDir,
     const ContainerID& containerId)
 {
   return path::join(
       getRuntimePath(runtimeDir, containerId),
-      IO_SWITCHBOARD_SOCKET_FILE);
+      IO_SWITCHBOARD_DIRECTORY);
+}
+
+
+string getContainerIOSwitchboardPidPath(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  return path::join(
+      getContainerIOSwitchboardPath(runtimeDir, containerId),
+      PID_FILE);
+}
+
+
+Result<pid_t> getContainerIOSwitchboardPid(
+    const std::string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = getContainerIOSwitchboardPidPath(
+      runtimeDir, containerId);
+
+  if (!os::exists(path)) {
+    // This is possible because we don't atomically create the
+    // directory and write the 'pid' file and thus we might
+    // terminate/restart after we've created the directory but
+    // before we've written the file.
+    return None();
+  }
+
+  Try<string> read = os::read(path);
+  if (read.isError()) {
+    return Error("Failed to recover pid of io switchboard: " + read.error());
+  }
+
+  Try<pid_t> pid = numify<pid_t>(read.get());
+  if (pid.isError()) {
+    return Error(
+        "Failed to numify pid '" + read.get() +
+        "' of io switchboard at '" + path + "': " + pid.error());
+  }
+
+  return pid.get();
+}
+
+
+string getContainerIOSwitchboardSocketPath(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  return path::join(
+      getContainerIOSwitchboardPath(runtimeDir, containerId),
+      SOCKET_FILE);
 }
 
 
@@ -177,6 +228,31 @@ Result<unix::Address> getContainerIOSwitchboardAddress(
   return address.get();
 }
 #endif // __WINDOWS__
+
+
+std::string getContainerForceDestroyOnRecoveryPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId)
+{
+  return path::join(
+      getRuntimePath(runtimeDir, containerId),
+      FORCE_DESTROY_ON_RECOVERY_FILE);
+}
+
+
+bool getContainerForceDestroyOnRecovery(
+    const std::string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = getContainerForceDestroyOnRecoveryPath(
+      runtimeDir, containerId);
+
+  if (os::exists(path)) {
+    return true;
+  }
+
+  return false;
+}
 
 
 Result<ContainerTermination> getContainerTermination(

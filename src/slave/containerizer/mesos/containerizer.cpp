@@ -87,6 +87,7 @@
 #include "slave/containerizer/mesos/isolators/filesystem/shared.hpp"
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
 #include "slave/containerizer/mesos/isolators/linux/capabilities.hpp"
+#include "slave/containerizer/mesos/isolators/namespaces/ipc.hpp"
 #include "slave/containerizer/mesos/isolators/namespaces/pid.hpp"
 #include "slave/containerizer/mesos/isolators/network/cni/cni.hpp"
 #include "slave/containerizer/mesos/isolators/volume/image.hpp"
@@ -148,10 +149,15 @@ Try<MesosContainerizer*> MesosContainerizer::create(
 
   if (flags.isolation == "process") {
     LOG(WARNING) << "The 'process' isolation flag is deprecated, "
-                 << "please update your flags to"
-                 << " '--isolation=posix/cpu,posix/mem'.";
+                 << "please update your flags to "
+                 << "'--isolation=posix/cpu,posix/mem' (or "
+                 << "'--isolation=windows/cpu' if you are on Windows).";
 
+#ifndef __WINDOWS__
     flags_.isolation = "posix/cpu,posix/mem";
+#else
+    flags_.isolation = "windows/cpu";
+#endif // !__WINDOWS__
   } else if (flags.isolation == "cgroups") {
     LOG(WARNING) << "The 'cgroups' isolation flag is deprecated, "
                  << "please update your flags to"
@@ -163,11 +169,16 @@ Try<MesosContainerizer*> MesosContainerizer::create(
   // One and only one filesystem isolator is required. The filesystem
   // isolator is responsible for preparing the filesystems for
   // containers (e.g., prepare filesystem roots, volumes, etc.). If
-  // the user does not specify one, 'filesystem/posix' will be used.
+  // the user does not specify one, 'filesystem/posix' (or
+  // 'filesystem/windows' on Windows) will be used
   //
   // TODO(jieyu): Check that only one filesystem isolator is used.
   if (!strings::contains(flags_.isolation, "filesystem/")) {
+#ifndef __WINDOWS__
     flags_.isolation += ",filesystem/posix";
+#else
+    flags_.isolation += ",filesystem/windows";
+#endif // !__WINDOWS__
   }
 
   if (strings::contains(flags_.isolation, "posix/disk")) {
@@ -288,7 +299,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
 
 #if ENABLE_XFS_DISK_ISOLATOR
     {"disk/xfs", &XfsDiskIsolatorProcess::create},
-#endif
+#endif // ENABLE_XFS_DISK_ISOLATOR
 #else
     {"windows/cpu", &WindowsCpuIsolatorProcess::create},
 #endif // __WINDOWS__
@@ -322,6 +333,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
         return NvidiaGpuIsolatorProcess::create(flags, nvidia.get());
       }},
 
+    {"namespaces/ipc", &NamespacesIPCIsolatorProcess::create},
     {"namespaces/pid", &NamespacesPidIsolatorProcess::create},
     {"network/cni", &NetworkCniIsolatorProcess::create},
 #endif // __linux__
@@ -755,9 +767,18 @@ Future<Nothing> MesosContainerizerProcess::recover(
     containers_[containerId] = container;
 
     // Add recoverable nested containers to the list of 'ContainerState'.
+    //
+    // TODO(klueska): The final check in the if statement makes sure
+    // that this container was not marked for forcible destruction on
+    // recover. We currently only support 'destroy-on-recovery'
+    // semantics for nested `DEBUG` containers. If we ever support it
+    // on other types of containers, we may need duplicate this logic
+    // elsewhere.
     if (containerId.has_parent() &&
         alive.contains(getRootContainerId(containerId)) &&
-        pid.isSome()) {
+        pid.isSome() &&
+        !containerizer::paths::getContainerForceDestroyOnRecovery(
+            flags.runtime_dir, containerId)) {
       CHECK_SOME(directory);
       ContainerState state =
         protobuf::slave::createContainerState(
@@ -1027,6 +1048,21 @@ Future<bool> MesosContainerizerProcess::launch(
     return Failure(
         "Failed to make the containerizer runtime directory"
         " '" + runtimePath + "': " + mkdir.error());
+  }
+
+  // If we are launching a `DEBUG` container,
+  // checkpoint a file to mark it as destroy-on-recovery.
+  if (containerConfig.has_container_class() &&
+      containerConfig.container_class() == ContainerClass::DEBUG) {
+    const string path =
+      containerizer::paths::getContainerForceDestroyOnRecoveryPath(
+          flags.runtime_dir, containerId);
+
+    Try<Nothing> checkpointed = slave::state::checkpoint(path, "");
+    if (checkpointed.isError()) {
+      return Failure("Failed to checkpoint file to mark DEBUG container"
+                     " as 'destroy-on-recovery'");
+    }
   }
 
   Owned<Container> container(new Container());

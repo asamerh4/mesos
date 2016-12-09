@@ -26,6 +26,7 @@
 
 #include <stout/try.hpp>
 
+#include <mesos/slave/containerizer.hpp>
 #include <mesos/slave/container_logger.hpp>
 
 #include "slave/flags.hpp"
@@ -60,9 +61,16 @@ public:
 
   virtual bool supportsNesting();
 
+  virtual process::Future<Nothing> recover(
+    const std::list<mesos::slave::ContainerState>& states,
+    const hashset<ContainerID>& orphans);
+
   virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> prepare(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig);
+
+  virtual process::Future<mesos::slave::ContainerLimitation> watch(
+    const ContainerID& containerId);
 
   virtual process::Future<Nothing> cleanup(
       const ContainerID& containerId);
@@ -73,12 +81,13 @@ public:
 private:
   struct Info
   {
-    Info(pid_t _pid, const process::Future<Option<int>>& _status)
+    Info(Option<pid_t> _pid, const process::Future<Option<int>>& _status)
       : pid(_pid),
         status(_status) {}
 
-    pid_t pid;
+    Option<pid_t> pid;
     process::Future<Option<int>> status;
+    process::Promise<mesos::slave::ContainerLimitation> limitation;
   };
 
   IOSwitchboard(
@@ -90,6 +99,12 @@ private:
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const mesos::slave::ContainerLogger::SubprocessInfo& loggerInfo);
+
+#ifndef __WINDOWS__
+  void reaped(
+      const ContainerID& containerId,
+      const process::Future<Option<int>>& future);
+#endif // __WINDOWS__
 
   Flags flags;
   bool local;
@@ -115,13 +130,6 @@ class IOSwitchboardServer
 public:
   static const char NAME[];
 
-  // Constant FD numbers used by I/O switchboard server.
-  static const int STDIN_TO_FD;
-  static const int STDOUT_FROM_FD;
-  static const int STDERR_FROM_FD;
-  static const int STDOUT_TO_FD;
-  static const int STDERR_TO_FD;
-
   static Try<process::Owned<IOSwitchboardServer>> create(
       bool tty,
       int stdinToFd,
@@ -134,7 +142,12 @@ public:
 
   ~IOSwitchboardServer();
 
+  // Run the io switchboard server.
   process::Future<Nothing> run();
+
+  // Forcibly unblock the io switchboard server if it
+  // has been started with `waitForConnection` set to `true`.
+  process::Future<Nothing> unblock();
 
 private:
   IOSwitchboardServer(
@@ -175,44 +188,47 @@ struct IOSwitchboardServerFlags : public virtual flags::FlagsBase
 
     add(&IOSwitchboardServerFlags::tty,
         "tty",
-        "If a pseudo terminal has been allocated for the container.");
+        "If a pseudo terminal has been allocated for the container.",
+         false);
 
     add(&IOSwitchboardServerFlags::stdin_to_fd,
         "stdin_to_fd",
         "The file descriptor where incoming stdin data should be written.",
-        IOSwitchboardServer::STDIN_TO_FD);
+        -1);
 
     add(&IOSwitchboardServerFlags::stdout_from_fd,
         "stdout_from_fd",
         "The file descriptor that should be read to consume stdout data.",
-        IOSwitchboardServer::STDOUT_FROM_FD);
+        -1);
 
     add(&IOSwitchboardServerFlags::stdout_to_fd,
         "stdout_to_fd",
         "A file descriptor where data read from\n"
         "'stdout_from_fd' should be redirected to.",
-        IOSwitchboardServer::STDOUT_TO_FD);
+        -1);
 
     add(&IOSwitchboardServerFlags::stderr_from_fd,
         "stderr_from_fd",
         "The file descriptor that should be read to consume stderr data.",
-        IOSwitchboardServer::STDERR_FROM_FD);
+        -1);
 
     add(&IOSwitchboardServerFlags::stderr_to_fd,
         "stderr_to_fd",
         "A file descriptor where data read from\n"
         "'stderr_from_fd' should be redirected to.",
-        IOSwitchboardServer::STDERR_TO_FD);
+        -1);
 
     add(&IOSwitchboardServerFlags::wait_for_connection,
         "wait_for_connection",
         "A boolean indicating whether the server should wait for the\n"
-        "first connection before reading any data from the '*_from_fd's.");
+        "first connection before reading any data from the '*_from_fd's.",
+        false);
 
     add(&IOSwitchboardServerFlags::socket_path,
         "socket_address",
         "The path of the unix domain socket this\n"
-        "io switchboard should attach itself to.");
+        "io switchboard should attach itself to.",
+        "");
   }
 
   bool tty;

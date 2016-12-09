@@ -336,13 +336,23 @@ PYTHON_PROTOS =								\
 
 V1_JAVA_PROTOS =							\
   java/generated/org/apache/mesos/v1/Protos.java			\
+  java/generated/org/apache/mesos/v1/agent/Protos.java			\
+  java/generated/org/apache/mesos/v1/allocator/Protos.java		\
   java/generated/org/apache/mesos/v1/executor/Protos.java		\
+  java/generated/org/apache/mesos/v1/maintenance/Protos.java		\
+  java/generated/org/apache/mesos/v1/master/Protos.java			\
+  java/generated/org/apache/mesos/v1/quota/Protos.java			\
   java/generated/org/apache/mesos/v1/scheduler/Protos.java
 
-V1_PYTHON_PROTOS =							\
-  python/interface/src/mesos/v1/interface/mesos_pb2.py			\
+V1_PYTHON_PROTOS =                                                      \
+  python/interface/src/mesos/v1/interface/agent_pb2.py                  \
+  python/interface/src/mesos/v1/interface/allocator_pb2.py              \
+  python/interface/src/mesos/v1/interface/executor_pb2.py               \
+  python/interface/src/mesos/v1/interface/maintenance_pb2.py            \
+  python/interface/src/mesos/v1/interface/master_pb2.py                 \
+  python/interface/src/mesos/v1/interface/mesos_pb2.py                  \
+  python/interface/src/mesos/v1/interface/quota_pb2.py                  \
   python/interface/src/mesos/v1/interface/scheduler_pb2.py
-
 
 BUILT_SOURCES +=							\
   $(CXX_LOG_PROTOS)							\
@@ -392,6 +402,26 @@ java/generated/org/apache/mesos/v1/executor/Protos.java: $(V1_EXECUTOR_PROTO)
 	$(MKDIR_P) $(@D)
 	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
 
+java/generated/org/apache/mesos/v1/quota/Protos.java: $(V1_QUOTA_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
+
+java/generated/org/apache/mesos/v1/agent/Protos.java: $(V1_AGENT_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
+
+java/generated/org/apache/mesos/v1/allocator/Protos.java: $(V1_ALLOCATOR_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
+
+java/generated/org/apache/mesos/v1/maintenance/Protos.java: $(V1_MAINTENANCE_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
+
+java/generated/org/apache/mesos/v1/master/Protos.java: $(V1_MASTER_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
+
 java/generated/org/apache/mesos/v1/Protos.java: $(V1_MESOS_PROTO)
 	$(MKDIR_P) $(@D)
 	$(PROTOC) $(PROTOCFLAGS) --java_out=java/generated $^
@@ -423,9 +453,33 @@ python/interface/src/mesos/interface/scheduler_pb2.py: $(SCHEDULER_PROTO)
 		--python_out=python/interface/src/mesos/interface $^
 	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
 
+python/interface/src/mesos/v1/interface/agent_pb2.py: $(V1_AGENT_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) -I$(top_srcdir)/include/mesos/v1/agent $(PROTOCFLAGS)		\
+		--python_out=python/interface/src/mesos/v1/interface $^
+	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
+
+python/interface/src/mesos/v1/interface/allocator_pb2.py: $(V1_ALLOCATOR_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) -I$(top_srcdir)/include/mesos/v1/allocator $(PROTOCFLAGS)	\
+		--python_out=python/interface/src/mesos/v1/interface $^
+	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
+
 python/interface/src/mesos/v1/interface/executor_pb2.py: $(V1_EXECUTOR_PROTO)
 	$(MKDIR_P) $(@D)
 	$(PROTOC) -I$(top_srcdir)/include/mesos/v1/executor $(PROTOCFLAGS)	\
+		--python_out=python/interface/src/mesos/v1/interface $^
+	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
+
+python/interface/src/mesos/v1/interface/maintenance_pb2.py: $(V1_MAINTENANCE_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) -I$(top_srcdir)/include/mesos/v1/maintenance $(PROTOCFLAGS)	\
+		--python_out=python/interface/src/mesos/v1/interface $^
+	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
+
+python/interface/src/mesos/v1/interface/master_pb2.py: $(V1_MASTER_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) -I$(top_srcdir)/include/mesos/v1/master $(PROTOCFLAGS)	\
 		--python_out=python/interface/src/mesos/v1/interface $^
 	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
 
@@ -433,6 +487,12 @@ python/interface/src/mesos/v1/interface/mesos_pb2.py: $(V1_MESOS_PROTO)
 	$(MKDIR_P) $(@D)
 	$(PROTOC) -I$(top_srcdir)/include/mesos/v1 $(PROTOCFLAGS)		\
 		--python_out=python/interface/src/mesos/v1/interface $^
+
+python/interface/src/mesos/v1/interface/quota_pb2.py: $(V1_QUOTA_PROTO)
+	$(MKDIR_P) $(@D)
+	$(PROTOC) -I$(top_srcdir)/include/mesos/v1/quota $(PROTOCFLAGS)		\
+		--python_out=python/interface/src/mesos/v1/interface $^
+	$(SED) -i.bak 's/mesos\.mesos_pb2/mesos_pb2/' $@ && rm $@.bak
 
 python/interface/src/mesos/v1/interface/scheduler_pb2.py: $(V1_SCHEDULER_PROTO)
 	$(MKDIR_P) $(@D)
@@ -1068,6 +1128,7 @@ MESOS_LINUX_FILES =									\
   slave/containerizer/mesos/isolators/gpu/nvml.cpp					\
   slave/containerizer/mesos/isolators/gpu/volume.cpp					\
   slave/containerizer/mesos/isolators/linux/capabilities.cpp				\
+  slave/containerizer/mesos/isolators/namespaces/ipc.cpp				\
   slave/containerizer/mesos/isolators/namespaces/pid.cpp				\
   slave/containerizer/mesos/isolators/network/cni/cni.cpp				\
   slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.cpp	\
@@ -1107,6 +1168,7 @@ MESOS_LINUX_FILES +=									\
   slave/containerizer/mesos/isolators/gpu/nvml.hpp					\
   slave/containerizer/mesos/isolators/gpu/volume.hpp					\
   slave/containerizer/mesos/isolators/linux/capabilities.hpp				\
+  slave/containerizer/mesos/isolators/namespaces/ipc.hpp				\
   slave/containerizer/mesos/isolators/namespaces/pid.hpp				\
   slave/containerizer/mesos/isolators/network/cni/cni.hpp				\
   slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.hpp	\
@@ -1622,8 +1684,13 @@ libjava_la_CPPFLAGS += -I$(srcdir)/java/jni -Ijava/jni
 
 libjava_la_DEPENDENCIES =						\
   $(MESOS_PROTO)							\
+  $(V1_AGENT_PROTO)							\
+  $(V1_ALLOCATOR_PROTO)							\
   $(V1_EXECUTOR_PROTO)							\
+  $(V1_MAINTENANCE_PROTO)						\
+  $(V1_MASTER_PROTO)							\
   $(V1_MESOS_PROTO)							\
+  $(V1_QUOTA_PROTO)							\
   $(V1_SCHEDULER_PROTO)
 
 # We don't add libjava.la to libmesos_no_3rdparty.la so we don't
@@ -2165,6 +2232,7 @@ mesos_tests_SOURCES =						\
   tests/persistent_volume_endpoints_tests.cpp			\
   tests/persistent_volume_tests.cpp				\
   tests/protobuf_io_tests.cpp					\
+  tests/protobuf_utils_tests.cpp				\
   tests/rate_limiting_tests.cpp					\
   tests/reconciliation_tests.cpp				\
   tests/registrar_tests.cpp					\

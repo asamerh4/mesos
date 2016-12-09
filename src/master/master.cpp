@@ -1272,8 +1272,10 @@ void Master::exited(const UPID& pid)
       //    structs, its tasks transitioned to LOST and resources
       //    recovered.
       //
-      // NOTE: If the framework hasn't re-registered since the master
-      // failed over, we assume the framework is checkpointing.
+      // NOTE: If the framework hasn't re-registered yet and no agents
+      // (>= Mesos 1.0) have re-registered that are running any of the
+      // framework's tasks, we can't determine if the framework has
+      // enabled checkpointing. In that case, we assume it has.
       hashset<FrameworkID> frameworkIds =
         slave->tasks.keys() | slave->executors.keys();
 
@@ -1953,7 +1955,7 @@ void Master::_markUnreachableAfterFailover(
 void Master::sendSlaveLost(const SlaveInfo& slaveInfo)
 {
   foreachvalue (Framework* framework, frameworks.registered) {
-    if (!framework->connected) {
+    if (!framework->connected()) {
       continue;
     }
 
@@ -2140,6 +2142,8 @@ void Master::drop(
     const Offer::Operation& operation,
     const string& message)
 {
+  CHECK_NOTNULL(framework);
+
   // TODO(jieyu): Increment a metric.
 
   // NOTE: There is no direct feedback to the framework when an
@@ -2189,7 +2193,7 @@ void Master::receive(
   // is no way for driver based frameworks to detect this in the absence
   // of periodic heartbeat events. We send an error message to the framework
   // causing the scheduler driver to abort when this happens.
-  if (!framework->connected) {
+  if (!framework->connected()) {
     const string error = "Framework disconnected";
 
     LOG(INFO) << "Refusing " << call.type() << " call from framework "
@@ -2477,16 +2481,26 @@ void Master::_subscribe(
     return;
   }
 
-  // If we are here framework has already been assigned an id.
+  // If we are here the framework has already been assigned an id.
   CHECK(!frameworkInfo.id().value().empty());
 
-  if (frameworks.registered.contains(frameworkInfo.id())) {
-    Framework* framework =
-      CHECK_NOTNULL(frameworks.registered[frameworkInfo.id()]);
+  Framework* framework = getFramework(frameworkInfo.id());
 
-    // It is now safe to update the framework fields since the request is now
-    // guaranteed to be successful. We use the fields passed in during
-    // subscription.
+  if (framework == nullptr) {
+    // The framework has not yet re-registered after master failover.
+    // Furthermore, no agents have re-registered running one of this
+    // framework's tasks. Reconstruct a `Framework` object from the
+    // supplied `FrameworkInfo`.
+    recoverFramework(frameworkInfo);
+
+    framework = getFramework(frameworkInfo.id());
+  }
+
+  CHECK_NOTNULL(framework);
+
+  if (!framework->recovered()) {
+    // The framework has previously been registered with this master;
+    // it may or may not currently be connected.
     LOG(INFO) << "Updating info for framework " << framework->id();
 
     framework->updateFrameworkInfo(frameworkInfo);
@@ -2497,45 +2511,9 @@ void Master::_subscribe(
     // Always failover the old framework connection. See MESOS-4712 for details.
     failoverFramework(framework, http);
   } else {
-    // We don't have a framework with this ID, so we must be a newly
-    // elected Mesos master to which either an existing scheduler or a
-    // failed-over one is connecting. Create a Framework object and add
-    // any tasks it has that have been reported by reconnecting slaves.
-    Framework* framework = new Framework(this, flags, frameworkInfo, http);
-
-    // Add active tasks and executors to the framework.
-    foreachvalue (Slave* slave, slaves.registered) {
-      if (slave->tasks.contains(framework->id())) {
-        foreachvalue (Task* task, slave->tasks.at(framework->id())) {
-          framework->addTask(task);
-        }
-      }
-
-      if (slave->executors.contains(framework->id())) {
-        foreachvalue (const ExecutorInfo& executor,
-                      slave->executors.at(framework->id())) {
-          framework->addExecutor(slave->id, executor);
-        }
-      }
-    }
-
-    // NOTE: Need to add the framework _after_ we add its tasks
-    // (above) so that we can properly determine the resources it's
-    // currently using!
-    addFramework(framework);
-
-    FrameworkReregisteredMessage message;
-    message.mutable_framework_id()->MergeFrom(framework->id());
-    message.mutable_master_info()->MergeFrom(info_);
-    framework->send(message);
-
-    // Start the heartbeat after sending SUBSCRIBED event.
-    framework->heartbeat();
+    // The framework has not yet re-registered after master failover.
+    activateRecoveredFramework(framework, frameworkInfo, None(), http);
   }
-
-  CHECK(frameworks.registered.contains(frameworkInfo.id()))
-    << "Unknown framework " << frameworkInfo.id()
-    << " (" << frameworkInfo.name() << ")";
 
   // Broadcast the new framework pid to all the slaves. We have to
   // broadcast because an executor might be running on a slave but
@@ -2764,18 +2742,32 @@ void Master::_subscribe(
     return;
   }
 
-  // If we are here framework has already been assigned an id.
+  // If we are here the framework has already been assigned an id.
   CHECK(!frameworkInfo.id().value().empty());
 
-  if (frameworks.registered.contains(frameworkInfo.id())) {
+  Framework* framework = getFramework(frameworkInfo.id());
+
+  if (framework == nullptr) {
+    // The framework has not yet re-registered after master failover.
+    // Furthermore, no agents have re-registered running one of this
+    // framework's tasks. Reconstruct a `Framework` object from the
+    // supplied `FrameworkInfo`.
+    recoverFramework(frameworkInfo);
+
+    framework = getFramework(frameworkInfo.id());
+  }
+
+  CHECK_NOTNULL(framework);
+
+  if (!framework->recovered()) {
+    // The framework has previously been registered with this master;
+    // it may or may not currently be connected.
+    //
     // Using the "force" field of the scheduler allows us to keep a
     // scheduler that got partitioned but didn't die (in ZooKeeper
     // speak this means didn't lose their session) and then
     // eventually tried to connect to this master even though
     // another instance of their scheduler has reconnected.
-
-    Framework* framework =
-      CHECK_NOTNULL(frameworks.registered[frameworkInfo.id()]);
 
     // Test for the error case first.
     if ((framework->pid != from) && !force) {
@@ -2838,8 +2830,10 @@ void Master::_subscribe(
         removeInverseOffer(inverseOffer, true); // Rescind.
       }
 
-      // TODO(bmahler): Shouldn't this re-link with the scheduler?
-      framework->connected = true;
+      // Relink to the framework and mark it connected. Relinking
+      // might be necessary if the framework link previously broke.
+      link(framework->pid.get());
+      framework->state = Framework::State::CONNECTED;
 
       // Reactivate the framework.
       // NOTE: We do this after recovering resources (above) so that
@@ -2856,46 +2850,9 @@ void Master::_subscribe(
       return;
     }
   } else {
-    // We don't have a framework with this ID, so we must be a newly
-    // elected Mesos master to which either an existing scheduler or a
-    // failed-over one is connecting. Create a Framework object and add
-    // any tasks it has that have been reported by reconnecting slaves.
-    Framework* framework = new Framework(this, flags, frameworkInfo, from);
-
-    // Add active tasks and executors to the framework.
-    foreachvalue (Slave* slave, slaves.registered) {
-      if (slave->tasks.contains(framework->id())) {
-        foreachvalue (Task* task, slave->tasks.at(framework->id())) {
-          framework->addTask(task);
-        }
-      }
-
-      if (slave->executors.contains(framework->id())) {
-        foreachvalue (const ExecutorInfo& executor,
-                      slave->executors.at(framework->id())) {
-          framework->addExecutor(slave->id, executor);
-        }
-      }
-    }
-
-    // N.B. Need to add the framework _after_ we add its tasks
-    // (above) so that we can properly determine the resources it's
-    // currently using!
-    addFramework(framework);
-
-    // TODO(bmahler): We have to send a registered message here for
-    // the re-registering framework, per the API contract. Send
-    // re-register here per MESOS-786; requires deprecation or it
-    // will break frameworks.
-    FrameworkRegisteredMessage message;
-    message.mutable_framework_id()->MergeFrom(framework->id());
-    message.mutable_master_info()->MergeFrom(info_);
-    framework->send(message);
+    // The framework has not yet re-registered after master failover.
+    activateRecoveredFramework(framework, frameworkInfo, from, None());
   }
-
-  CHECK(frameworks.registered.contains(frameworkInfo.id()))
-    << "Unknown framework " << frameworkInfo.id()
-    << " (" << frameworkInfo.name() << ")";
 
   // Broadcast the new framework pid to all the slaves. We have to
   // broadcast because an executor might be running on a slave but
@@ -2960,7 +2917,7 @@ void Master::disconnect(Framework* framework)
 
   LOG(INFO) << "Disconnecting framework " << *framework;
 
-  framework->connected = false;
+  framework->state = Framework::State::DISCONNECTED;
 
   if (framework->pid.isSome()) {
     // Remove the framework from authenticated. This is safe because
@@ -3195,6 +3152,8 @@ Future<bool> Master::authorizeTask(
     const TaskInfo& task,
     Framework* framework)
 {
+  CHECK_NOTNULL(framework);
+
   if (authorizer.isNone()) {
     return true; // Authorization is disabled.
   }
@@ -5559,33 +5518,25 @@ void Master::__reregisterSlave(
   hashset<FrameworkID> ids;
 
   // TODO(joerg84): Remove this after a deprecation cycle starting
-  // with the 1.0 release. It is only required if an older
-  // (pre 1.0 agent) reregisters with a newer master.
-  // In that case the agent does not have the 'frameworks' message
-  // set which is used below to retrieve the framework information.
+  // with the 1.0 release. It is only required if an older (pre 1.0)
+  // agent reregisters with a newer master.  In that case the agent
+  // does not have the `frameworks` field set which is used below to
+  // retrieve the framework information.
   foreach (const Task& task, tasks) {
-    Framework* framework = getFramework(task.framework_id());
-
-    if (framework != nullptr && !ids.contains(framework->id())) {
-      UpdateFrameworkMessage message;
-      message.mutable_framework_id()->MergeFrom(framework->id());
-
-      // TODO(anand): We set 'pid' to UPID() for http frameworks
-      // as 'pid' was made optional in 0.24.0. In 0.25.0, we
-      // no longer have to set pid here for http frameworks.
-      message.set_pid(framework->pid.getOrElse(UPID()));
-
-      send(slave->pid, message);
-
-      ids.insert(framework->id());
-    }
+    ids.insert(task.framework_id());
   }
 
   foreach (const FrameworkInfo& frameworkInfo, frameworks) {
     CHECK(frameworkInfo.has_id());
-    Framework* framework = getFramework(frameworkInfo.id());
+    ids.insert(frameworkInfo.id());
+  }
 
-    if (framework != nullptr && !ids.contains(framework->id())) {
+  foreach (const FrameworkID& frameworkId, ids) {
+    Framework* framework = getFramework(frameworkId);
+
+    // We don't need to send the PIDs of disconnected frameworks to
+    // re-registering slaves.
+    if (framework != nullptr && framework->connected()) {
       UpdateFrameworkMessage message;
       message.mutable_framework_id()->MergeFrom(framework->id());
 
@@ -5595,15 +5546,25 @@ void Master::__reregisterSlave(
       message.set_pid(framework->pid.getOrElse(UPID()));
 
       send(slave->pid, message);
-
-      ids.insert(framework->id());
-    } else {
-      // The framework hasn't yet reregistered with the master,
-      // hence we store the 'FrameworkInfo' in the recovered list.
-      // TODO(joerg84): Consider recovering this information from
-      // registrar instead of from agents.
-      this->frameworks.recovered[frameworkInfo.id()] = frameworkInfo;
     }
+  }
+
+  // If the agent is running any frameworks the master doesn't know
+  // about, recover the framework using the `FrameworkInfo` supplied
+  // by the agent. We don't recover frameworks that have already
+  // completed at the master.
+  foreach (const FrameworkInfo& frameworkInfo, frameworks) {
+    if (getFramework(frameworkInfo.id()) != nullptr) {
+      continue;
+    }
+    if (isCompletedFramework(frameworkInfo.id())) {
+      continue;
+    }
+
+    LOG(INFO) << "Recovering framework " << frameworkInfo.id()
+              << " from re-registering agent " << *slave;
+
+    recoverFramework(frameworkInfo);
   }
 
   // NOTE: Here we always send the message. Slaves whose version are
@@ -5822,7 +5783,7 @@ void Master::statusUpdate(StatusUpdate update, const UPID& pid)
 
   // A framework might not have re-registered upon a master failover or
   // got disconnected.
-  if (framework != nullptr && framework->connected) {
+  if (framework != nullptr && framework->connected()) {
     forward(update, pid, framework);
   } else {
     validStatusUpdate = false;
@@ -5938,11 +5899,13 @@ void Master::exitedExecutor(
 
   // TODO(vinod): Reliably forward this message to the scheduler.
   Framework* framework = getFramework(frameworkId);
-  if (framework == nullptr) {
+  if (framework == nullptr || !framework->connected()) {
+    string status = (framework == nullptr ? "unknown" : "disconnected");
+
     LOG(WARNING)
       << "Not forwarding exited executor message for executor '" << executorId
       << "' of framework " << frameworkId << " on agent " << *slave
-      << " because the framework is unknown";
+      << " because the framework is " << status;
 
     return;
   }
@@ -6086,24 +6049,13 @@ void Master::_markUnreachable(
   foreachkey (const FrameworkID& frameworkId, utils::copy(slave->tasks)) {
     Framework* framework = getFramework(frameworkId);
 
-    // If the framework has not yet re-registered after master failover,
-    // its FrameworkInfo will be in the `recovered` collection. Note that
-    // if the master knows about a task, its FrameworkInfo must appear in
-    // either the `registered` or `recovered` collections.
-    //
-    // NOTE: If the framework is only running tasks on pre-1.0 agents
-    // and the framework hasn't yet re-registered, its FrameworkInfo
-    // will not appear in `recovered`. We can't accurately determine
-    // whether the framework is partition-aware; we assume it is NOT
-    // partition-aware, since using TASK_LOST ensures compatibility
-    // with the previous (and default) Mesos behavior.
-    Option<FrameworkInfo> frameworkInfo;
-
-    if (framework != nullptr) {
-      frameworkInfo = framework->info;
-    } else if (frameworks.recovered.contains(frameworkId)) {
-      frameworkInfo = frameworks.recovered[frameworkId];
-    } else {
+    if (framework == nullptr) {
+      // If the framework is only running tasks on pre-1.0 agents and
+      // the framework hasn't yet re-registered, the master doesn't
+      // have a FrameworkInfo for it, and hence we cannot accurately
+      // determine whether the framework is partition-aware. We assume
+      // it is NOT partition-aware, since using TASK_LOST ensures
+      // compatibility with the previous (and default) Mesos behavior.
       LOG(WARNING) << "Unable to determine if framework " << frameworkId
                    << " is partition-aware, because the cluster contains"
                    << " agents running an old version of Mesos; upgrading"
@@ -6111,8 +6063,8 @@ void Master::_markUnreachable(
     }
 
     TaskState newTaskState = TASK_UNREACHABLE;
-    if (frameworkInfo.isNone() || !protobuf::frameworkHasCapability(
-            frameworkInfo.get(), FrameworkInfo::Capability::PARTITION_AWARE)) {
+    if (framework == nullptr || !protobuf::frameworkHasCapability(
+            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
       newTaskState = TASK_LOST;
     }
 
@@ -6136,9 +6088,12 @@ void Master::_markUnreachable(
       updateTask(task, update);
       removeTask(task);
 
-      if (framework == nullptr) {
+      if (framework == nullptr || !framework->connected()) {
+        string status = (framework == nullptr ? "unknown" : "disconnected");
+
         LOG(WARNING) << "Dropping update " << update
-                     << " for unknown framework " << frameworkId;
+                     << " for " << status
+                     << " framework " << frameworkId;
       } else {
         forward(update, UPID(), framework);
       }
@@ -6467,7 +6422,7 @@ void Master::frameworkFailoverTimeout(const FrameworkID& frameworkId,
 {
   Framework* framework = getFramework(frameworkId);
 
-  if (framework != nullptr && !framework->connected) {
+  if (framework != nullptr && !framework->connected()) {
     // If the re-registration time has not changed, then the framework
     // has not re-registered within the failover timeout.
     if (framework->reregisteredTime == reregisteredTime) {
@@ -6915,8 +6870,8 @@ void Master::reconcileKnownSlave(
       // master has a task that the agent doesn't know about, the
       // framework must have reregistered with this master since the
       // last master failover.
-      Framework* framework = getFramework(frameworkId);
-      CHECK_NOTNULL(framework);
+      Framework* framework = CHECK_NOTNULL(getFramework(frameworkId));
+      CHECK(!framework->recovered());
 
       reconcile.mutable_framework_id()->CopyFrom(frameworkId);
       reconcile.mutable_framework()->CopyFrom(framework->info);
@@ -6988,9 +6943,11 @@ void Master::reconcileKnownSlave(
   // Send ShutdownFrameworkMessages for frameworks that are completed.
   // This could happen if the message wasn't received by the slave
   // (e.g., slave was down, partitioned).
+  //
   // NOTE: This is a short-term hack because this information is lost
   // when the master fails over. Also, we only store a limited number
   // of completed frameworks.
+  //
   // TODO(vinod): Revisit this when registrar is in place. It would
   // likely involve storing this information in the registrar.
   foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
@@ -7016,29 +6973,39 @@ void Master::addFramework(Framework* framework)
 
   frameworks.registered[framework->id()] = framework;
 
-  // Remove from 'frameworks.recovered' if necessary.
-  frameworks.recovered.erase(framework->id());
+  if (framework->connected()) {
+    if (framework->pid.isSome()) {
+      link(framework->pid.get());
+    } else {
+      CHECK_SOME(framework->http);
 
-  if (framework->pid.isSome()) {
-    link(framework->pid.get());
+      const HttpConnection& http = framework->http.get();
+
+      http.closed()
+        .onAny(defer(self(), &Self::exited, framework->id(), http));
+    }
+  }
+
+  auto addFrameworkRole = [this](Framework* framework, const string& role) {
+    CHECK(isWhitelistedRole(role))
+      << "Unknown role '" << role << "'"
+      << " of framework " << *framework;
+
+    if (!activeRoles.contains(role)) {
+      activeRoles[role] = new Role();
+    }
+    activeRoles.at(role)->addFramework(framework);
+  };
+
+  if (protobuf::frameworkHasCapability(
+          framework->info,
+          FrameworkInfo::Capability::MULTI_ROLE)) {
+    foreach (const string& role, framework->info.roles()) {
+      addFrameworkRole(framework, role);
+    }
   } else {
-    CHECK_SOME(framework->http);
-
-    const HttpConnection& http = framework->http.get();
-
-    http.closed()
-      .onAny(defer(self(), &Self::exited, framework->id(), http));
+    addFrameworkRole(framework, framework->info.role());
   }
-
-  const string& role = framework->info.role();
-  CHECK(isWhitelistedRole(role))
-    << "Unknown role " << role
-    << " of framework " << *framework;
-
-  if (!activeRoles.contains(role)) {
-    activeRoles[role] = new Role();
-  }
-  activeRoles[role]->addFramework(framework);
 
   // There should be no offered resources yet!
   CHECK_EQ(Resources(), framework->totalOfferedResources);
@@ -7046,7 +7013,8 @@ void Master::addFramework(Framework* framework)
   allocator->addFramework(
       framework->id(),
       framework->info,
-      framework->usedResources);
+      framework->usedResources,
+      framework->active);
 
   // Export framework metrics if a principal is specified in `FrameworkInfo`.
 
@@ -7072,13 +7040,127 @@ void Master::addFramework(Framework* framework)
 }
 
 
+void Master::recoverFramework(const FrameworkInfo& info)
+{
+  CHECK(!frameworks.registered.contains(info.id()));
+
+  Framework* framework = new Framework(this, flags, info);
+
+  // Add active tasks and executors to the framework.
+  foreachvalue (Slave* slave, slaves.registered) {
+    if (slave->tasks.contains(framework->id())) {
+      foreachvalue (Task* task, slave->tasks.at(framework->id())) {
+        framework->addTask(task);
+      }
+    }
+
+    if (slave->executors.contains(framework->id())) {
+      foreachvalue (const ExecutorInfo& executor,
+                    slave->executors.at(framework->id())) {
+        framework->addExecutor(slave->id, executor);
+      }
+    }
+  }
+
+  addFramework(framework);
+}
+
+
+void Master::activateRecoveredFramework(
+    Framework* framework,
+    const FrameworkInfo& frameworkInfo,
+    const Option<UPID>& pid,
+    const Option<HttpConnection>& http)
+{
+  // Exactly one of `pid` or `http` must be provided.
+  CHECK(pid.isSome() != http.isSome());
+
+  CHECK_NOTNULL(framework);
+  CHECK(framework->recovered());
+  CHECK(!framework->active);
+  CHECK(framework->offers.empty());
+  CHECK(framework->inverseOffers.empty());
+  CHECK(framework->pid.isNone());
+  CHECK(framework->http.isNone());
+
+  // The `FrameworkInfo` might have changed.
+  LOG(INFO) << "Updating info for framework " << framework->id();
+
+  framework->updateFrameworkInfo(frameworkInfo);
+  allocator->updateFramework(framework->id(), framework->info);
+
+  // Updating `registeredTime` here is debatable: ideally,
+  // `registeredTime` would be the time at which the framework first
+  // registered with the master. However, we cannot determine this
+  // because the time at which a framework first registered is not
+  // persisted across master failover.
+  framework->registeredTime = Clock::now();
+  framework->reregisteredTime = Clock::now();
+
+  // Update the framework's connection state.
+  framework->state = Framework::State::CONNECTED;
+
+  if (pid.isSome()) {
+    framework->updateConnection(pid.get());
+    link(pid.get());
+  } else {
+    framework->updateConnection(http.get());
+    http->closed()
+      .onAny(defer(self(), &Self::exited, framework->id(), http.get()));
+  }
+
+  // Activate the framework.
+  framework->active = true;
+  allocator->activateFramework(framework->id());
+
+  // Export framework metrics if a principal is specified in `FrameworkInfo`.
+  Option<string> principal = framework->info.has_principal()
+    ? Option<string>(framework->info.principal())
+    : None();
+
+  if (framework->pid.isSome()) {
+    CHECK(!frameworks.principals.contains(framework->pid.get()));
+    frameworks.principals.put(framework->pid.get(), principal);
+  }
+
+  // We expect the framework metrics for this principal to be created
+  // when the framework is recovered. This implies that the framework
+  // principal cannot change on re-registration, which is currently
+  // the case (MESOS-2842).
+  if (principal.isSome()) {
+    CHECK(metrics->frameworks.contains(principal.get()));
+  }
+
+  if (pid.isSome()) {
+    // TODO(bmahler): We have to send a registered message here for
+    // the re-registering framework, per the API contract. Send
+    // re-register here per MESOS-786; requires deprecation or it
+    // will break frameworks.
+    FrameworkRegisteredMessage message;
+    message.mutable_framework_id()->MergeFrom(framework->id());
+    message.mutable_master_info()->MergeFrom(info_);
+    framework->send(message);
+  } else {
+    FrameworkReregisteredMessage message;
+    message.mutable_framework_id()->MergeFrom(framework->id());
+    message.mutable_master_info()->MergeFrom(info_);
+    framework->send(message);
+
+    // Start the heartbeat after sending SUBSCRIBED event.
+    framework->heartbeat();
+  }
+}
+
+
 void Master::failoverFramework(Framework* framework, const HttpConnection& http)
 {
+  CHECK_NOTNULL(framework);
+
   // Notify the old connected framework that it has failed over.
   // This is safe to do even if it is a retry because the framework is expected
   // to close the old connection (and hence not receive any more responses)
   // before sending subscription request on a new connection.
-  if (framework->connected) {
+  if (framework->connected()) {
     FrameworkErrorMessage message;
     message.set_message("Framework failed over");
     framework->send(message);
@@ -7118,6 +7200,8 @@ void Master::failoverFramework(Framework* framework, const HttpConnection& http)
 // event of a scheduler failover.
 void Master::failoverFramework(Framework* framework, const UPID& newPid)
 {
+  CHECK_NOTNULL(framework);
+
   const Option<UPID> oldPid = framework->pid;
 
   // There are a few failover cases to consider:
@@ -7130,7 +7214,7 @@ void Master::failoverFramework(Framework* framework, const UPID& newPid)
   //          scheduler as it is necessarily dead.
   //      2.2 This is a duplicate message. In this case, the scheduler
   //          has not failed over, so we do not want to shut it down.
-  if (oldPid != newPid && framework->connected) {
+  if (oldPid != newPid && framework->connected()) {
     FrameworkErrorMessage message;
     message.set_message("Framework failed over");
     framework->send(message);
@@ -7156,9 +7240,6 @@ void Master::failoverFramework(Framework* framework, const UPID& newPid)
 void Master::_failoverFramework(Framework* framework)
 {
   // Remove the framework's offers (if they weren't removed before).
-  // We do this after we have updated the pid and sent the framework
-  // registered message so that the allocator can immediately re-offer
-  // these resources to this framework if it wants.
   foreach (Offer* offer, utils::copy(framework->offers)) {
     allocator->recoverResources(
         offer->framework_id(), offer->slave_id(), offer->resources(), None());
@@ -7180,7 +7261,7 @@ void Master::_failoverFramework(Framework* framework)
   }
 
   // Reconnect and reactivate the framework.
-  framework->connected = true;
+  framework->state = Framework::State::CONNECTED;
 
   // Reactivate the framework.
   // NOTE: We do this after recovering resources (above) so that
@@ -7321,15 +7402,26 @@ void Master::removeFramework(Framework* framework)
 
   framework->unregisteredTime = Clock::now();
 
-  const string& role = framework->info.role();
-  CHECK(activeRoles.contains(role))
-    << "Unknown role " << role
-    << " of framework " << *framework;
+  auto removeFrameworkRole = [this](Framework* framework, const string& role) {
+    CHECK(isWhitelistedRole(role))
+      << "Unknown role '" << role << "'"
+      << " of framework " << *framework;
 
-  activeRoles[role]->removeFramework(framework);
-  if (activeRoles[role]->frameworks.empty()) {
-    delete activeRoles[role];
-    activeRoles.erase(role);
+    activeRoles[role]->removeFramework(framework);
+    if (activeRoles[role]->frameworks.empty()) {
+      delete activeRoles[role];
+      activeRoles.erase(role);
+    }
+  };
+
+  if (protobuf::frameworkHasCapability(
+          framework->info,
+          FrameworkInfo::Capability::MULTI_ROLE)) {
+    foreach (const string& role, framework->info.roles()) {
+      removeFrameworkRole(framework, role);
+    }
+  } else {
+    removeFrameworkRole(framework, framework->info.role());
   }
 
   // TODO(anand): This only works for pid based frameworks. We would
@@ -7354,9 +7446,6 @@ void Master::removeFramework(Framework* framework)
   // Remove the framework.
   frameworks.registered.erase(framework->id());
   allocator->removeFramework(framework->id());
-
-  // Remove from 'frameworks.recovered' if necessary.
-  frameworks.recovered.erase(framework->id());
 
   // The completedFramework buffer now owns the framework pointer.
   frameworks.completed.push_back(shared_ptr<Framework>(framework));
@@ -7394,7 +7483,10 @@ void Master::removeFramework(Slave* slave, Framework* framework)
 
       updateTask(task, update);
       removeTask(task);
-      forward(update, UPID(), framework);
+
+      if (framework->connected()) {
+        forward(update, UPID(), framework);
+      }
     }
   }
 
@@ -7443,7 +7535,11 @@ void Master::addSlave(
   foreachkey (const FrameworkID& frameworkId, slave->executors) {
     Framework* framework = getFramework(frameworkId);
 
-    // The framework might not be re-registered yet.
+    // If the framework has not re-registered yet and this is the
+    // first agent to re-register that is running the framework, we
+    // skip adding the framework's executors here. Instead, the
+    // framework will be recovered in `__reregisterSlave` and its
+    // executors will be added by `recoverFramework`.
     if (framework == nullptr) {
       continue;
     }
@@ -7458,27 +7554,29 @@ void Master::addSlave(
   foreachkey (const FrameworkID& frameworkId, slave->tasks) {
     Framework* framework = getFramework(frameworkId);
 
+    // If the framework has not re-registered yet and this is the
+    // first agent to re-register that is running the framework, we
+    // skip adding the framework's tasks here. Instead, the framework
+    // will be recovered in `__reregisterSlave` and its tasks will be
+    // added by `recoverFramework`.
+    if (framework == nullptr) {
+      continue;
+    }
+
     foreachvalue (Task* task, slave->tasks[frameworkId]) {
-      // The framework might not be re-registered yet.
-      if (framework != nullptr) {
-        framework->addTask(task);
-      } else {
-        // TODO(benh): We should really put a timeout on how long we
-        // keep tasks running on a slave that never have frameworks
-        // reregister and claim them.
-        LOG(WARNING) << "Possibly orphaned task " << task->task_id()
-                     << " of framework " << task->framework_id()
-                     << " running on agent " << *slave;
-      }
+      framework->addTask(task);
     }
   }
 
   // Re-add completed tasks reported by the slave.
+  //
   // Note that a slave considers a framework completed when it has no
-  // tasks/executors running for that framework. But a master considers a
-  // framework completed when the framework is removed after a failover timeout.
-  // TODO(vinod): Reconcile the notion of a completed framework across the
-  // master and slave.
+  // tasks/executors running for that framework. But a master
+  // considers a framework completed when the framework is removed
+  // after a failover timeout.
+  //
+  // TODO(vinod): Reconcile the notion of a completed framework across
+  // the master and slave.
   foreach (const Archive::Framework& completedFramework, completedFrameworks) {
     Framework* framework = getFramework(
         completedFramework.framework_info().id());
@@ -7490,7 +7588,8 @@ void Master::addSlave(
                 << " that ran on agent " << *slave;
         framework->addCompletedTask(task);
       } else {
-        // We could be here if the framework hasn't registered yet.
+        // The framework might not be re-registered yet.
+        //
         // TODO(vinod): Revisit these semantics when we store frameworks'
         // information in the registrar.
         LOG(WARNING) << "Possibly orphaned completed task " << task.task_id()
@@ -7627,7 +7726,7 @@ void Master::_removeSlave(
       updateTask(task, update);
       removeTask(task);
 
-      if (framework == nullptr) {
+      if (framework == nullptr || !framework->connected()) {
         LOG(WARNING) << "Dropping update " << update
                      << " for unknown framework " << frameworkId;
       } else {
@@ -8158,7 +8257,7 @@ double Master::_frameworks_connected()
 {
   double count = 0.0;
   foreachvalue (Framework* framework, frameworks.registered) {
-    if (framework->connected) {
+    if (framework->connected()) {
       count++;
     }
   }
@@ -8170,7 +8269,7 @@ double Master::_frameworks_disconnected()
 {
   double count = 0.0;
   foreachvalue (Framework* framework, frameworks.registered) {
-    if (!framework->connected) {
+    if (!framework->connected()) {
       count++;
     }
   }
