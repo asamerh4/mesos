@@ -146,6 +146,15 @@ public:
         "   ]\n"
         "}");
 
+    add(&Flags::persistent_volume,
+        "persistent_volume",
+        "Enable dynamic reservation and creation of a persistent volume",
+        false);
+
+    add(&Flags::persistent_volume_resource,
+       "persistent_volume_resource",
+       "message -> TaskInfo from mesos.proto");
+
     add(&Flags::framework_name,
         "framework_name",
         "name of the framework",
@@ -189,6 +198,8 @@ public:
   string master;
   string framework_name;
   Option<TaskGroupInfo> task_list;
+  bool persistent_volume;
+  Option<TaskInfo> persistent_volume_resource;
   bool checkpoint;
   Option<std::set<string>> framework_capabilities;
   string role;
@@ -208,7 +219,8 @@ public:
       mesos::ContentType _contentType,
       const Option<Duration>& _killAfter,
       const Option<Credential>& _credential,
-      const Option<TaskGroupInfo>& _taskGroup)
+      const Option<TaskGroupInfo>& _taskGroup,
+      const Option<TaskInfo>& _persistentVolumeResource)
     : state(DISCONNECTED),
       frameworkInfo(_frameworkInfo),
       master(_master),
@@ -216,6 +228,10 @@ public:
       killAfter(_killAfter),
       credential(_credential),
       taskGroup(_taskGroup),
+      persistentVolume(false),
+      persistentVolumeResource(_persistentVolumeResource),
+      persistentVolumeReserved(false),
+      persistentVolumeCreated(false),
       terminatedTaskCount(0),
       dTasksLaunched(0) {}
 
@@ -304,6 +320,33 @@ protected:
     // loop all offers and place tasks...
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
+
+      // check if we need a persistent volume
+
+      if(persistentVolume &&
+         offered.contains(Resources(persistentVolumeResource->resources()))&&
+         !persistentVolumeReserved &&
+         !persistentVolumeCreated){
+            Call call;
+            call.set_type(Call::ACCEPT);
+
+            CHECK(frameworkInfo.has_id());
+
+            call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
+            Call::Accept* accept = call.mutable_accept();
+            accept->add_offer_ids()->CopyFrom(offer.id());
+
+            Offer::Operation* operation = accept->add_operations();
+            operation->set_type(Offer::Operation::RESERVE);
+
+            operation->mutable_reserve()
+            ->mutable_resources()
+            ->CopyFrom(Resources(persistentVolumeResource->resources()));
+
+            mesos->send(call);
+            persistentVolumeReserved = true;
+         }
+
       Resources requiredResources;
       cout << "Received offer from agent "
            << offer.hostname()
@@ -472,6 +515,10 @@ private:
   const Option<Duration> killAfter;
   const Option<Credential> credential;
   const Option<TaskGroupInfo> taskGroup;
+  bool persistentVolume;
+  const Option<TaskInfo> persistentVolumeResource;
+  bool persistentVolumeReserved;
+  bool persistentVolumeCreated;
   int terminatedTaskCount;
   int dTasksLaunched;
   Owned<Mesos> mesos;
@@ -578,6 +625,12 @@ int main(int argc, char** argv)
       return EXIT_FAILURE;
   }
 
+  // Check optional persistent volume info
+  if (flags.persistent_volume_resource.isNone() && flags.persistent_volume) {
+      cout << flags.usage() << endl;
+      return EXIT_FAILURE;
+  }
+
   Owned<CommandScheduler> scheduler(
       new CommandScheduler(
         frameworkInfo,
@@ -585,7 +638,8 @@ int main(int argc, char** argv)
         contentType,
         flags.kill_after,
         credential,
-        flags.task_list));
+        flags.task_list,
+        flags.persistent_volume_resource));
 
   process::spawn(scheduler.get());
   process::wait(scheduler.get());
