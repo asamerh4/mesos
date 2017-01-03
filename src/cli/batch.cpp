@@ -321,7 +321,7 @@ protected:
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
 
-      // check if we need a persistent volume
+      // Check if we need a persistent volume.
 
       if(persistentVolume &&
          offered.contains(Resources(persistentVolumeResource->resources()))&&
