@@ -51,6 +51,15 @@ template <typename T>
 class Future;
 
 namespace http {
+
+enum class Scheme {
+  HTTP,
+#ifdef USE_SSL_SOCKET
+  HTTPS
+#endif
+};
+
+
 namespace authentication {
 
 class Authenticator;
@@ -850,7 +859,8 @@ public:
 
 private:
   Connection(const network::Socket& s);
-  friend Future<Connection> connect(const network::Address& address);
+  friend Future<Connection> connect(
+      const network::Address& address, Scheme scheme);
   friend Future<Connection> connect(const URL&);
 
   // Forward declaration.
@@ -860,11 +870,7 @@ private:
 };
 
 
-// TODO(benh): Currently we don't support SSL for this version of
-// connect. We should support this, perhaps with an enum or a bool and
-// then update the `connect(URL)` variant to just call this function
-// instead.
-Future<Connection> connect(const network::Address& address);
+Future<Connection> connect(const network::Address& address, Scheme scheme);
 
 
 Future<Connection> connect(const URL& url);
@@ -981,7 +987,8 @@ Future<Response> get(
     const UPID& upid,
     const Option<std::string>& path = None(),
     const Option<std::string>& query = None(),
-    const Option<Headers>& headers = None());
+    const Option<Headers>& headers = None(),
+    const Option<std::string>& scheme = None());
 
 
 // Asynchronously sends an HTTP POST request to the specified URL
@@ -1002,7 +1009,8 @@ Future<Response> post(
     const Option<std::string>& path = None(),
     const Option<Headers>& headers = None(),
     const Option<std::string>& body = None(),
-    const Option<std::string>& contentType = None());
+    const Option<std::string>& contentType = None(),
+    const Option<std::string>& scheme = None());
 
 
 /**
@@ -1026,12 +1034,14 @@ Future<Response> requestDelete(
  * @param path The optional path to be be deleted. If not send the
      request is send to the process directly.
  * @param headers Optional headers for the request.
+ * @param scheme Optional scheme for the request.
  * @return A future with the HTTP response.
  */
 Future<Response> requestDelete(
     const UPID& upid,
     const Option<std::string>& path = None(),
-    const Option<Headers>& headers = None());
+    const Option<Headers>& headers = None(),
+    const Option<std::string>& scheme = None());
 
 
 namespace streaming {
@@ -1052,7 +1062,8 @@ Future<Response> get(
     const UPID& upid,
     const Option<std::string>& path = None(),
     const Option<std::string>& query = None(),
-    const Option<Headers>& headers = None());
+    const Option<Headers>& headers = None(),
+    const Option<std::string>& scheme = None());
 
 // Asynchronously sends an HTTP POST request to the specified URL
 // and returns the HTTP response of type 'PIPE' once the response
@@ -1073,7 +1084,8 @@ Future<Response> post(
     const Option<std::string>& path = None(),
     const Option<Headers>& headers = None(),
     const Option<std::string>& body = None(),
-    const Option<std::string>& contentType = None());
+    const Option<std::string>& contentType = None(),
+    const Option<std::string>& scheme = None());
 
 } // namespace streaming {
 

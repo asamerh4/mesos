@@ -1318,9 +1318,24 @@ Future<Nothing> Connection::disconnected()
 }
 
 
-Future<Connection> connect(const network::Address& address)
+Future<Connection> connect(const network::Address& address, Scheme scheme)
 {
-  Try<network::Socket> socket = network::Socket::create(address.family());
+  SocketImpl::Kind kind;
+
+  switch (scheme) {
+    case Scheme::HTTP:
+      kind = SocketImpl::Kind::POLL;
+      break;
+#ifdef USE_SSL_SOCKET
+    case Scheme::HTTPS:
+      kind = SocketImpl::Kind::SSL;
+      break;
+#endif
+  }
+
+  Try<network::Socket> socket = network::Socket::create(
+      address.family(), kind);
+
   if (socket.isError()) {
     return Failure("Failed to create socket: " + socket.error());
   }
@@ -1360,36 +1375,20 @@ Future<Connection> connect(const URL& url)
 
   address.port = url.port.get();
 
-  // TODO(benh): Reuse `connect(address)` once it supports SSL.
-  Try<network::Socket> socket = [&url]() -> Try<network::Socket> {
-    // Default to 'http' if no scheme was specified.
-    if (url.scheme.isNone() || url.scheme == string("http")) {
-      return network::Socket::create(
-          network::Address::Family::INET,
-          SocketImpl::Kind::POLL);
-    }
-
-    if (url.scheme == string("https")) {
-#ifdef USE_SSL_SOCKET
-      return network::Socket::create(
-          network::Address::Family::INET,
-          SocketImpl::Kind::SSL);
-#else
-      return Error("'https' scheme requires SSL enabled");
-#endif
-    }
-
-    return Error("Unsupported URL scheme");
-  }();
-
-  if (socket.isError()) {
-    return Failure("Failed to create socket: " + socket.error());
+  // Default to 'http' if no scheme was specified.
+  if (url.scheme.isNone() || url.scheme == string("http")) {
+    return connect(address, Scheme::HTTP);
   }
 
-  return socket->connect(address)
-    .then([socket]() {
-      return Connection(socket.get());
-    });
+  if (url.scheme == string("https")) {
+#ifdef USE_SSL_SOCKET
+    return connect(address, Scheme::HTTPS);
+#else
+    return Failure("'https' scheme requires SSL enabled");
+#endif
+  }
+
+  return Failure("Unsupported URL scheme");
 }
 
 
@@ -1791,7 +1790,8 @@ Future<Nothing> serve(
     .onAny([=]() mutable {
       // Delete remaining requests and discard remaining responses.
       if (pipeline.size() != 0) {
-        loop([=]() mutable {
+        loop(None(),
+             [=]() mutable {
                return pipeline.get();
              },
              [=](Option<Item> item) {
@@ -1864,7 +1864,7 @@ Request createRequest(
   const Option<string>& body,
   const Option<string>& contentType)
 {
-  string scheme = enableSSL ? "https" : "http";
+  const string scheme = enableSSL ? "https" : "http";
   URL url(scheme, net::IP(upid.address.ip), upid.address.port, upid.id);
 
   if (path.isSome()) {
@@ -1917,9 +1917,14 @@ Future<Response> get(
     const UPID& upid,
     const Option<string>& path,
     const Option<string>& query,
-    const Option<Headers>& headers)
+    const Option<Headers>& headers,
+    const Option<string>& scheme)
 {
-  URL url("http", net::IP(upid.address.ip), upid.address.port, upid.id);
+  URL url(
+      scheme.getOrElse("http"),
+      net::IP(upid.address.ip),
+      upid.address.port,
+      upid.id);
 
   if (path.isSome()) {
     // TODO(benh): Get 'query' and/or 'fragment' out of 'path'.
@@ -1977,9 +1982,14 @@ Future<Response> post(
     const Option<string>& path,
     const Option<Headers>& headers,
     const Option<string>& body,
-    const Option<string>& contentType)
+    const Option<string>& contentType,
+    const Option<string>& scheme)
 {
-  URL url("http", net::IP(upid.address.ip), upid.address.port, upid.id);
+  URL url(
+      scheme.getOrElse("http"),
+      net::IP(upid.address.ip),
+      upid.address.port,
+      upid.id);
 
   if (path.isSome()) {
     // TODO(benh): Get 'query' and/or 'fragment' out of 'path'.
@@ -2010,9 +2020,14 @@ Future<Response> requestDelete(
 Future<Response> requestDelete(
     const UPID& upid,
     const Option<string>& path,
-    const Option<Headers>& headers)
+    const Option<Headers>& headers,
+    const Option<string>& scheme)
 {
-  URL url("http", net::IP(upid.address.ip), upid.address.port, upid.id);
+  URL url(
+      scheme.getOrElse("http"),
+      net::IP(upid.address.ip),
+      upid.address.port,
+      upid.id);
 
   if (path.isSome()) {
     // TODO(joerg84): Handle 'query' and/or 'fragment' in 'path'.
@@ -2048,9 +2063,14 @@ Future<Response> get(
     const UPID& upid,
     const Option<string>& path,
     const Option<string>& query,
-    const Option<Headers>& headers)
+    const Option<Headers>& headers,
+    const Option<string>& scheme)
 {
-  URL url("http", net::IP(upid.address.ip), upid.address.port, upid.id);
+  URL url(
+      scheme.getOrElse("http"),
+      net::IP(upid.address.ip),
+      upid.address.port,
+      upid.id);
 
   if (path.isSome()) {
     // TODO(benh): Get 'query' and/or 'fragment' out of 'path'.
@@ -2108,9 +2128,14 @@ Future<Response> post(
     const Option<string>& path,
     const Option<Headers>& headers,
     const Option<string>& body,
-    const Option<string>& contentType)
+    const Option<string>& contentType,
+    const Option<string>& scheme)
 {
-  URL url("http", net::IP(upid.address.ip), upid.address.port, upid.id);
+  URL url(
+      scheme.getOrElse("http"),
+      net::IP(upid.address.ip),
+      upid.address.port,
+      upid.id);
 
   if (path.isSome()) {
     // TODO(benh): Get 'query' and/or 'fragment' out of 'path'.

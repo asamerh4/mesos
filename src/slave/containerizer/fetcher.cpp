@@ -47,8 +47,12 @@ using std::vector;
 
 using mesos::fetcher::FetcherInfo;
 
+using process::async;
+
+using process::Failure;
 using process::Future;
 using process::Owned;
+using process::Subprocess;
 
 namespace mesos {
 namespace internal {
@@ -273,7 +277,7 @@ void Fetcher::kill(const ContainerID& containerId)
 
 FetcherProcess::~FetcherProcess()
 {
-  foreach (const ContainerID& containerId, subprocessPids.keys()) {
+  foreachkey (const ContainerID& containerId, subprocessPids) {
     kill(containerId);
   }
 }

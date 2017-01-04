@@ -52,6 +52,7 @@
 #include <process/protobuf.hpp>
 #include <process/shared.hpp>
 
+#include <stout/boundedhashmap.hpp>
 #include <stout/bytes.hpp>
 #include <stout/linkedhashmap.hpp>
 #include <stout/hashmap.hpp>
@@ -94,8 +95,6 @@ class Authorizer;
 namespace internal {
 
 namespace slave {
-
-using namespace process;
 
 // Some forward declarations.
 class StatusUpdateManager;
@@ -147,7 +146,7 @@ public:
       const ExecutorInfo& executorInfo,
       Option<TaskInfo> task,
       Option<TaskGroupInfo> taskGroup,
-      const UPID& pid);
+      const process::UPID& pid);
 
   // Made 'virtual' for Slave mocking.
   virtual void _run(
@@ -245,12 +244,12 @@ public:
       StatusUpdate update,
       const Option<process::UPID>& pid,
       const ExecutorID& executorId,
-      const Future<ContainerStatus>& future);
+      const process::Future<ContainerStatus>& future);
 
   // Continue handling the status update after optionally updating the
   // container's resources.
   void __statusUpdate(
-      const Option<Future<Nothing>>& future,
+      const Option<process::Future<Nothing>>& future,
       const StatusUpdate& update,
       const Option<process::UPID>& pid,
       const ExecutorID& executorId,
@@ -391,7 +390,7 @@ public:
   void checkDiskUsage();
 
   // Recovers the slave, status update manager and isolator.
-  process::Future<Nothing> recover(const Result<state::State>& state);
+  process::Future<Nothing> recover(const Try<state::State>& state);
 
   // This is called after 'recover()'. If 'flags.reconnect' is
   // 'reconnect', the slave attempts to reconnect to any old live
@@ -419,7 +418,7 @@ public:
   virtual void removeFramework(Framework* framework);
 
   // Schedules a 'path' for gc based on its modification time.
-  Future<Nothing> garbageCollect(const std::string& path);
+  process::Future<Nothing> garbageCollect(const std::string& path);
 
   // Called when the slave was signaled from the specified user.
   void signaled(int signal, int uid);
@@ -463,7 +462,7 @@ private:
   process::Future<bool> authorizeLogAccess(
       const Option<std::string>& principal);
 
-  Future<bool> authorizeSandboxAccess(
+  process::Future<bool> authorizeSandboxAccess(
       const Option<std::string>& principal,
       const FrameworkID& frameworkId,
       const ExecutorID& executorId);
@@ -476,7 +475,8 @@ private:
   {
   public:
     explicit Http(Slave* _slave)
-    : slave(_slave), statisticsLimiter(new RateLimiter(2, Seconds(1))) {}
+      : slave(_slave),
+        statisticsLimiter(new process::RateLimiter(2, Seconds(1))) {}
 
     // Logs the request, route handlers can compose this with the
     // desired request handler to get consistent request logging.
@@ -546,10 +546,12 @@ private:
 
     // Continuation for `/containers` endpoint
     process::Future<process::http::Response> _containers(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // Helper function to collect containers status and resource statistics.
-    process::Future<JSON::Array> __containers() const;
+    process::Future<JSON::Array> __containers(
+        Option<process::Owned<ObjectApprover>> approver) const;
 
     // Helper routines for endpoint authorization.
     Try<std::string> extractEndpoint(const process::http::URL& url) const;
@@ -649,7 +651,7 @@ private:
         const Option<ContainerInfo>& containerInfo,
         const Option<mesos::slave::ContainerClass>& containerClass,
         ContentType acceptType,
-        const Owned<ObjectApprover>& approver) const;
+        const process::Owned<ObjectApprover>& approver) const;
 
     process::Future<process::http::Response> waitNestedContainer(
         const mesos::agent::Call& call,
@@ -694,7 +696,7 @@ private:
     Slave* slave;
 
     // Used to rate limit the statistics endpoint.
-    Shared<RateLimiter> statisticsLimiter;
+    process::Shared<process::RateLimiter> statisticsLimiter;
   };
 
   friend struct Framework;
@@ -712,7 +714,7 @@ private:
 
   double _uptime_secs()
   {
-    return (Clock::now() - startTime).secs();
+    return (process::Clock::now() - startTime).secs();
   }
 
   double _registered()
@@ -760,7 +762,7 @@ private:
 
   hashmap<FrameworkID, Framework*> frameworks;
 
-  boost::circular_buffer<process::Owned<Framework>> completedFrameworks;
+  BoundedHashMap<FrameworkID, process::Owned<Framework>> completedFrameworks;
 
   mesos::master::detector::MasterDetector* detector;
 
@@ -794,6 +796,9 @@ private:
   // the master.
   process::Timer pingTimer;
 
+  // Timer for triggering agent (re)registration after detecting a new master.
+  process::Timer agentRegistrationTimer;
+
   // Root meta directory containing checkpointed data.
   const std::string metaDir;
 
@@ -808,7 +813,7 @@ private:
   Authenticatee* authenticatee;
 
   // Indicates if an authentication attempt is in progress.
-  Option<Future<bool>> authenticating;
+  Option<process::Future<bool>> authenticating;
 
   // Indicates if the authentication is successful.
   bool authenticated;
@@ -1069,7 +1074,7 @@ struct Framework
   // driver. Frameworks using the HTTP API (in 0.24.0) will
   // not have a 'pid', in which case executor messages are
   // sent through the master.
-  Option<UPID> pid;
+  Option<process::UPID> pid;
 
   // Executors with pending tasks.
   hashmap<ExecutorID, hashmap<TaskID, TaskInfo>> pending;

@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <string>
 #include <tuple>
 
 #include <mesos/http.hpp>
@@ -87,7 +88,9 @@ using process::Promise;
 
 using recordio::Decoder;
 
+using std::string;
 using std::tuple;
+using std::vector;
 
 using testing::_;
 using testing::AtMost;
@@ -785,7 +788,7 @@ TEST_P(MasterAPITest, SetLoggingLevel)
 
 // This test verifies if we can retrieve the file listing for a directory
 // in the master.
-TEST_P(MasterAPITest, ListFiles)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(MasterAPITest, ListFiles)
 {
   Files files;
 
@@ -1460,6 +1463,108 @@ TEST_P(MasterAPITest, SubscribeAgentEvents)
   {
     ASSERT_EQ(v1::master::Event::AGENT_REMOVED, event.get().get().type());
     ASSERT_EQ(evolve(agentID), event.get().get().agent_removed().agent_id());
+  }
+}
+
+
+// This test verifies that recovered but yet to reregister agents are returned
+// in `recovered_agents` field of `GetAgents` response.
+TEST_P(MasterAPITest, GetRecoveredAgents)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry = "replicated_log";
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+
+  // Reuse slaveFlags so both StartSlave() use the same work_dir.
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+
+  v1::AgentID agentId = evolve(slaveRegisteredMessage.get().slave_id());
+
+  // Ensure that the agent is present in `GetAgent.agents` while
+  // `GetAgents.recovered_agents` is empty.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_AGENTS);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_AGENTS, v1Response.get().type());
+    ASSERT_EQ(1, v1Response.get().get_agents().agents_size());
+    ASSERT_EQ(agentId,
+              v1Response.get().get_agents().agents(0).agent_info().id());
+    ASSERT_EQ(0, v1Response.get().get_agents().recovered_agents_size());
+  }
+
+  // Stop the slave while the master is down.
+  master->reset();
+  slave.get()->terminate();
+  slave->reset();
+
+  // Restart the master.
+  master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Ensure that the agent is present in `GetAgents.recovered_agents`
+  // while `GetAgents.agents` is empty.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_AGENTS);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_AGENTS, v1Response.get().type());
+    ASSERT_EQ(0u, v1Response.get().get_agents().agents_size());
+    ASSERT_EQ(1u, v1Response.get().get_agents().recovered_agents_size());
+    ASSERT_EQ(agentId, v1Response.get().get_agents().recovered_agents(0).id());
+  }
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  // Start the agent to make it re-register with the master.
+  detector = master.get()->createDetector();
+  slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  // After the agent has successfully re-registered with the master,
+  // the `GetAgents.recovered_agents` field would be empty.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_AGENTS);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_AGENTS, v1Response.get().type());
+    ASSERT_EQ(1u, v1Response.get().get_agents().agents_size());
+    ASSERT_EQ(0u, v1Response.get().get_agents().recovered_agents_size());
   }
 }
 
@@ -2505,7 +2610,7 @@ TEST_P(AgentAPITest, SetLoggingLevel)
 
 // This test verifies if we can retrieve the file listing for a directory
 // in an agent.
-TEST_P(AgentAPITest, ListFiles)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, ListFiles)
 {
   Files files;
 
@@ -2839,7 +2944,7 @@ TEST_P(AgentAPITest, ReadFileInvalidPath)
 }
 
 
-TEST_P(AgentAPITest, GetFrameworks)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, GetFrameworks)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -2942,7 +3047,7 @@ TEST_P(AgentAPITest, GetFrameworks)
 }
 
 
-TEST_P(AgentAPITest, GetExecutors)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, GetExecutors)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -3049,7 +3154,7 @@ TEST_P(AgentAPITest, GetExecutors)
 }
 
 
-TEST_P(AgentAPITest, GetTasks)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, GetTasks)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -3175,7 +3280,7 @@ TEST_P(AgentAPITest, GetTasks)
 }
 
 
-TEST_P(AgentAPITest, GetState)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, GetState)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -3426,7 +3531,7 @@ TEST_P(AgentAPITest, NestedContainerKillNotFound)
 // When containerizer returns false from launching a nested
 // container, it is considered a bad request (e.g. image
 // type is not supported).
-TEST_P(AgentAPITest, NestedContainerLaunchFalse)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, NestedContainerLaunchFalse)
 {
   ContentType contentType = GetParam();
 
@@ -3440,8 +3545,9 @@ TEST_P(AgentAPITest, NestedContainerLaunchFalse)
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), &containerizer);
+    StartSlave(detector.get(), &containerizer, agentFlags);
 
   ASSERT_SOME(slave);
 
@@ -3466,11 +3572,15 @@ TEST_P(AgentAPITest, NestedContainerLaunchFalse)
 
   driver.start();
 
+  // Trigger authentication and registration for the agent.
+  Clock::advance(agentFlags.authentication_backoff_factor);
+  Clock::advance(agentFlags.registration_backoff_factor);
+
   AWAIT_READY(executorRegistered);
 
   Future<hashset<ContainerID>> containerIds = containerizer.containers();
   AWAIT_READY(containerIds);
-  EXPECT_EQ(1u, containerIds->size());
+  ASSERT_EQ(1u, containerIds->size());
 
   // Try to launch an "unsupported" container.
   v1::ContainerID containerId;
@@ -3549,7 +3659,7 @@ TEST_P(AgentAPITest, NestedContainerLaunchGrandchildNotSupported)
 }
 
 
-TEST_P(AgentAPITest, NestedContainerLaunch)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, NestedContainerLaunch)
 {
   ContentType contentType = GetParam();
 
@@ -3563,8 +3673,9 @@ TEST_P(AgentAPITest, NestedContainerLaunch)
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), &containerizer);
+    StartSlave(detector.get(), &containerizer, agentFlags);
 
   ASSERT_SOME(slave);
 
@@ -3589,11 +3700,15 @@ TEST_P(AgentAPITest, NestedContainerLaunch)
 
   driver.start();
 
+  // Trigger authentication and registration for the agent.
+  Clock::advance(agentFlags.authentication_backoff_factor);
+  Clock::advance(agentFlags.registration_backoff_factor);
+
   AWAIT_READY(executorRegistered);
 
   Future<hashset<ContainerID>> containerIds = containerizer.containers();
   AWAIT_READY(containerIds);
-  EXPECT_EQ(1u, containerIds->size());
+  ASSERT_EQ(1u, containerIds->size());
 
   // Launch a nested container and wait for it to finish.
   v1::ContainerID containerId;
@@ -3668,7 +3783,9 @@ TEST_P(AgentAPITest, NestedContainerLaunch)
 // This test verifies that launch nested container session fails when
 // attaching to the output of the container fails. Consequently, the
 // launched container should be destroyed.
-TEST_P(AgentAPITest, LaunchNestedContainerSessionAttachFailure)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(
+    AgentAPITest,
+    LaunchNestedContainerSessionAttachFailure)
 {
   ContentType contentType = GetParam();
 
@@ -3682,8 +3799,9 @@ TEST_P(AgentAPITest, LaunchNestedContainerSessionAttachFailure)
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), &containerizer);
+    StartSlave(detector.get(), &containerizer, agentFlags);
 
   ASSERT_SOME(slave);
 
@@ -3706,11 +3824,15 @@ TEST_P(AgentAPITest, LaunchNestedContainerSessionAttachFailure)
 
   driver.start();
 
+  // Trigger authentication and registration for the agent.
+  Clock::advance(agentFlags.authentication_backoff_factor);
+  Clock::advance(agentFlags.registration_backoff_factor);
+
   AWAIT_READY(executorRegistered);
 
   Future<hashset<ContainerID>> containerIds = containerizer.containers();
   AWAIT_READY(containerIds);
-  EXPECT_EQ(1u, containerIds->size());
+  ASSERT_EQ(1u, containerIds->size());
 
   v1::ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -3738,7 +3860,7 @@ TEST_P(AgentAPITest, LaunchNestedContainerSessionAttachFailure)
   // Attach failure should result in the destruction of nested container.
   containerIds = containerizer.containers();
   AWAIT_READY(containerIds);
-  EXPECT_EQ(1u, containerIds->size());
+  ASSERT_EQ(1u, containerIds->size());
   EXPECT_FALSE(containerIds->contains(devolve(containerId)));
 
   EXPECT_CALL(exec, shutdown(_))
@@ -3749,8 +3871,347 @@ TEST_P(AgentAPITest, LaunchNestedContainerSessionAttachFailure)
 }
 
 
-// TODO(vinod): Update the test when mesos containerizer
-// adds support for `attach`.
+// This test verifies that launching a nested container session results
+// in stdout and stderr being streamed correctly.
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, LaunchNestedContainerSession)
+{
+  ContentType contentType = GetParam();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  Fetcher fetcher;
+
+  Try<MesosContainerizer*> _containerizer =
+    MesosContainerizer::create(flags, false, &fetcher);
+
+  ASSERT_SOME(_containerizer);
+
+  Owned<slave::Containerizer> containerizer(_containerizer.get());
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 1000");
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status->state());
+
+  // Launch a nested container session that runs a command
+  // that writes something to stdout and stderr and exits.
+
+  Future<hashset<ContainerID>> containerIds = containerizer->containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
+
+  v1::ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+  containerId.mutable_parent()->set_value(containerIds->begin()->value());
+
+  string output = "output";
+  string error = "error";
+  string command = "printf "  + output + " && printf " + error + " 1>&2";
+
+  v1::agent::Call call;
+  call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER_SESSION);
+
+  call.mutable_launch_nested_container_session()->mutable_container_id()
+    ->CopyFrom(containerId);
+
+  call.mutable_launch_nested_container_session()->mutable_command()->set_value(
+      command);
+
+  http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+  headers["Accept"] = stringify(contentType);
+
+  Future<http::Response> response = http::streaming::post(
+    slave.get()->pid,
+    "api/v1",
+    headers,
+    serialize(contentType, call),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  ASSERT_EQ(stringify(contentType), response->headers.at("Content-Type"));
+  ASSERT_EQ(http::Response::PIPE, response->type);
+
+  ASSERT_SOME(response->reader);
+  Future<tuple<string, string>> received =
+    getProcessIOData(contentType, response->reader.get());
+
+  AWAIT_READY(received);
+
+  string stdoutReceived;
+  string stderrReceived;
+
+  tie(stdoutReceived, stderrReceived) = received.get();
+
+  EXPECT_EQ(output, stdoutReceived);
+  EXPECT_EQ(error, stderrReceived);
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that launching a nested container session with `TTYInfo`
+// results in stdout and stderr being streamed to the client as stdout.
+TEST_P_TEMP_DISABLED_ON_WINDOWS(
+    AgentAPITest,
+    LaunchNestedContainerSessionWithTTY)
+{
+  ContentType contentType = GetParam();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  Fetcher fetcher;
+
+  Try<MesosContainerizer*> _containerizer =
+    MesosContainerizer::create(flags, false, &fetcher);
+
+  ASSERT_SOME(_containerizer);
+
+  Owned<slave::Containerizer> containerizer(_containerizer.get());
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 1000");
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status->state());
+
+  // Launch a nested container session that runs a command
+  // that writes something to stdout and stderr and exits.
+
+  Future<hashset<ContainerID>> containerIds = containerizer->containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
+
+  v1::ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+  containerId.mutable_parent()->set_value(containerIds->begin()->value());
+
+  string output = "output";
+  string error = "error";
+  string command = "printf "  + output + " && printf " + error + " 1>&2";
+
+  v1::agent::Call call;
+  call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER_SESSION);
+
+  call.mutable_launch_nested_container_session()->mutable_container_id()
+    ->CopyFrom(containerId);
+
+  call.mutable_launch_nested_container_session()->mutable_command()->set_value(
+      command);
+
+  call.mutable_launch_nested_container_session()->mutable_container()->set_type(
+      mesos::v1::ContainerInfo::MESOS);
+
+  call.mutable_launch_nested_container_session()->mutable_container()
+    ->mutable_tty_info();
+
+  http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+  headers["Accept"] = stringify(contentType);
+
+  Future<http::Response> response = http::streaming::post(
+    slave.get()->pid,
+    "api/v1",
+    headers,
+    serialize(contentType, call),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  ASSERT_EQ(stringify(contentType), response->headers.at("Content-Type"));
+  ASSERT_EQ(http::Response::PIPE, response->type);
+
+  ASSERT_SOME(response->reader);
+  Future<tuple<string, string>> received =
+    getProcessIOData(contentType, response->reader.get());
+
+  AWAIT_READY(received);
+
+  string stdoutReceived;
+  string stderrReceived;
+
+  tie(stdoutReceived, stderrReceived) = received.get();
+
+  EXPECT_EQ(output + error, stdoutReceived);
+  EXPECT_EQ("", stderrReceived);
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that the nested container session is destroyed
+// upon a client disconnection.
+TEST_P_TEMP_DISABLED_ON_WINDOWS(
+    AgentAPITest,
+    LaunchNestedContainerSessionDisconnected)
+{
+  ContentType contentType = GetParam();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  Fetcher fetcher;
+
+  Try<MesosContainerizer*> _containerizer =
+    MesosContainerizer::create(flags, false, &fetcher);
+
+  ASSERT_SOME(_containerizer);
+
+  Owned<slave::Containerizer> containerizer(_containerizer.get());
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 1000");
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status->state());
+
+  // Launch a nested container session that runs `cat` so that it never exits.
+
+  Future<hashset<ContainerID>> containerIds = containerizer->containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
+
+  v1::ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+  containerId.mutable_parent()->set_value(containerIds->begin()->value());
+
+  v1::agent::Call call;
+  call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER_SESSION);
+
+  call.mutable_launch_nested_container_session()->mutable_container_id()
+    ->CopyFrom(containerId);
+
+  call.mutable_launch_nested_container_session()->mutable_command()->set_value(
+      "cat");
+
+  // TODO(vinod): Ideally, we can use `http::post` here but we cannot currently
+  // because the caller currently doesn't have a way to disconnect the
+  // connection (e.g., by closing the response reader pipe).
+  http::URL agent = http::URL(
+      "http",
+      slave.get()->pid.address.ip,
+      slave.get()->pid.address.port,
+      slave.get()->pid.id +
+      "/api/v1");
+
+  Future<http::Connection> _connection = http::connect(agent);
+  AWAIT_READY(_connection);
+
+  http::Connection connection = _connection.get(); // Remove const.
+
+  http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+  headers["Accept"] = stringify(contentType);
+  headers["Content-Type"] = stringify(contentType);
+
+  http::Request request;
+  request.url = agent;
+  request.method = "POST";
+  request.headers = headers;
+  request.body = serialize(contentType, call);
+
+  Future<http::Response> response = connection.send(request, true);
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  ASSERT_EQ(stringify(contentType), response->headers.at("Content-Type"));
+  ASSERT_EQ(http::Response::PIPE, response->type);
+
+  // Disconnect the launch connection. This should
+  // result in the nested container being destroyed.
+  AWAIT_READY(connection.disconnect());
+
+  AWAIT_READY(containerizer->wait(devolve(containerId)));
+
+  driver.stop();
+  driver.join();
+}
+
+
 TEST_P(AgentAPITest, AttachContainerOutputFailure)
 {
   ContentType contentType = GetParam();
@@ -3936,7 +4397,7 @@ TEST_F(AgentAPITest, AttachContainerInputValidation)
 }
 
 
-// This test verifies that the default 'Accept-Type' for the
+// This test verifies that the default 'Accept' for the
 // Agent API endpoint is `APPLICATION_JSON`.
 TEST_P(AgentAPITest, DefaultAccept)
 {
@@ -3986,11 +4447,255 @@ INSTANTIATE_TEST_CASE_P(
         ContentType::STREAMING_PROTOBUF, ContentType::STREAMING_JSON));
 
 
-// This test launches a child container with the 'cat' command as the
-// entrypoint and attaches to its STDOUT via the attach output call.
+// This test launches a child container with TTY and the 'cat' command
+// as the entrypoint and attaches to its STDOUT via the attach output call.
 // It then verifies that any data streamed to the container via the
 // attach input call is received by the client on the output stream.
-TEST_P(AgentAPIStreamingTest, AttachContainerInput)
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPIStreamingTest, AttachContainerInput)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  Fetcher fetcher;
+
+  Try<MesosContainerizer*> _containerizer =
+    MesosContainerizer::create(flags, false, &fetcher);
+
+  ASSERT_SOME(_containerizer);
+
+  Owned<slave::Containerizer> containerizer(_containerizer.get());
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers->size());
+
+  const Offer& offer = offers.get()[0];
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  TaskInfo taskInfo = createTask(offer, "sleep 1000");
+
+  driver.acceptOffers({offer.id()}, {LAUNCH({taskInfo})});
+
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status->state());
+
+  Future<hashset<ContainerID>> containerIds = containerizer->containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
+
+  v1::ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+  containerId.mutable_parent()->set_value(containerIds->begin()->value());
+
+  // Launch the child container with TTY and then attach to it's output.
+
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER);
+
+    call.mutable_launch_nested_container()->mutable_container_id()
+      ->CopyFrom(containerId);
+
+    call.mutable_launch_nested_container()->mutable_command()
+      ->CopyFrom(v1::createCommandInfo("cat"));
+
+    call.mutable_launch_nested_container()->mutable_container()
+      ->set_type(mesos::v1::ContainerInfo::MESOS);
+
+    call.mutable_launch_nested_container()->mutable_container()
+      ->mutable_tty_info();
+
+    Future<http::Response> response = http::post(
+        slave.get()->pid,
+        "api/v1",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        serialize(ContentType::PROTOBUF, call),
+        stringify(ContentType::PROTOBUF));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  }
+
+  ContentType contentType = GetParam();
+
+  Option<http::Pipe::Reader> output;
+
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::ATTACH_CONTAINER_OUTPUT);
+
+    call.mutable_attach_container_output()->mutable_container_id()
+      ->CopyFrom(containerId);
+
+    http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+    headers["Accept"] = stringify(contentType);
+
+    Future<http::Response> response = http::streaming::post(
+        slave.get()->pid,
+        "api/v1",
+        headers,
+        serialize(ContentType::PROTOBUF, call),
+        stringify(ContentType::PROTOBUF));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+    ASSERT_SOME(response->reader);
+
+    output = response->reader.get();
+  }
+
+  string data =
+    "Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do "
+    "eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim "
+    "ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut "
+    "aliquip ex ea commodo consequat. Duis aute irure dolor in "
+    "reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla "
+    "pariatur. Excepteur sint occaecat cupidatat non proident, sunt in "
+    "culpa qui officia deserunt mollit anim id est laborum.\n";
+
+  // Terminal transforms "\n" to "\r\n".
+  string stdoutExpected = strings::trim(data) + "\r\n";
+
+  http::Pipe pipe;
+  http::Pipe::Writer writer = pipe.writer();
+  http::Pipe::Reader reader = pipe.reader();
+
+  ::recordio::Encoder<v1::agent::Call> encoder(lambda::bind(
+      serialize, contentType, lambda::_1));
+
+  // Prepare the data that needs to be streamed to the entrypoint
+  // of the container.
+
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::ATTACH_CONTAINER_INPUT);
+
+    v1::agent::Call::AttachContainerInput* attach =
+      call.mutable_attach_container_input();
+
+    attach->set_type(v1::agent::Call::AttachContainerInput::CONTAINER_ID);
+    attach->mutable_container_id()->CopyFrom(containerId);
+
+    writer.write(encoder.encode(call));
+  }
+
+  size_t offset = 0;
+  size_t chunkSize = 4096;
+  while (offset < data.length()) {
+    string dataChunk = data.substr(offset, chunkSize);
+    offset += chunkSize;
+
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::ATTACH_CONTAINER_INPUT);
+
+    v1::agent::Call::AttachContainerInput* attach =
+      call.mutable_attach_container_input();
+
+    attach->set_type(v1::agent::Call::AttachContainerInput::PROCESS_IO);
+
+    v1::agent::ProcessIO* processIO = attach->mutable_process_io();
+    processIO->set_type(v1::agent::ProcessIO::DATA);
+    processIO->mutable_data()->set_type(v1::agent::ProcessIO::Data::STDIN);
+    processIO->mutable_data()->set_data(dataChunk);
+
+    writer.write(encoder.encode(call));
+  }
+
+  // Signal `EOT` to the terminal so that it sends `EOF` to `cat` command.
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::ATTACH_CONTAINER_INPUT);
+
+    v1::agent::Call::AttachContainerInput* attach =
+      call.mutable_attach_container_input();
+
+    attach->set_type(v1::agent::Call::AttachContainerInput::PROCESS_IO);
+
+    v1::agent::ProcessIO* processIO = attach->mutable_process_io();
+    processIO->set_type(v1::agent::ProcessIO::DATA);
+    processIO->mutable_data()->set_type(v1::agent::ProcessIO::Data::STDIN);
+    processIO->mutable_data()->set_data("\x04");
+
+    writer.write(encoder.encode(call));
+  }
+
+  writer.close();
+
+  // TODO(anand): Add a `post()` overload that handles request streaming.
+  {
+    http::URL agent = http::URL(
+        "http",
+        slave.get()->pid.address.ip,
+        slave.get()->pid.address.port,
+        slave.get()->pid.id +
+        "/api/v1");
+
+    Future<http::Connection> _connection = http::connect(agent);
+    AWAIT_READY(_connection);
+
+    http::Connection connection = _connection.get(); // Remove const.
+
+    http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+    headers["Accept"] = stringify(contentType);
+    headers["Content-Type"] = stringify(contentType);
+
+    http::Request request;
+    request.url = agent;
+    request.method = "POST";
+    request.type = http::Request::PIPE;
+    request.reader = reader;
+    request.headers = headers;
+
+    Future<http::Response> response = connection.send(request);
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  }
+
+  ASSERT_SOME(output);
+
+  Future<tuple<string, string>> received =
+    getProcessIOData(contentType, output.get());
+
+  AWAIT_READY(received);
+
+  string stdoutReceived;
+  string stderrReceived;
+
+  tie(stdoutReceived, stderrReceived) = received.get();
+
+  // `stdoutExpected` appears twice in stdout because the terminal in raw mode
+  // echoes the data once and `cat` outputs it once.
+  ASSERT_EQ(stdoutExpected + stdoutExpected, stdoutReceived);
+
+  ASSERT_TRUE(stderrReceived.empty());
+}
+
+
+// This test launches a nested container session with 'cat' as its
+// entrypoint and verifies that any data streamed to the container via
+// an ATTACH_CONTAINER_INPUT call is received by the client on the
+// output stream.
+TEST_P_TEMP_DISABLED_ON_WINDOWS(
+    AgentAPIStreamingTest,
+    AttachInputToNestedContainerSession)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -4047,55 +4752,37 @@ TEST_P(AgentAPIStreamingTest, AttachContainerInput)
   containerId.set_value(UUID::random().toString());
   containerId.mutable_parent()->set_value(containerIds->begin()->value());
 
-  // Launch the child container and then attach to it's output.
-
-  {
-    v1::agent::Call call;
-    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER);
-
-    call.mutable_launch_nested_container()->mutable_container_id()
-      ->CopyFrom(containerId);
-
-    call.mutable_launch_nested_container()->mutable_command()
-      ->CopyFrom(v1::createCommandInfo("cat"));
-
-    Future<http::Response> response = http::post(
-        slave.get()->pid,
-        "api/v1",
-        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
-        serialize(ContentType::PROTOBUF, call),
-        stringify(ContentType::PROTOBUF));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
-  }
-
   ContentType contentType = GetParam();
 
-  Option<http::Pipe::Reader> output;
+  Future<http::Response> sessionResponse;
 
+  // Start a new LAUNCH_NESTED_CONTAINER_SESSION with `cat` as the
+  // command being launched.
   {
     v1::agent::Call call;
-    call.set_type(v1::agent::Call::ATTACH_CONTAINER_OUTPUT);
+    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER_SESSION);
 
-    call.mutable_attach_container_output()->mutable_container_id()
+    call.mutable_launch_nested_container_session()->mutable_container_id()
       ->CopyFrom(containerId);
+
+    call.mutable_launch_nested_container_session()->mutable_command()
+      ->CopyFrom(v1::createCommandInfo("cat"));
 
     http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
     headers["Accept"] = stringify(contentType);
 
-    Future<http::Response> response = http::streaming::post(
+    sessionResponse = http::streaming::post(
         slave.get()->pid,
         "api/v1",
         headers,
         serialize(ContentType::PROTOBUF, call),
         stringify(ContentType::PROTOBUF));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
-    ASSERT_SOME(response->reader);
-
-    output = response->reader.get();
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, sessionResponse);
   }
 
+  // Prepare the data to send to `cat` and send it over an
+  // `ATTACH_CONTAINER_INPUT` stream.
   string data =
     "Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do "
     "eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim "
@@ -4115,9 +4802,6 @@ TEST_P(AgentAPIStreamingTest, AttachContainerInput)
 
   ::recordio::Encoder<v1::agent::Call> encoder(lambda::bind(
       serialize, contentType, lambda::_1));
-
-  // Prepare the data that needs to be streamed to the entrypoint
-  // of the container.
 
   {
     v1::agent::Call call;
@@ -4174,8 +4858,8 @@ TEST_P(AgentAPIStreamingTest, AttachContainerInput)
 
   writer.close();
 
-  // TODO(anand): Add a `post()` overload that handles request streaming.
   {
+    // TODO(anand): Add a `post()` overload that handles request streaming.
     http::URL agent = http::URL(
         "http",
         slave.get()->pid.address.ip,
@@ -4203,18 +4887,24 @@ TEST_P(AgentAPIStreamingTest, AttachContainerInput)
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   }
 
-  ASSERT_SOME(output);
+  // Read the output from the LAUNCH_NESTED_CONTAINER_SESSION.
+  ASSERT_SOME(sessionResponse->reader);
+
+  Option<http::Pipe::Reader> output = sessionResponse->reader.get();
+    ASSERT_SOME(output);
 
   Future<tuple<string, string>> received =
     getProcessIOData(contentType, output.get());
 
   AWAIT_READY(received);
 
+
   string stdoutReceived;
   string stderrReceived;
 
   tie(stdoutReceived, stderrReceived) = received.get();
 
+  // Verify the output matches what we sent.
   ASSERT_TRUE(stderrReceived.empty());
   ASSERT_EQ(data, stdoutReceived);
 }

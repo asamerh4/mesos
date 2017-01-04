@@ -629,11 +629,17 @@ TEST_F(MasterTest, EndpointsForHalfRemovedSlave)
   // Drop all the PONGs to simulate slave partition.
   DROP_PROTOBUFS(PongSlaveMessage(), _, _);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Owned<MasterDetector> detector = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), agentFlags);
   ASSERT_SOME(slave);
 
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
   Clock::pause();
+  Clock::advance(agentFlags.registration_backoff_factor);
+  AWAIT_READY(slaveRegisteredMessage);
 
   // Now advance through the PINGs.
   size_t pings = 0;
@@ -2029,7 +2035,8 @@ TEST_F(MasterTest, SlavesEndpointWithoutSlaves)
 
   Try<JSON::Value> expected = JSON::parse(
       "{"
-      "  \"slaves\" : []"
+      "  \"slaves\" : [],"
+      "  \"recovered_slaves\" : []"
       "}");
 
   ASSERT_SOME(expected);
@@ -2195,7 +2202,8 @@ TEST_F(MasterTest, UnreachableTaskAfterFailover)
 
   // Step 2: Start a slave.
   StandaloneMasterDetector slaveDetector(master.get()->pid);
-  Try<Owned<cluster::Slave>> slave = StartSlave(&slaveDetector);
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(&slaveDetector, agentFlags);
   ASSERT_SOME(slave);
 
   // Step 3: Start a scheduler.
@@ -2293,6 +2301,7 @@ TEST_F(MasterTest, UnreachableTaskAfterFailover)
 
   slaveDetector.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregisteredMessage);
 
   // The task should have returned to TASK_RUNNING. This is true even
@@ -2486,6 +2495,7 @@ TEST_F(MasterTest, CancelRecoveredSlaveRemoval)
   slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
+  Clock::advance(slaveFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregisteredMessage);
 
   // Satisfy the rate limit permit. Ensure a removal does not occur!
@@ -2775,8 +2785,17 @@ TEST_F(MasterTest, RecoveredFramework)
   TestContainerizer containerizer(&exec);
   StandaloneMasterDetector detector(master.get()->pid);
 
+  // NOTE: After the master fails over, we need the agent to register
+  // before the framework retries registration. Hence, the backoff
+  // factor has to be smaller than the framework registration backoff
+  // factor, but still > 0 so that the registration backoff code
+  // paths are exercised.
+  slave::Flags agentFlags = CreateSlaveFlags();
+  agentFlags.registration_backoff_factor = Nanoseconds(10);
+
   // Start a slave.
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, &containerizer);
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(&detector, &containerizer, agentFlags);
   ASSERT_SOME(slave);
 
   // Create a task on the slave.
@@ -2848,7 +2867,6 @@ TEST_F(MasterTest, RecoveredFramework)
 
   // Stop the master.
   PID<Master> originalPid = master.get()->pid;
-  master->reset();
 
   Future<SlaveReregisteredMessage> slaveReregisteredMessage =
     FUTURE_PROTOBUF(SlaveReregisteredMessage(), originalPid, _);
@@ -2876,6 +2894,7 @@ TEST_F(MasterTest, RecoveredFramework)
   // Simulate a new master detected event to the slave and the framework.
   detector.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregisteredMessage);
   AWAIT_READY(subscribeCall);
 
@@ -4025,6 +4044,151 @@ TEST_F(MasterTest, StateSummaryEndpoint)
 
   driver.stop();
   driver.join();
+}
+
+
+// This test verifies that recovered but yet to reregister agents are returned
+// in `recovered_slaves` field of `/state` and `/slaves` endpoints.
+TEST_F(MasterTest, RecoveredSlaves)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry = "replicated_log";
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+
+  // Reuse slaveFlags so both StartSlave() use the same work_dir.
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+
+  SlaveID slaveID = slaveRegisteredMessage.get().slave_id();
+
+  // Stop the slave while the master is down.
+  master->reset();
+  slave.get()->terminate();
+  slave->reset();
+
+  // Restart the master.
+  master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Ensure that the agent is present in `recovered_slaves` field
+  // while `slaves` field is empty in both `/state` and `/slaves`
+  // endpoints.
+
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+
+    Result<JSON::Array> array1 = parse.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(0u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse.get().find<JSON::Array>("recovered_slaves");
+
+    ASSERT_SOME(array2);
+    EXPECT_EQ(1u, array2.get().values.size());
+  }
+
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);;
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+
+    Result<JSON::Array> array1 = parse.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(0u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse.get().find<JSON::Array>("recovered_slaves");
+
+    ASSERT_SOME(array2);
+    EXPECT_EQ(1u, array2.get().values.size());
+  }
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  // Start the agent to make it re-register with the master.
+  detector = master.get()->createDetector();
+  slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  // After the agent has successfully re-registered with the master, the
+  // `recovered_slaves` field would be empty in both `/state` and `slave`
+  // endpoints.
+
+  {
+    Future<Response> response1 = process::http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response1);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response1.get().body);
+    Result<JSON::Array> array1 = parse.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(1u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse.get().find<JSON::Array>("recovered_slaves");
+    ASSERT_SOME(array2);
+    EXPECT_EQ(0u, array2.get().values.size());
+  }
+
+  {
+    Future<Response> response1 = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response1);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response1.get().body);
+    Result<JSON::Array> array1 = parse.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(1u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse.get().find<JSON::Array>("recovered_slaves");
+    ASSERT_SOME(array2);
+    EXPECT_EQ(0u, array2.get().values.size());
+  }
 }
 
 
@@ -5795,9 +5959,20 @@ TEST_F(MasterTest, FailoverAgentReregisterFirst)
     EXPECT_FALSE(framework.values["recovered"].as<JSON::Boolean>().value);
     EXPECT_EQ(0u, framework.values["unregistered_time"].as<JSON::Number>());
 
-    EXPECT_EQ(
-        static_cast<int64_t>(reregisterTime.secs()),
-        framework.values["registered_time"].as<JSON::Number>().as<int64_t>());
+    // Even with a paused clock, the value of `registered_time` and
+    // `reregistered_time` from the state endpoint can differ slightly
+    // from the actual start time since the value went through a
+    // number of conversions (`double` to `string` to `JSON::Value`).
+    // Since `Clock::now` is a floating point value, the actual
+    // maximal possible difference between the real and observed value
+    // depends on both the mantissa and the exponent of the compared
+    // values; for simplicity we compare with an epsilon of `1` which
+    // allows for e.g., changes in the integer part of values close to
+    // an integer value.
+    EXPECT_NEAR(
+        reregisterTime.secs(),
+        framework.values["registered_time"].as<JSON::Number>().as<double>(),
+        1);
 
     // The state endpoint does not return "reregistered_time" if it is
     // the same as "registered_time".

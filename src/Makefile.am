@@ -85,21 +85,42 @@ EXTRA_DIST =
 PHONY_TARGETS =
 LDADD =
 
+AM_LDFLAGS =
+
 # Use -Wl,--as-needed to AM_LDFLAGS since we link against all the
 # libraries programs may depend upon, not the exact one. --as-needed
 # causes the linker to only link to the ones a program actually uses,
 # not the full list on the command line.
 if OS_LINUX
-AM_LDFLAGS=-Wl,--as-needed
+AM_LDFLAGS += -Wl,--as-needed
 endif
 
 # Add compiler and linker flags for pthreads.
 AM_CXXFLAGS = $(PTHREAD_CFLAGS)
+
+# Enable common (and some language specific) warnings.
+AM_CXXFLAGS += -Wall
+# Warn when a comparison is made between signed and unsigned values.
+AM_CXXFLAGS += -Wsign-compare
+# Warn about use of format functions that can produce security issues.
+AM_CXXFLAGS += -Wformat-security
+
+# We will also have much more hardened/secured binaries and libraries.
+if ENABLE_HARDENING
+# Produce position independent executables so that we better take advantage of ASLR.
+AM_LDFLAGS += -pie
+# Protect many of the functions with stack guards
+# (either -fstack-protector-strong or -fstack-protector depending on compiler support).
+AM_CXXFLAGS += @STACK_PROTECTOR@
+# Produce position independent code when appropriate.
+AM_CXXFLAGS += -fPIC -fPIE
+endif
+
 AM_LIBS = $(PTHREAD_LIBS)
 
 # Setup CPPFLAGS that are used for most source files.
 MESOS_CPPFLAGS = $(AM_CPPFLAGS)
-MESOS_CPPFLAGS += -Wall -Werror -Wsign-compare
+MESOS_CPPFLAGS += -Werror
 MESOS_CPPFLAGS += -DLIBDIR=\"$(libdir)\"
 MESOS_CPPFLAGS += -DPKGLIBEXECDIR=\"$(pkglibexecdir)\"
 MESOS_CPPFLAGS += -DPKGDATADIR=\"$(pkgdatadir)\"
@@ -192,14 +213,6 @@ LIB_ZOOKEEPER = -lzookeeper_mt
 LDADD += -lzookeeper_mt
 endif
 
-# TODO(hausdorff): Remove our hard dependency on SASL, as some platforms
-# (namely Windows) will not support it in the forseeable future. As a
-# stop-gap, we conditionally compile the code in libmesos that depends on
-# SASL, by always setting `HAS_AUTHENTICATION` on non-Windows platforms, and
-# never setting it on Windows platforms. This means that non-Windows builds
-# of libmesos will still take a hard dependency on SASL, while Windows builds
-# won't. Currently, the dependency is still assumed throughout the tests,
-# though the plan is to remove this hard dependency as well. See MESOS-5450.
 MESOS_CPPFLAGS += -DHAS_AUTHENTICATION=1
 
 # README: we build the Mesos library out of a collection of
@@ -1113,12 +1126,17 @@ MESOS_LINUX_FILES =									\
   slave/containerizer/mesos/isolators/appc/runtime.cpp					\
   slave/containerizer/mesos/isolators/cgroups/cgroups.cpp				\
   slave/containerizer/mesos/isolators/cgroups/subsystem.cpp				\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/blkio.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/cpu.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/cpuacct.cpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/cpuset.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/devices.cpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/hugetlb.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/memory.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.cpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.cpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/pids.cpp			\
   slave/containerizer/mesos/isolators/docker/runtime.cpp				\
   slave/containerizer/mesos/isolators/docker/volume/isolator.cpp			\
   slave/containerizer/mesos/isolators/filesystem/linux.cpp				\
@@ -1151,12 +1169,17 @@ MESOS_LINUX_FILES +=									\
   slave/containerizer/mesos/isolators/cgroups/cgroups.hpp				\
   slave/containerizer/mesos/isolators/cgroups/constants.hpp				\
   slave/containerizer/mesos/isolators/cgroups/subsystem.hpp				\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/blkio.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/cpu.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/cpuacct.hpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/cpuset.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/devices.hpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/hugetlb.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/memory.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.hpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.hpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/pids.hpp			\
   slave/containerizer/mesos/isolators/docker/runtime.hpp				\
   slave/containerizer/mesos/isolators/docker/volume/isolator.hpp			\
   slave/containerizer/mesos/isolators/filesystem/linux.hpp				\
@@ -2425,12 +2448,13 @@ endif
 #    path.
 #
 # TODO(tomxing): Remove this target once the
-# slave->agent rename is complete(MESOS-3782 & MESOS-5230).
+# slave->agent rename is complete (MESOS-3782 & MESOS-5230).
 copy-template-and-create-symlink:
-	cp $(DESTDIR)/$(pkgsysconfdir)/mesos-agent-env.sh.template \
-	  $(DESTDIR)/$(pkgsysconfdir)/mesos-slave-env.sh.template &&\
-	cd $(DESTDIR)/$(includedir)/mesos && \
-	ln -sf agent slave
+	cd $(DESTDIR)/$(pkgsysconfdir) && \
+	  $(LN_S) mesos-agent-env.sh.template mesos-slave-env.sh.template
+	cd $(DESTDIR)/$(includedir)/mesos && $(LN_S) agent slave
+
+PHONY_TARGETS += copy-template-and-create-symlink
 
 # Install compatibility symlinks for modules that used to be in $(LIBDIR)
 # but are now in $(PKGMODULEDIR). We use install-data-hook because it

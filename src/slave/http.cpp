@@ -37,10 +37,12 @@
 #include <mesos/v1/executor/executor.hpp>
 
 #include <process/collect.hpp>
+#include <process/future.hpp>
 #include <process/help.hpp>
 #include <process/http.hpp>
-#include <process/logging.hpp>
 #include <process/limiter.hpp>
+#include <process/logging.hpp>
+#include <process/loop.hpp>
 #include <process/owned.hpp>
 
 #include <process/metrics/metrics.hpp>
@@ -80,9 +82,11 @@ using process::AUTHENTICATION;
 using process::AUTHORIZATION;
 using process::Clock;
 using process::DESCRIPTION;
+using process::Failure;
 using process::Future;
 using process::HELP;
 using process::Logging;
+using process::loop;
 using process::Owned;
 using process::TLDR;
 
@@ -169,7 +173,7 @@ struct ExecutorWriter
     }
 
     writer->field("tasks", [this](JSON::ArrayWriter* writer) {
-      foreach (Task* task, executor_->launchedTasks.values()) {
+      foreachvalue (Task* task, executor_->launchedTasks) {
         if (!approveViewTask(taskApprover_, *task, framework_->info)) {
           continue;
         }
@@ -179,7 +183,7 @@ struct ExecutorWriter
     });
 
     writer->field("queued_tasks", [this](JSON::ArrayWriter* writer) {
-      foreach (const TaskInfo& task, executor_->queuedTasks.values()) {
+      foreachvalue (const TaskInfo& task, executor_->queuedTasks) {
         if (!approveViewTaskInfo(taskApprover_, task, framework_->info)) {
           continue;
         }
@@ -199,9 +203,7 @@ struct ExecutorWriter
 
       // NOTE: We add 'terminatedTasks' to 'completed_tasks' for
       // simplicity.
-      // TODO(vinod): Use foreachvalue instead once LinkedHashmap
-      // supports it.
-      foreach (Task* task, executor_->terminatedTasks.values()) {
+      foreachvalue (Task* task, executor_->terminatedTasks) {
         if (!approveViewTask(taskApprover_, *task, framework_->info)) {
           continue;
         }
@@ -236,8 +238,19 @@ struct FrameworkWriter
     writer->field("user", framework_->info.user());
     writer->field("failover_timeout", framework_->info.failover_timeout());
     writer->field("checkpoint", framework_->info.checkpoint());
-    writer->field("role", framework_->info.role());
     writer->field("hostname", framework_->info.hostname());
+
+    // For multi-role frameworks the `role` field will be unset.
+    // Note that we could set `roles` here both both cases, which
+    // would make tooling simpler (only need to look for `roles`).
+    // However, we opted to just mirror the protobuf akin to how
+    // generic protobuf -> JSON translation works.
+    if (protobuf::frameworkHasCapability(
+            framework_->info, FrameworkInfo::Capability::MULTI_ROLE)) {
+      writer->field("roles", framework_->info.roles());
+    } else {
+      writer->field("role", framework_->info.role());
+    }
 
     writer->field("executors", [this](JSON::ArrayWriter* writer) {
       foreachvalue (Executor* executor, framework_->executors) {
@@ -381,7 +394,7 @@ Future<Response> Slave::Http::api(
         APPLICATION_STREAMING_JSON + " or "  + APPLICATION_STREAMING_PROTOBUF);
   }
 
-  CHECK_EQ(http::Request::PIPE, request.type);
+  CHECK_EQ(Request::PIPE, request.type);
   CHECK_SOME(request.reader);
 
   if (requestStreaming(contentType)) {
@@ -742,9 +755,36 @@ Future<Response> Slave::Http::getFlags(
 {
   CHECK_EQ(agent::Call::GET_FLAGS, call.type());
 
-  return OK(serialize(acceptType,
-                      evolve<v1::agent::Response::GET_FLAGS>(_flags())),
+  Future<Owned<ObjectApprover>> approver;
+
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    approver = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FLAGS);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(slave->self(),
+      [this, acceptType](
+          const Owned<ObjectApprover>& approver) -> Future<Response> {
+        Try<bool> approved = approver->approved(ObjectApprover::Object());
+
+        if (approved.isError()) {
+          return InternalServerError(approved.error());
+        } else if (!approved.get()) {
+          return Forbidden();
+        }
+
+        return OK(
+            serialize(
+                acceptType, evolve<v1::agent::Response::GET_FLAGS>(_flags())),
             stringify(acceptType));
+      }));
 }
 
 
@@ -855,9 +895,36 @@ Future<Response> Slave::Http::setLoggingLevel(
   Duration duration =
     Nanoseconds(call.set_logging_level().duration().nanoseconds());
 
-  return dispatch(process::logging(), &Logging::set_level, level, duration)
-      .then([]() -> Response {
-        return OK();
+  Future<Owned<ObjectApprover>> approver;
+
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    approver = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::SET_LOG_LEVEL);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(
+      [level, duration](
+          const Owned<ObjectApprover>& approver) -> Future<Response> {
+        Try<bool> approved = approver->approved((ObjectApprover::Object()));
+
+        if (approved.isError()) {
+          return InternalServerError(approved.error());
+        } else if (!approved.get()) {
+          return Forbidden();
+        }
+
+        return dispatch(
+            process::logging(), &Logging::set_level, level, duration)
+          .then([]() -> Response {
+            return OK();
+          });
       });
 }
 
@@ -1175,8 +1242,8 @@ Future<Response> Slave::Http::state(
             "completed_frameworks",
             [this, &frameworksApprover, &executorsApprover, &tasksApprover](
                 JSON::ArrayWriter* writer) {
-          foreach (const Owned<Framework>& framework,
-                   slave->completedFrameworks) {
+          foreachvalue (const Owned<Framework>& framework,
+                        slave->completedFrameworks) {
             // Skip unauthorized frameworks.
             if (!approveViewFrameworkInfo(
                     frameworksApprover, framework->info)) {
@@ -1250,7 +1317,7 @@ agent::Response::GetFrameworks Slave::Http::_getFrameworks(
       ->CopyFrom(framework->info);
   }
 
-  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+  foreachvalue (const Owned<Framework>& framework, slave->completedFrameworks) {
     // Skip unauthorized frameworks.
     if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
       continue;
@@ -1327,7 +1394,7 @@ agent::Response::GetExecutors Slave::Http::_getExecutors(
     frameworks.push_back(framework);
   }
 
-  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+  foreachvalue (const Owned<Framework>& framework, slave->completedFrameworks) {
     // Skip unauthorized frameworks.
     if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
       continue;
@@ -1441,7 +1508,7 @@ agent::Response::GetTasks Slave::Http::_getTasks(
     frameworks.push_back(framework);
   }
 
-  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+  foreachvalue (const Owned<Framework>& framework, slave->completedFrameworks) {
     // Skip unauthorized frameworks.
     if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
       continue;
@@ -1500,7 +1567,7 @@ agent::Response::GetTasks Slave::Http::_getTasks(
                const Framework* framework,
                executors) {
     // Queued tasks.
-    foreach (const TaskInfo& taskInfo, executor->queuedTasks.values()) {
+    foreachvalue (const TaskInfo& taskInfo, executor->queuedTasks) {
       // Skip unauthorized tasks.
       if (!approveViewTaskInfo(tasksApprover, taskInfo, framework->info)) {
         continue;
@@ -1513,7 +1580,7 @@ agent::Response::GetTasks Slave::Http::_getTasks(
     }
 
     // Launched tasks.
-    foreach (Task* task, executor->launchedTasks.values()) {
+    foreachvalue (Task* task, executor->launchedTasks) {
       CHECK_NOTNULL(task);
       // Skip unauthorized tasks.
       if (!approveViewTask(tasksApprover, *task, framework->info)) {
@@ -1524,7 +1591,7 @@ agent::Response::GetTasks Slave::Http::_getTasks(
     }
 
     // Terminated tasks.
-    foreach (Task* task, executor->terminatedTasks.values()) {
+    foreachvalue (Task* task, executor->terminatedTasks) {
       CHECK_NOTNULL(task);
       // Skip unauthorized tasks.
       if (!approveViewTask(tasksApprover, *task, framework->info)) {
@@ -1797,12 +1864,12 @@ Future<Response> Slave::Http::containers(
       principal)
     .then(defer(
         slave->self(),
-        [this, request](bool authorized) -> Future<Response> {
+        [this, request, principal](bool authorized) -> Future<Response> {
           if (!authorized) {
             return Forbidden();
           }
 
-          return _containers(request);
+          return _containers(request, principal);
         }));
 }
 
@@ -1810,54 +1877,90 @@ Future<Response> Slave::Http::containers(
 Future<Response> Slave::Http::getContainers(
     const agent::Call& call,
     ContentType acceptType,
-    const Option<string>& printcipal) const
+    const Option<string>& principal) const
 {
   CHECK_EQ(agent::Call::GET_CONTAINERS, call.type());
 
-  return __containers()
-      .then([acceptType](const Future<JSON::Array>& result)
-          -> Future<Response> {
-        if (!result.isReady()) {
-          LOG(WARNING) << "Could not collect container status and statistics: "
-                       << (result.isFailed()
-                            ? result.failure()
-                            : "Discarded");
-          return result.isFailed()
-            ? InternalServerError(result.failure())
-            : InternalServerError();
-        }
+  Future<Owned<ObjectApprover>> approver;
 
-        return OK(
-            serialize(
-                acceptType,
-                evolve<v1::agent::Response::GET_CONTAINERS>(result.get())),
-            stringify(acceptType));
-      });
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    approver = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_CONTAINER);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(slave->self(), [this](
+    const Owned<ObjectApprover>& approver) {
+        return __containers(approver);
+    })).then([acceptType](const Future<JSON::Array>& result)
+        -> Future<Response> {
+      if (!result.isReady()) {
+        LOG(WARNING) << "Could not collect container status and statistics: "
+                     << (result.isFailed()
+                          ? result.failure()
+                          : "Discarded");
+        return result.isFailed()
+          ? InternalServerError(result.failure())
+          : InternalServerError();
+      }
+
+      return OK(
+          serialize(
+              acceptType,
+              evolve<v1::agent::Response::GET_CONTAINERS>(result.get())),
+          stringify(acceptType));
+    });
 }
 
 
-Future<Response> Slave::Http::_containers(const Request& request) const
+Future<Response> Slave::Http::_containers(
+    const Request& request,
+    const Option<string>& principal) const
 {
-  return __containers()
-      .then([request](const Future<JSON::Array>& result) -> Future<Response> {
-        if (!result.isReady()) {
-          LOG(WARNING) << "Could not collect container status and statistics: "
-                       << (result.isFailed()
-                            ? result.failure()
-                            : "Discarded");
+  Future<Owned<ObjectApprover>> approver;
 
-          return result.isFailed()
-            ? InternalServerError(result.failure())
-            : InternalServerError();
-        }
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
 
-        return process::http::OK(
-            result.get(), request.url.query.get("jsonp"));
-      });
+    approver = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_CONTAINER);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(slave->self(), [this](
+    const Owned<ObjectApprover>& approver) {
+      return __containers(approver);
+     }))
+     .then([request](const Future<JSON::Array>& result) -> Future<Response> {
+       if (!result.isReady()) {
+         LOG(WARNING) << "Could not collect container status and statistics: "
+                      << (result.isFailed()
+                           ? result.failure()
+                           : "Discarded");
+
+         return result.isFailed()
+           ? InternalServerError(result.failure())
+           : InternalServerError();
+       }
+
+       return process::http::OK(
+           result.get(), request.url.query.get("jsonp"));
+     });
 }
 
 
-Future<JSON::Array> Slave::Http::__containers() const
+Future<JSON::Array> Slave::Http::__containers(
+    Option<Owned<ObjectApprover>> approver) const
 {
   Owned<list<JSON::Object>> metadata(new list<JSON::Object>());
   list<Future<ContainerStatus>> statusFutures;
@@ -1874,16 +1977,34 @@ Future<JSON::Array> Slave::Http::__containers() const
       const ExecutorInfo& info = executor->info;
       const ContainerID& containerId = executor->containerId;
 
-      JSON::Object entry;
-      entry.values["framework_id"] = info.framework_id().value();
-      entry.values["executor_id"] = info.executor_id().value();
-      entry.values["executor_name"] = info.name();
-      entry.values["source"] = info.source();
-      entry.values["container_id"] = containerId.value();
+      Try<bool> authorized = true;
 
-      metadata->push_back(entry);
-      statusFutures.push_back(slave->containerizer->status(containerId));
-      statsFutures.push_back(slave->containerizer->usage(containerId));
+      if (approver.isSome()) {
+        ObjectApprover::Object object;
+        object.executor_info = &info;
+        object.framework_info = &(framework->info);
+
+        authorized = approver.get()->approved(object);
+
+        if (authorized.isError()) {
+          LOG(WARNING) << "Error during ViewContainer authorization: "
+                       << authorized.error();
+          authorized = false;
+        }
+      }
+
+      if (authorized.get()) {
+        JSON::Object entry;
+        entry.values["framework_id"] = info.framework_id().value();
+        entry.values["executor_id"] = info.executor_id().value();
+        entry.values["executor_name"] = info.name();
+        entry.values["source"] = info.source();
+        entry.values["container_id"] = containerId.value();
+
+        metadata->push_back(entry);
+        statusFutures.push_back(slave->containerizer->status(containerId));
+        statsFutures.push_back(slave->containerizer->usage(containerId));
+      }
     }
   }
 
@@ -2347,7 +2468,7 @@ Future<Response> Slave::Http::_attachContainerInput(
       request.type = Request::PIPE;
       request.reader = reader;
       request.headers = {{"Content-Type", stringify(contentType)},
-                         {"Accept-Type", stringify(acceptType)}};
+                         {"Accept", stringify(acceptType)}};
 
       // See comments in `attachContainerOutput()` for the reasoning
       // behind these values.
@@ -2461,25 +2582,23 @@ Future<Response> Slave::Http::attachContainerInput(
 // TODO(vinod): Move this to libprocess if this is more generally useful.
 Future<Nothing> connect(Pipe::Reader reader, Pipe::Writer writer)
 {
-  return reader.read()
-    .then([reader, writer](const Future<string>& chunk) mutable
-        -> Future<Nothing> {
-      if (!chunk.isReady()) {
-        return process::Failure(
-            chunk.isFailed() ? chunk.failure() : "discarded");
-      }
+  return loop(
+      None(),
+      [=]() mutable {
+        return reader.read();
+      },
+      [=](const string& chunk) mutable -> Future<bool> {
+        if (chunk.empty()) {
+          // EOF case.
+          return false;
+        }
 
-      if (chunk->empty()) {
-        // EOF case.
-        return Nothing();
-      }
+        if (!writer.write(chunk)) {
+          return Failure("Write failed to the pipe");
+        }
 
-      if (!writer.write(chunk.get())) {
-        return process::Failure("Write failed to the pipe");
-      }
-
-      return connect(reader, writer);
-    });
+        return true;
+      });
 }
 
 
@@ -2552,6 +2671,10 @@ Future<Response> Slave::Http::launchNestedContainerSession(
       return attachContainerOutput(call, contentType, acceptType, principal)
         .then(defer(slave->self(),
                     [=](const Response& response) -> Future<Response> {
+          if (response.status != OK().status) {
+            return response;
+          }
+
           Pipe pipe;
           Pipe::Writer writer = pipe.writer();
 

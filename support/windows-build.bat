@@ -49,7 +49,7 @@ REM Generate the Visual Studio solution.
 REM You can pass in other flags by setting `OTHER_CMAKE_OPTIONS` before
 REM calling the script. For example, the ASF CI will add `-DPATCHEXE_PATH=...`
 REM because the path to GNU Patch is not the default.
-cmake .. -G "Visual Studio 14 2015 Win64" -DENABLE_LIBEVENT=1 %OTHER_CMAKE_OPTIONS%
+cmake .. -G "Visual Studio 14 2015 Win64" -DENABLE_LIBEVENT=1 -DHAS_AUTHENTICATION=0 %OTHER_CMAKE_OPTIONS%
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 REM NOTE: We pass in the build option `/p:PreferredToolArchitecture=x64`
@@ -66,7 +66,6 @@ REM Build and run the stout tests.
 msbuild Mesos.sln /p:PreferredToolArchitecture=x64 /m /t:stout_tests
 if %errorlevel% neq 0 exit /b %errorlevel%
 
-REM TODO(josephw): Uncomment this after fixing the tests on Windows.
 "3rdparty/stout/tests/Debug/stout_tests.exe"
 if %errorlevel% neq 0 exit /b %errorlevel%
 
@@ -74,7 +73,6 @@ REM Build and run the libprocess tests.
 msbuild Mesos.sln /p:PreferredToolArchitecture=x64 /m /t:process_tests
 if %errorlevel% neq 0 exit /b %errorlevel%
 
-REM TODO(josephw): Uncomment this after fixing the tests on Windows.
 "3rdparty/libprocess/src/tests/Debug/process_tests.exe"
 if %errorlevel% neq 0 exit /b %errorlevel%
 
@@ -82,7 +80,9 @@ REM Build everything else.
 msbuild Mesos.sln /p:PreferredToolArchitecture=x64 /m
 if %errorlevel% neq 0 exit /b %errorlevel%
 
-REM TODO(josephw): Run mesos tests.
+REM Run mesos tests.
+"src/mesos-tests.exe" --verbose
+if %errorlevel% neq 0 exit /b %errorlevel%
 
 goto :eof
 

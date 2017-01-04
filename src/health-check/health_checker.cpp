@@ -276,6 +276,9 @@ void HealthCheckerProcess::performSingleCheck()
 {
   Future<Nothing> checkResult;
 
+  Stopwatch stopwatch;
+  stopwatch.start();
+
   switch (check.type()) {
     case HealthCheck::COMMAND: {
       checkResult = commandHealthCheck();
@@ -297,12 +300,19 @@ void HealthCheckerProcess::performSingleCheck()
     }
   }
 
-  checkResult.onAny(defer(self(), &Self::processCheckResult, lambda::_1));
+  checkResult.onAny(defer(
+      self(),
+      &Self::processCheckResult, stopwatch, lambda::_1));
 }
 
 
-void HealthCheckerProcess::processCheckResult(const Future<Nothing>& future)
+void HealthCheckerProcess::processCheckResult(
+    const Stopwatch& stopwatch,
+    const Future<Nothing>& future)
 {
+  VLOG(1) << "Performed " << HealthCheck::Type_Name(check.type())
+          << " health check in " << stopwatch.elapsed();
+
   if (future.isReady()) {
     success();
     return;
@@ -429,6 +439,8 @@ Future<Nothing> HealthCheckerProcess::httpHealthCheck()
     url
   };
 
+  // TODO(alexr): Consider launching the helper binary once per task lifetime,
+  // see MESOS-6766.
   Try<Subprocess> s = subprocess(
       HTTP_CHECK_COMMAND,
       argv,
@@ -553,6 +565,8 @@ Future<Nothing> HealthCheckerProcess::tcpHealthCheck()
     "--port=" + stringify(tcp.port())
   };
 
+  // TODO(alexr): Consider launching the helper binary once per task lifetime,
+  // see MESOS-6766.
   Try<Subprocess> s = subprocess(
       tcpConnectPath,
       tcpConnectArguments,

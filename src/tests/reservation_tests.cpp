@@ -969,6 +969,13 @@ TEST_F(ReservationTest, MasterFailover)
   // slave will do a re-registration.
   detector.appoint(master2.get()->pid);
 
+  // Ensure agent registration is processed.
+  Clock::pause();
+  Clock::advance(slaveFlags.authentication_backoff_factor);
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  Clock::settle();
+  Clock::resume();
+
   // Wait for slave to confirm re-registration.
   AWAIT_READY(slaveReregistered);
 
@@ -1756,6 +1763,8 @@ TEST_F(ReservationTest, ACLMultipleOperations)
   Clock::advance(masterFlags.allocation_interval);
 
   // In the first offer, expect an offer with unreserved resources.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers.get().size());
@@ -1936,6 +1945,8 @@ TEST_F(ReservationTest, WithoutAuthenticationWithoutPrincipal)
   driver.start();
 
   // In the first offer, expect an offer with unreserved resources.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers.get().size());
@@ -2039,6 +2050,8 @@ TEST_F(ReservationTest, WithoutAuthenticationWithPrincipal)
   driver.start();
 
   // In the first offer, expect an offer with unreserved resources.
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers.get().size());

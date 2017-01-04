@@ -105,9 +105,12 @@ using process::collect;
 using process::dispatch;
 using process::defer;
 
+using process::Clock;
 using process::Failure;
 using process::Future;
 using process::Owned;
+using process::Shared;
+using process::Subprocess;
 
 using process::http::Connection;
 
@@ -305,11 +308,16 @@ Try<MesosContainerizer*> MesosContainerizer::create(
 #endif // __WINDOWS__
 
 #ifdef __linux__
+    {"cgroups/blkio", &CgroupsIsolatorProcess::create},
     {"cgroups/cpu", &CgroupsIsolatorProcess::create},
+    {"cgroups/cpuset", &CgroupsIsolatorProcess::create},
     {"cgroups/devices", &CgroupsIsolatorProcess::create},
+    {"cgroups/hugetlb", &CgroupsIsolatorProcess::create},
     {"cgroups/mem", &CgroupsIsolatorProcess::create},
     {"cgroups/net_cls", &CgroupsIsolatorProcess::create},
+    {"cgroups/net_prio", &CgroupsIsolatorProcess::create},
     {"cgroups/perf_event", &CgroupsIsolatorProcess::create},
+    {"cgroups/pids", &CgroupsIsolatorProcess::create},
     {"appc/runtime", &AppcRuntimeIsolatorProcess::create},
     {"docker/runtime", &DockerRuntimeIsolatorProcess::create},
     {"docker/volume", &DockerVolumeIsolatorProcess::create},
@@ -1406,10 +1414,21 @@ Future<bool> MesosContainerizerProcess::_launch(
   launchInfo.mutable_command()->clear_environment();
   launchInfo.mutable_command()->clear_user();
 
-  // Determine the environment for the command to be launched.
-  // NOTE: We always set the environment in 'launchInfo' so that the
-  // container does not inherit agent environment variables.
+  // Determine the environment for the command to be launched. The
+  // priority of the environment should be:
+  //  1) User specified environment in CommandInfo.
+  //  2) Environment returned by isolators (i.e., in 'launchInfo').
+  //  3) Environment passed from agent (e.g., executor environment).
+
+  // Save a copy of the environment returned by isolators because
+  // earlier entries in 'launchInfo.environment' will be overwritten
+  // by later entries. 'launchInfo.environment' will later be used as
+  // the environment for the container, and the container will not
+  // inherit the agent environment.
+  Environment isolatorEnvironment = launchInfo.environment();
+
   Environment* containerEnvironment = launchInfo.mutable_environment();
+  containerEnvironment->Clear();
 
   foreachpair (const string& key, const string& value, environment) {
     Environment::Variable* variable = containerEnvironment->add_variables();
@@ -1433,6 +1452,8 @@ Future<bool> MesosContainerizerProcess::_launch(
       ? flags.sandbox_directory
       : container->config.directory());
   }
+
+  containerEnvironment->MergeFrom(isolatorEnvironment);
 
   // Include any user specified environment variables.
   if (container->config.command_info().has_environment()) {

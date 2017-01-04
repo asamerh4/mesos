@@ -217,22 +217,29 @@ mesos::internal::slave::Flags::Flags()
       "not across reboots). This directory will be cleared on reboot.\n"
       "(Example: `/var/run/mesos`)",
       []() -> string {
+        Try<std::string> var = os::var();
+        if (var.isSome()) {
 #ifdef __WINDOWS__
-        // TODO(josephw): After adding a platform-dependent helper
-        // for determining the "var" directory, consider removing
-        // this `#ifdef`.
-        return path::join(os::temp(), "mesos", "runtime");
+          const std::string prefix(var.get());
 #else
-        Result<string> user = os::user();
-        CHECK_SOME(user);
-
-        // TODO(andschwa): Check for permissions instead of user.
-        if (user.get() == "root") {
-          return path::join("/var", "run", "mesos");
-        } else {
-          return path::join(os::temp(), "mesos", "runtime");
-        }
+          const std::string prefix(path::join(var.get(), "run"));
 #endif // __WINDOWS__
+
+          // We check for access on the prefix because the remainder
+          // of the directory structure is created by the agent later.
+          Try<bool> access = os::access(prefix, R_OK | W_OK);
+          if (access.isSome() && access.get()) {
+#ifdef __WINDOWS__
+            return path::join(prefix, "mesos", "runtime");
+#else
+            return path::join(prefix, "mesos");
+#endif // __WINDOWS__
+          }
+        }
+
+        // We provide a fallback path for ease of use in case `os::var()`
+        // errors or if the directory is not accessible.
+        return path::join(os::temp(), "mesos", "runtime");
       }());
 
   add(&Flags::launcher_dir, // TODO(benh): This needs a better name.
@@ -262,18 +269,15 @@ mesos::internal::slave::Flags::Flags()
       "NOTE: This feature is not yet supported on Windows agent, and\n"
       "therefore the flag currently does not exist on that platform.",
       true);
-
-  add(&Flags::io_switchboard_enable_server,
-      "io_switchboard_enable_server",
-      "If set to `true`, the agent will launch a per-container sidecar\n"
-      "process that runs an HTTP serve to handle incoming\n"
-      "'ATTACH_CONTAINER_INPUT' and 'ATTACH_CONTAINER_OUTPUT' calls on\n"
-      "behalf of a container. If set to 'false', this functionality\n"
-      "will not be available. The default is 'false'.\n"
-      "NOTE: This feature is not yet supported on Windows agent, and\n"
-      "therefore the flag currently does not exist on that platform.",
-      false);
 #endif // __WINDOWS__
+
+  add(&Flags::http_heartbeat_interval,
+      "http_heartbeat_interval",
+      "This flag sets a heartbeat interval (e.g. '5secs', '10mins') for\n"
+      "messages to be sent over persistent connections made against\n"
+      "the agent HTTP API. Currently, this only applies to the\n"
+      "'LAUNCH_NESTED_CONTAINER_SESSION' and 'ATTACH_CONTAINER_OUTPUT' calls.",
+      Seconds(30));
 
   add(&Flags::frameworks_home,
       "frameworks_home",
@@ -655,7 +659,12 @@ mesos::internal::slave::Flags::Flags()
       "sandbox_directory",
       "The absolute path for the directory in the container where the\n"
       "sandbox is mapped to.\n",
-      "/mnt/mesos/sandbox");
+#ifndef __WINDOWS__
+      "/mnt/mesos/sandbox"
+#else
+      "C:\\mesos\\sandbox"
+#endif // __WINDOWS__
+      );
 
   add(&Flags::default_container_info,
       "default_container_info",

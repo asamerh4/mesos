@@ -165,7 +165,7 @@ TEST_F(PartitionTest, PartitionedSlave)
 // This test checks that a slave can reregister with the master after
 // a partition, and that PARTITION_AWARE tasks running on the slave
 // continue to run.
-TEST_F(PartitionTest, ReregisterSlavePartitionAware)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, ReregisterSlavePartitionAware)
 {
   Clock::pause();
 
@@ -184,7 +184,8 @@ TEST_F(PartitionTest, ReregisterSlavePartitionAware)
 
   StandaloneMasterDetector detector(master.get()->pid);
 
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, agentFlags);
   ASSERT_SOME(slave);
 
   // Start a scheduler. The scheduler has the PARTITION_AWARE
@@ -207,6 +208,8 @@ TEST_F(PartitionTest, ReregisterSlavePartitionAware)
 
   driver.start();
 
+  Clock::advance(agentFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
   ASSERT_FALSE(offers.get().empty());
 
@@ -237,6 +240,8 @@ TEST_F(PartitionTest, ReregisterSlavePartitionAware)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&unreachableStatus));
 
+  // We expect to get a `slaveLost` callback, even though this
+  // scheduler is partition-aware.
   Future<Nothing> slaveLost;
   EXPECT_CALL(sched, slaveLost(&driver, _))
     .WillOnce(FutureSatisfy(&slaveLost));
@@ -281,6 +286,7 @@ TEST_F(PartitionTest, ReregisterSlavePartitionAware)
 
   detector.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregistered);
 
   // Perform explicit reconciliation; the task should still be running.
@@ -309,7 +315,7 @@ TEST_F(PartitionTest, ReregisterSlavePartitionAware)
 // This test checks that a slave can reregister with the master after
 // a partition, and that non-PARTITION_AWARE tasks running on the
 // slave are shutdown.
-TEST_F(PartitionTest, ReregisterSlaveNotPartitionAware)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, ReregisterSlaveNotPartitionAware)
 {
   Clock::pause();
 
@@ -328,7 +334,8 @@ TEST_F(PartitionTest, ReregisterSlaveNotPartitionAware)
 
   StandaloneMasterDetector detector(master.get()->pid);
 
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, agentFlags);
   ASSERT_SOME(slave);
 
   // Start a scheduler. The scheduler is not PARTITION_AWARE, so we
@@ -347,6 +354,8 @@ TEST_F(PartitionTest, ReregisterSlaveNotPartitionAware)
 
   driver.start();
 
+  Clock::advance(agentFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
   ASSERT_FALSE(offers.get().empty());
 
@@ -377,8 +386,6 @@ TEST_F(PartitionTest, ReregisterSlaveNotPartitionAware)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&lostStatus));
 
-  // Note that we expect to get `slaveLost` callbacks in both
-  // schedulers, regardless of PARTITION_AWARE.
   Future<Nothing> slaveLost;
   EXPECT_CALL(sched, slaveLost(&driver, _))
     .WillOnce(FutureSatisfy(&slaveLost));
@@ -436,6 +443,7 @@ TEST_F(PartitionTest, ReregisterSlaveNotPartitionAware)
 
   detector.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregistered);
 
   // Perform explicit reconciliation. The task should not be running
@@ -470,7 +478,9 @@ TEST_F(PartitionTest, ReregisterSlaveNotPartitionAware)
 // not. Both tasks should survive the reregistration of the partitioned
 // agent: we allow the non-partition-aware task to continue running for
 // backward compatibility with the "non-strict" Mesos 1.0 behavior.
-TEST_F(PartitionTest, PartitionedSlaveReregistrationMasterFailover)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    PartitionTest,
+    PartitionedSlaveReregistrationMasterFailover)
 {
   Clock::pause();
 
@@ -508,6 +518,8 @@ TEST_F(PartitionTest, PartitionedSlaveReregistrationMasterFailover)
 
   driver1.start();
 
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
   ASSERT_FALSE(offers.get().empty());
 
@@ -667,6 +679,7 @@ TEST_F(PartitionTest, PartitionedSlaveReregistrationMasterFailover)
   detector.appoint(master.get()->pid);
 
   // Wait for slave to reregister.
+  Clock::advance(slaveFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregistered);
 
   // Wait for both schedulers to reregister.
@@ -722,7 +735,7 @@ TEST_F(PartitionTest, PartitionedSlaveReregistrationMasterFailover)
 // before the partition heals. Right now, the task is left running as
 // an orphan; when MESOS-6602 is fixed, the task will be shutdown when
 // the agent re-registers.
-TEST_F(PartitionTest, PartitionedSlaveOrphanedTask)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, PartitionedSlaveOrphanedTask)
 {
   Clock::pause();
 
@@ -741,7 +754,8 @@ TEST_F(PartitionTest, PartitionedSlaveOrphanedTask)
 
   StandaloneMasterDetector detector(master.get()->pid);
 
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, agentFlags);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -763,6 +777,9 @@ TEST_F(PartitionTest, PartitionedSlaveOrphanedTask)
   driver.start();
 
   AWAIT_READY(frameworkId);
+
+  Clock::advance(agentFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
   ASSERT_FALSE(offers.get().empty());
 
@@ -840,6 +857,7 @@ TEST_F(PartitionTest, PartitionedSlaveOrphanedTask)
 
   detector.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregistered);
 
   Clock::resume();
@@ -896,7 +914,7 @@ TEST_F(PartitionTest, PartitionedSlaveOrphanedTask)
 // This test checks that the master handles a slave that becomes
 // partitioned while running a task that belongs to a disconnected
 // framework.
-TEST_F(PartitionTest, DisconnectedFramework)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, DisconnectedFramework)
 {
   master::Flags masterFlags = CreateMasterFlags();
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
@@ -969,7 +987,9 @@ TEST_F(PartitionTest, DisconnectedFramework)
 
   DROP_PROTOBUFS(PongSlaveMessage(), _, _);
 
-  // Notify the slave about the new master and wait for it to reregister.
+  // Notify the slave about the new master and wait for it to
+  // reregister. The task on the agent should continue running,
+  // because the master has failed over.
   Future<SlaveReregisteredMessage> slaveReregistered = FUTURE_PROTOBUF(
       SlaveReregisteredMessage(), master.get()->pid, slave.get()->pid);
 
@@ -1054,7 +1074,7 @@ TEST_F(PartitionTest, DisconnectedFramework)
 // master (e.g., because of a spurious Zk leader flap at the slave),
 // the master does not kill any tasks on the slave, even if those
 // tasks are not PARTITION_AWARE.
-TEST_F(PartitionTest, SpuriousSlaveReregistration)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, SpuriousSlaveReregistration)
 {
   Clock::pause();
 
@@ -1064,7 +1084,8 @@ TEST_F(PartitionTest, SpuriousSlaveReregistration)
 
   StandaloneMasterDetector detector(master.get()->pid);
 
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, agentFlags);
   ASSERT_SOME(slave);
 
   // The framework should not be PARTITION_AWARE, since tasks started
@@ -1088,6 +1109,9 @@ TEST_F(PartitionTest, SpuriousSlaveReregistration)
   driver.start();
 
   AWAIT_READY(frameworkId);
+
+  Clock::advance(agentFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
   AWAIT_READY(offers);
   ASSERT_FALSE(offers.get().empty());
 
@@ -1124,6 +1148,7 @@ TEST_F(PartitionTest, SpuriousSlaveReregistration)
 
   detector.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregistered);
 
   // Perform explicit reconciliation. The task should still be running.
@@ -1155,7 +1180,7 @@ TEST_F(PartitionTest, SpuriousSlaveReregistration)
 // master's POV). In prior Mesos versions, the master would shutdown
 // the slave in this situation. In Mesos >= 1.1, the master will drop
 // the status update; the slave will eventually try to reregister.
-TEST_F(PartitionTest, PartitionedSlaveStatusUpdates)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, PartitionedSlaveStatusUpdates)
 {
   Clock::pause();
 
@@ -1176,10 +1201,13 @@ TEST_F(PartitionTest, PartitionedSlaveStatusUpdates)
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Owned<MasterDetector> detector = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, agentFlags);
   ASSERT_SOME(slave);
 
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage);
   SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
 
@@ -1223,6 +1251,7 @@ TEST_F(PartitionTest, PartitionedSlaveStatusUpdates)
   AWAIT_READY(slaveLost);
 
   // Slave will try to authenticate for reregistration; message dropped.
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(authenticateMessage);
 
   JSON::Object stats = Metrics();
@@ -1427,7 +1456,7 @@ TEST_F(PartitionTest, PartitionedSlaveExitedExecutor)
 // This test checks that the master correctly garbage collects
 // information about unreachable agents from the registry using the
 // count-based GC criterion.
-TEST_F(PartitionTest, RegistryGcByCount)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, RegistryGcByCount)
 {
   // Configure GC to only keep the most recent partitioned agent in
   // the unreachable list.
@@ -1459,10 +1488,13 @@ TEST_F(PartitionTest, RegistryGcByCount)
   Future<SlaveRegisteredMessage> slaveRegisteredMessage1 =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
+  slave::Flags agentFlags1 = CreateSlaveFlags();
   Owned<MasterDetector> slaveDetector1 = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave1 = StartSlave(slaveDetector1.get());
+  Try<Owned<cluster::Slave>> slave1 =
+    StartSlave(slaveDetector1.get(), agentFlags1);
   ASSERT_SOME(slave1);
 
+  Clock::advance(agentFlags1.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage1);
   const SlaveID slaveId1 = slaveRegisteredMessage1.get().slave_id();
 
@@ -1529,10 +1561,13 @@ TEST_F(PartitionTest, RegistryGcByCount)
   Future<SlaveRegisteredMessage> slaveRegisteredMessage2 =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
+  slave::Flags agentFlags2 = CreateSlaveFlags();
   Owned<MasterDetector> slaveDetector2 = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave2 = StartSlave(slaveDetector2.get());
+  Try<Owned<cluster::Slave>> slave2 =
+    StartSlave(slaveDetector2.get(), agentFlags2);
   ASSERT_SOME(slave2);
 
+  Clock::advance(agentFlags2.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage2);
   const SlaveID slaveId2 = slaveRegisteredMessage2.get().slave_id();
 
@@ -1654,7 +1689,7 @@ TEST_F(PartitionTest, RegistryGcByCount)
 // would be annoying to do by creating slaves and simulating network
 // partitions; instead we add agents to the unreachable list by
 // directly applying registry operations.
-TEST_F(PartitionTest, RegistryGcByCountManySlaves)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, RegistryGcByCountManySlaves)
 {
   // Configure GC to only keep the most recent partitioned agent in
   // the unreachable list.
@@ -1771,16 +1806,23 @@ TEST_F(PartitionTest, RegistryGcByCountManySlaves)
 // age-based GC criterion. We configure GC to discard agents after 20
 // minutes; GC occurs every 15 mins. We test the following schedule:
 //
-// 75 sec:              slave1 is marked unreachable
-// 720 secs (12 mins):  slave2 is marked unreachable
+// 1 sec:               slave1 registered
+// 76 sec:              slave1 is marked unreachable
+// 720 secs (12 mins):  slave2 registers, is marked unreachable
 // 900 secs (15 mins):  GC runs, nothing discarded
 // 1800 secs (30 mins): GC runs, slave1 is discarded
 // 2700 secs (45 mins): GC runs, slave2 is discarded
-TEST_F(PartitionTest, RegistryGcByAge)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, RegistryGcByAge)
 {
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.registry_gc_interval = Minutes(15);
   masterFlags.registry_max_agent_age = Minutes(20);
+
+  slave::Flags agentFlags1 = CreateSlaveFlags();
+  agentFlags1.registration_backoff_factor = Seconds(1);
+
+  slave::Flags agentFlags2 = CreateSlaveFlags();
+  agentFlags2.registration_backoff_factor = Seconds(1);
 
   // Pause the clock before starting the master. This ensures that we
   // know precisely when the GC timer will fire.
@@ -1803,9 +1845,12 @@ TEST_F(PartitionTest, RegistryGcByAge)
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   Owned<MasterDetector> slaveDetector1 = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave1 = StartSlave(slaveDetector1.get());
+  Try<Owned<cluster::Slave>> slave1 =
+    StartSlave(slaveDetector1.get(), agentFlags1);
   ASSERT_SOME(slave1);
 
+  // Advance clock to trigger agent registration.
+  Clock::advance(agentFlags1.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage1);
   const SlaveID slaveId1 = slaveRegisteredMessage1.get().slave_id();
 
@@ -1867,18 +1912,25 @@ TEST_F(PartitionTest, RegistryGcByAge)
   // Per the schedule above, we want the second slave to be
   // partitioned after 720 seconds have elapsed, so we advance the
   // clock by 570 seconds (570 + 75 + 75 = 720).
-  EXPECT_EQ(Seconds(75), Clock::now() - startTime);
+  EXPECT_EQ(Seconds(75) + agentFlags1.registration_backoff_factor,
+            Clock::now() - startTime);
 
-  Clock::advance(Seconds(570));
+  // Advance clock to 720 seconds, minus the time we took to register agent1,
+  // and minus the time we will take to register agent 2.
+  Clock::advance(Seconds(570) - agentFlags1.registration_backoff_factor -
+    agentFlags2.registration_backoff_factor);
 
   // Start another slave.
   Future<SlaveRegisteredMessage> slaveRegisteredMessage2 =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   Owned<MasterDetector> slaveDetector2 = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave2 = StartSlave(slaveDetector2.get());
+  Try<Owned<cluster::Slave>> slave2 = StartSlave(slaveDetector2.get(),
+                                                 agentFlags2);
   ASSERT_SOME(slave2);
 
+  // Advance clock to trigger agent registration.
+  Clock::advance(agentFlags2.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage2);
   const SlaveID slaveId2 = slaveRegisteredMessage2.get().slave_id();
 
@@ -2031,7 +2083,7 @@ TEST_F(PartitionTest, RegistryGcByAge)
 // configure GC to only keep a single agent. Concurrently with GC
 // running, we arrange for one of those agents to reregister with the
 // master.
-TEST_F(PartitionTest, RegistryGcRace)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(PartitionTest, RegistryGcRace)
 {
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.registry_max_agent_count = 1;
@@ -2055,10 +2107,12 @@ TEST_F(PartitionTest, RegistryGcRace)
 
   Owned<MasterDetector> detector1 = master.get()->createDetector();
 
-  Try<Owned<cluster::Slave>> slave1 = StartSlave(detector1.get());
+  slave::Flags agentFlags1 = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave1 = StartSlave(detector1.get(), agentFlags1);
   ASSERT_SOME(slave1);
 
   // Wait for the slave to register and get the slave id.
+  Clock::advance(agentFlags1.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage1);
   SlaveID slaveId1 = slaveRegisteredMessage1.get().slave_id();
 
@@ -2113,10 +2167,12 @@ TEST_F(PartitionTest, RegistryGcRace)
 
   StandaloneMasterDetector detector2(master.get()->pid);
 
-  Try<Owned<cluster::Slave>> slave2 = StartSlave(&detector2);
+  slave::Flags agentFlags2 = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave2 = StartSlave(&detector2, agentFlags2);
   ASSERT_SOME(slave2);
 
   // Wait for the slave to register and get the slave id.
+  Clock::advance(agentFlags2.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage2);
   SlaveID slaveId2 = slaveRegisteredMessage2.get().slave_id();
 
@@ -2152,10 +2208,12 @@ TEST_F(PartitionTest, RegistryGcRace)
 
   Owned<MasterDetector> detector3 = master.get()->createDetector();
 
-  Try<Owned<cluster::Slave>> slave3 = StartSlave(detector3.get());
+  slave::Flags agentFlags3 = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave3 = StartSlave(detector3.get(), agentFlags3);
   ASSERT_SOME(slave3);
 
   // Wait for the slave to register and get the slave id.
+  Clock::advance(agentFlags3.registration_backoff_factor);
   AWAIT_READY(slaveRegisteredMessage3);
   SlaveID slaveId3 = slaveRegisteredMessage3.get().slave_id();
 
@@ -2178,6 +2236,8 @@ TEST_F(PartitionTest, RegistryGcRace)
   Clock::advance(masterFlags.agent_ping_timeout);
 
   AWAIT_READY(slaveLost3);
+
+  Clock::advance(agentFlags2.registration_backoff_factor);
   AWAIT_READY(reregisterSlave2);
 
   // `slave3` will try to re-register below when we advance the clock.
@@ -2195,6 +2255,7 @@ TEST_F(PartitionTest, RegistryGcRace)
 
   detector2.appoint(master.get()->pid);
 
+  Clock::advance(agentFlags2.registration_backoff_factor);
   AWAIT_READY(markReachable);
   EXPECT_NE(
       nullptr,
@@ -2429,7 +2490,7 @@ class OneWayPartitionTest : public MesosTest {};
 // This test verifies that if master --> slave socket closes and the
 // slave is not aware of it (i.e., one way network partition), slave
 // will re-register with the master.
-TEST_F(OneWayPartitionTest, MasterToSlave)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(OneWayPartitionTest, MasterToSlave)
 {
   // Start a master.
   master::Flags masterFlags = CreateMasterFlags();
@@ -2443,8 +2504,9 @@ TEST_F(OneWayPartitionTest, MasterToSlave)
   Future<Message> ping = FUTURE_MESSAGE(
       Eq(PingSlaveMessage().GetTypeName()), _, _);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Owned<MasterDetector> detector = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), agentFlags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
@@ -2473,6 +2535,7 @@ TEST_F(OneWayPartitionTest, MasterToSlave)
   Clock::advance(masterFlags.agent_ping_timeout);
 
   // Slave should re-register.
+  Clock::resume();
   AWAIT_READY(slaveReregisteredMessage);
 }
 
@@ -2481,7 +2544,7 @@ TEST_F(OneWayPartitionTest, MasterToSlave)
 // framework is not aware of it (i.e., one way network partition), all
 // subsequent calls from the framework after the master has marked it as
 // disconnected would result in an error message causing the framework to abort.
-TEST_F(OneWayPartitionTest, MasterToScheduler)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(OneWayPartitionTest, MasterToScheduler)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);

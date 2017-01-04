@@ -25,8 +25,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/array.hpp>
-
 #include <mesos/attributes.hpp>
 #include <mesos/type_utils.hpp>
 
@@ -152,6 +150,15 @@ static void json(JSON::ObjectWriter* writer, const MasterInfo& info)
   writer->field("hostname", info.hostname());
 }
 
+
+static void json(JSON::ObjectWriter* writer, const SlaveInfo& slaveInfo)
+{
+  writer->field("id", slaveInfo.id().value());
+  writer->field("hostname", slaveInfo.hostname());
+  writer->field("port", slaveInfo.port());
+  writer->field("attributes", Attributes(slaveInfo.attributes()));
+}
+
 namespace internal {
 namespace master {
 
@@ -207,7 +214,6 @@ struct FullFrameworkWriter {
     writer->field("user", framework_->info.user());
     writer->field("failover_timeout", framework_->info.failover_timeout());
     writer->field("checkpoint", framework_->info.checkpoint());
-    writer->field("role", framework_->info.role());
     writer->field("registered_time", framework_->registeredTime.secs());
     writer->field("unregistered_time", framework_->unregisteredTime.secs());
 
@@ -224,6 +230,18 @@ struct FullFrameworkWriter {
     // TODO(benh): Consider making reregisteredTime an Option.
     if (framework_->registeredTime != framework_->reregisteredTime) {
       writer->field("reregistered_time", framework_->reregisteredTime.secs());
+    }
+
+    // For multi-role frameworks the `role` field will be unset.
+    // Note that we could set `roles` here both both cases, which
+    // would make tooling simpler (only need to look for `roles`).
+    // However, we opted to just mirror the protobuf akin to how
+    // generic protobuf -> JSON translation works.
+    if (protobuf::frameworkHasCapability(
+            framework_->info, FrameworkInfo::Capability::MULTI_ROLE)) {
+      writer->field("roles", framework_->info.roles());
+    } else {
+      writer->field("role", framework_->info.role());
     }
 
     // Model all of the tasks associated with a framework.
@@ -273,13 +291,13 @@ struct FullFrameworkWriter {
     });
 
     writer->field("completed_tasks", [this](JSON::ArrayWriter* writer) {
-      foreach (const std::shared_ptr<Task>& task, framework_->completedTasks) {
+      foreach (const Owned<Task>& task, framework_->completedTasks) {
         // Skip unauthorized tasks.
         if (!approveViewTask(taskApprover_, *task.get(), framework_->info)) {
           continue;
         }
 
-        writer->element(*task);
+        writer->element(*task.get());
       }
     });
 
@@ -331,9 +349,9 @@ static void json(JSON::ObjectWriter* writer, const Summary<Slave>& summary)
 {
   const Slave& slave = summary;
 
-  writer->field("id", slave.id.value());
+  json(writer, slave.info);
+
   writer->field("pid", string(slave.pid));
-  writer->field("hostname", slave.info.hostname());
   writer->field("registered_time", slave.registeredTime.secs());
 
   if (slave.reregisteredTime.isSome()) {
@@ -347,7 +365,6 @@ static void json(JSON::ObjectWriter* writer, const Summary<Slave>& summary)
   writer->field("reserved_resources", totalResources.reservations());
   writer->field("unreserved_resources", totalResources.unreserved());
 
-  writer->field("attributes", Attributes(slave.info.attributes()));
   writer->field("active", slave.active);
   writer->field("version", slave.version);
 }
@@ -995,7 +1012,7 @@ Future<Response> Master::Http::createVolumes(
 
   value = values.get("slaveId");
   if (value.isNone()) {
-    return BadRequest("Missing 'slaveId' query parameter");
+    return BadRequest("Missing 'slaveId' query parameter in the request body");
   }
 
   SlaveID slaveId;
@@ -1003,7 +1020,7 @@ Future<Response> Master::Http::createVolumes(
 
   value = values.get("volumes");
   if (value.isNone()) {
-    return BadRequest("Missing 'volumes' query parameter");
+    return BadRequest("Missing 'volumes' query parameter in the request body");
   }
 
   Try<JSON::Array> parse =
@@ -1011,7 +1028,8 @@ Future<Response> Master::Http::createVolumes(
 
   if (parse.isError()) {
     return BadRequest(
-        "Error in parsing 'volumes' query parameter: " + parse.error());
+        "Error in parsing 'volumes' query parameter in the request body: " +
+        parse.error());
   }
 
   Resources volumes;
@@ -1019,7 +1037,8 @@ Future<Response> Master::Http::createVolumes(
     Try<Resource> volume = ::protobuf::parse<Resource>(value);
     if (volume.isError()) {
       return BadRequest(
-          "Error in parsing 'volumes' query parameter: " + volume.error());
+          "Error in parsing 'volumes' query parameter in the request body: " +
+          volume.error());
     }
 
     // Since the `+=` operator will silently drop invalid resources, we validate
@@ -1142,7 +1161,7 @@ Future<Response> Master::Http::destroyVolumes(
 
   value = values.get("slaveId");
   if (value.isNone()) {
-    return BadRequest("Missing 'slaveId' query parameter");
+    return BadRequest("Missing 'slaveId' query parameter in the request body");
   }
 
   SlaveID slaveId;
@@ -1150,7 +1169,7 @@ Future<Response> Master::Http::destroyVolumes(
 
   value = values.get("volumes");
   if (value.isNone()) {
-    return BadRequest("Missing 'volumes' query parameter");
+    return BadRequest("Missing 'volumes' query parameter in the request body");
   }
 
   Try<JSON::Array> parse =
@@ -1158,7 +1177,8 @@ Future<Response> Master::Http::destroyVolumes(
 
   if (parse.isError()) {
     return BadRequest(
-        "Error in parsing 'volumes' query parameter: " + parse.error());
+        "Error in parsing 'volumes' query parameter in the request body: " +
+        parse.error());
   }
 
   Resources volumes;
@@ -1166,7 +1186,8 @@ Future<Response> Master::Http::destroyVolumes(
     Try<Resource> volume = ::protobuf::parse<Resource>(value);
     if (volume.isError()) {
       return BadRequest(
-          "Error in parsing 'volumes' query parameter: " + volume.error());
+          "Error in parsing 'volumes' query parameter in the request body: " +
+          volume.error());
     }
 
     // Since the `+=` operator will silently drop invalid resources, we validate
@@ -1328,8 +1349,8 @@ Future<Response> Master::Http::frameworks(
             "completed_frameworks",
             [this, &frameworksApprover, &executorsApprover, &tasksApprover](
                 JSON::ArrayWriter* writer) {
-              foreach (const std::shared_ptr<Framework>& framework,
-                       master->frameworks.completed) {
+              foreachvalue (const Owned<Framework>& framework,
+                            master->frameworks.completed) {
                 // Skip unauthorized frameworks.
                 if (!approveViewFrameworkInfo(
                         frameworksApprover, framework->info)) {
@@ -1472,14 +1493,14 @@ mesos::master::Response::GetFrameworks Master::Http::_getFrameworks(
     getFrameworks.add_frameworks()->CopyFrom(model(*framework));
   }
 
-  foreach (const std::shared_ptr<Framework>& framework,
-           master->frameworks.completed) {
+  foreachvalue (const Owned<Framework>& framework,
+                master->frameworks.completed) {
     // Skip unauthorized frameworks.
     if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
       continue;
     }
 
-    getFrameworks.add_completed_frameworks()->CopyFrom(model(*framework));
+    getFrameworks.add_completed_frameworks()->CopyFrom(model(*framework.get()));
   }
 
   return getFrameworks;
@@ -1549,8 +1570,8 @@ mesos::master::Response::GetExecutors Master::Http::_getExecutors(
     frameworks.push_back(framework);
   }
 
-  foreach (const std::shared_ptr<Framework>& framework,
-           master->frameworks.completed) {
+  foreachvalue (const Owned<Framework>& framework,
+                master->frameworks.completed) {
     // Skip unauthorized frameworks.
     if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
       continue;
@@ -2100,7 +2121,7 @@ Future<Response> Master::Http::reserve(
 
   value = values.get("slaveId");
   if (value.isNone()) {
-    return BadRequest("Missing 'slaveId' query parameter");
+    return BadRequest("Missing 'slaveId' query parameter in the request body");
   }
 
   SlaveID slaveId;
@@ -2108,7 +2129,8 @@ Future<Response> Master::Http::reserve(
 
   value = values.get("resources");
   if (value.isNone()) {
-    return BadRequest("Missing 'resources' query parameter");
+    return BadRequest(
+        "Missing 'resources' query parameter in the request body");
   }
 
   Try<JSON::Array> parse =
@@ -2116,7 +2138,8 @@ Future<Response> Master::Http::reserve(
 
   if (parse.isError()) {
     return BadRequest(
-        "Error in parsing 'resources' query parameter: " + parse.error());
+        "Error in parsing 'resources' query parameter in the request body: " +
+        parse.error());
   }
 
   Resources resources;
@@ -2124,7 +2147,8 @@ Future<Response> Master::Http::reserve(
     Try<Resource> resource = ::protobuf::parse<Resource>(value);
     if (resource.isError()) {
       return BadRequest(
-          "Error in parsing 'resources' query parameter: " + resource.error());
+          "Error in parsing 'resources' query parameter in the request body: " +
+          resource.error());
     }
 
     // Since the `+=` operator will silently drop invalid resources, we validate
@@ -2196,15 +2220,16 @@ string Master::Http::SLAVES_HELP()
 {
   return HELP(
     TLDR(
-        "Information about registered agents."),
+        "Information about agents."),
     DESCRIPTION(
         "Returns 200 OK when the request was processed successfully.",
         "Returns 307 TEMPORARY_REDIRECT redirect to the leading master when",
         "current master is not the leader.",
         "Returns 503 SERVICE_UNAVAILABLE if the leading master cannot be",
         "found.",
-        "This endpoint shows information about the agents registered in",
-        "this master formatted as a JSON object."),
+        "This endpoint shows information about the agents which are registered",
+        "in this master or recovered from registry, formatted as a JSON",
+        "object."),
     AUTHENTICATION(true));
 }
 
@@ -2270,6 +2295,15 @@ Future<Response> Master::Http::slaves(
         });
       };
     });
+
+    // Model all of the recovered slaves.
+    writer->field("recovered_slaves", [this](JSON::ArrayWriter* writer) {
+      foreachvalue (const SlaveInfo& slaveInfo, master->slaves.recovered) {
+        writer->element([&slaveInfo](JSON::ObjectWriter* writer) {
+          json(writer, slaveInfo);
+        });
+      }
+    });
   };
 
   return OK(jsonify(slaves), request.url.query.get("jsonp"));
@@ -2298,6 +2332,10 @@ mesos::master::Response::GetAgents Master::Http::_getAgents() const
   foreachvalue (const Slave* slave, master->slaves.registered) {
     mesos::master::Response::GetAgents::Agent* agent = getAgents.add_agents();
     agent->CopyFrom(protobuf::master::event::createAgentResponse(*slave));
+  }
+
+  foreachvalue (const SlaveInfo& slaveInfo, master->slaves.recovered) {
+    getAgents.add_recovered_agents()->CopyFrom(slaveInfo);
   }
 
   return getAgents;
@@ -2630,10 +2668,19 @@ Future<Response> Master::Http::state(
             });
         }
 
-        // Model all of the slaves.
+        // Model all of the registered slaves.
         writer->field("slaves", [this](JSON::ArrayWriter* writer) {
           foreachvalue (Slave* slave, master->slaves.registered) {
             writer->element(Full<Slave>(*slave));
+          }
+        });
+
+        // Model all of the recovered slaves.
+        writer->field("recovered_slaves", [this](JSON::ArrayWriter* writer) {
+          foreachvalue (const SlaveInfo& slaveInfo, master->slaves.recovered) {
+            writer->element([&slaveInfo](JSON::ObjectWriter* writer) {
+              json(writer, slaveInfo);
+            });
           }
         });
 
@@ -2663,9 +2710,8 @@ Future<Response> Master::Http::state(
             "completed_frameworks",
             [this, &frameworksApprover, &executorsApprover, &tasksApprover](
                 JSON::ArrayWriter* writer) {
-              foreach (
-                  const std::shared_ptr<Framework>& framework,
-                  master->frameworks.completed) {
+              foreachvalue (const Owned<Framework>& framework,
+                            master->frameworks.completed) {
                 // Skip unauthorized frameworks.
                 if (!approveViewFrameworkInfo(
                     frameworksApprover, framework->info)) {
@@ -2808,7 +2854,7 @@ public:
         slavesToFrameworks[task->slave_id()].insert(frameworkId);
       }
 
-      foreach (const std::shared_ptr<Task>& task, framework->completedTasks) {
+      foreach (const Owned<Task>& task, framework->completedTasks) {
         frameworksToSlaves[frameworkId].insert(task->slave_id());
         slavesToFrameworks[task->slave_id()].insert(frameworkId);
       }
@@ -2924,9 +2970,9 @@ public:
         slaveTaskSummaries[task->slave_id()].count(*task);
       }
 
-      foreach (const std::shared_ptr<Task>& task, framework->completedTasks) {
-        frameworkTaskSummaries[frameworkId].count(*task);
-        slaveTaskSummaries[task->slave_id()].count(*task);
+      foreach (const Owned<Task>& task, framework->completedTasks) {
+        frameworkTaskSummaries[frameworkId].count(*task.get());
+        slaveTaskSummaries[task->slave_id()].count(*task.get());
       }
     }
   }
@@ -3436,7 +3482,8 @@ Future<Response> Master::Http::teardown(
 
   Option<string> value = values.get("frameworkId");
   if (value.isNone()) {
-    return BadRequest("Missing 'frameworkId' query parameter");
+    return BadRequest(
+        "Missing 'frameworkId' query parameter in the request body");
   }
 
   FrameworkID id;
@@ -3626,8 +3673,8 @@ Future<Response> Master::Http::tasks(
         frameworks.push_back(framework);
       }
 
-      foreach (const std::shared_ptr<Framework>& framework,
-               master->frameworks.completed) {
+      foreachvalue (const Owned<Framework>& framework,
+                    master->frameworks.completed) {
         // Skip unauthorized frameworks.
         if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
           continue;
@@ -3648,7 +3695,7 @@ Future<Response> Master::Http::tasks(
 
           tasks.push_back(task);
         }
-        foreach (const std::shared_ptr<Task>& task, framework->completedTasks) {
+        foreach (const Owned<Task>& task, framework->completedTasks) {
           // Skip unauthorized tasks.
           if (!approveViewTask(tasksApprover, *task.get(), framework->info)) {
             continue;
@@ -3748,8 +3795,8 @@ mesos::master::Response::GetTasks Master::Http::_getTasks(
     frameworks.push_back(framework);
   }
 
-  foreach (const std::shared_ptr<Framework>& framework,
-           master->frameworks.completed) {
+  foreachvalue (const Owned<Framework>& framework,
+                master->frameworks.completed) {
     // Skip unauthorized frameworks.
     if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
       continue;
@@ -3787,7 +3834,7 @@ mesos::master::Response::GetTasks Master::Http::_getTasks(
     }
 
     // Completed tasks.
-    foreach (const std::shared_ptr<Task>& task, framework->completedTasks) {
+    foreach (const Owned<Task>& task, framework->completedTasks) {
       // Skip unauthorized tasks.
       if (!approveViewTask(tasksApprover, *task.get(), framework->info)) {
         continue;
@@ -4466,7 +4513,7 @@ Future<Response> Master::Http::unreserve(
 
   value = values.get("slaveId");
   if (value.isNone()) {
-    return BadRequest("Missing 'slaveId' query parameter");
+    return BadRequest("Missing 'slaveId' query parameter in the request body");
   }
 
   SlaveID slaveId;
@@ -4474,7 +4521,8 @@ Future<Response> Master::Http::unreserve(
 
   value = values.get("resources");
   if (value.isNone()) {
-    return BadRequest("Missing 'resources' query parameter");
+    return BadRequest(
+        "Missing 'resources' query parameter in the request body");
   }
 
   Try<JSON::Array> parse =
@@ -4482,7 +4530,8 @@ Future<Response> Master::Http::unreserve(
 
   if (parse.isError()) {
     return BadRequest(
-        "Error in parsing 'resources' query parameter: " + parse.error());
+        "Error in parsing 'resources' query parameter in the request body: " +
+        parse.error());
   }
 
   Resources resources;
@@ -4490,7 +4539,8 @@ Future<Response> Master::Http::unreserve(
     Try<Resource> resource = ::protobuf::parse<Resource>(value);
     if (resource.isError()) {
       return BadRequest(
-          "Error in parsing 'resources' query parameter: " + resource.error());
+          "Error in parsing 'resources' query parameter in the request body: " +
+          resource.error());
     }
 
     // Since the `+=` operator will silently drop invalid resources, we validate

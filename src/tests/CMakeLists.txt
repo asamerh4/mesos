@@ -88,88 +88,92 @@ endif (LINUX)
 set(MESOS_TESTS_SRC
   ${MESOS_TESTS_SRC}
   ${MESOS_TESTS_UTILS_SRC}
+  anonymous_tests.cpp
+  api_tests.cpp
+  attributes_tests.cpp
   authentication_tests.cpp
+  command_executor_tests.cpp
+  credentials_tests.cpp
+  default_executor_tests.cpp
+  exception_tests.cpp
+  executor_http_api_tests.cpp
+  fault_tolerance_tests.cpp
+  fetcher_tests.cpp
+  files_tests.cpp
+  gc_tests.cpp
+  health_check_tests.cpp
+  hierarchical_allocator_tests.cpp
+  hook_tests.cpp
+  http_authentication_tests.cpp
+  http_fault_tolerance_tests.cpp
+  master_maintenance_tests.cpp
+  master_slave_reconciliation_tests.cpp
+  partition_tests.cpp
+  paths_tests.cpp
+  protobuf_io_tests.cpp
+  rate_limiting_tests.cpp
+  resource_offers_tests.cpp
+  resources_tests.cpp
+  role_tests.cpp
+  scheduler_driver_tests.cpp
+  scheduler_event_call_tests.cpp
+  scheduler_http_api_tests.cpp
+  scheduler_tests.cpp
+  slave_tests.cpp
+  slave_validation_tests.cpp
+  sorter_tests.cpp
+  status_update_manager_tests.cpp
+  uri_tests.cpp
+  uri_fetcher_tests.cpp
+  values_tests.cpp
+  zookeeper_url_tests.cpp
+  )
+
+set(MESOS_TESTS_SRC
+  ${MESOS_TESTS_SRC}
+  common/http_tests.cpp
+  common/recordio_tests.cpp
+  common/type_utils_tests.cpp
   )
 
 if (NOT WIN32)
   set(MESOS_TESTS_SRC
     ${MESOS_TESTS_SRC}
-    anonymous_tests.cpp
-    api_tests.cpp
-    attributes_tests.cpp
     authorization_tests.cpp
-    command_executor_tests.cpp
     container_logger_tests.cpp
     cram_md5_authentication_tests.cpp
-    credentials_tests.cpp
-    default_executor_tests.cpp
     disk_quota_tests.cpp
     dynamic_weights_tests.cpp
     examples_tests.cpp
-    exception_tests.cpp
-    executor_http_api_tests.cpp
-    fault_tolerance_tests.cpp
     fetcher_cache_tests.cpp
-    fetcher_tests.cpp
-    files_tests.cpp
-    gc_tests.cpp
     hdfs_tests.cpp
-    health_check_tests.cpp
-    hierarchical_allocator_tests.cpp
-    hook_tests.cpp
-    http_authentication_tests.cpp
-    http_fault_tolerance_tests.cpp
     log_tests.cpp
     logging_tests.cpp
     master_allocator_tests.cpp
     master_authorization_tests.cpp
     master_contender_detector_tests.cpp
-    master_maintenance_tests.cpp
     master_quota_tests.cpp
-    master_slave_reconciliation_tests.cpp
     master_tests.cpp
     master_validation_tests.cpp
     metrics_tests.cpp
     module_tests.cpp
     oversubscription_tests.cpp
-    partition_tests.cpp
-    paths_tests.cpp
     persistent_volume_endpoints_tests.cpp
     persistent_volume_tests.cpp
-    protobuf_io_tests.cpp
     protobuf_utils_tests.cpp
-    rate_limiting_tests.cpp
     reconciliation_tests.cpp
     registrar_tests.cpp
     reservation_endpoints_tests.cpp
     reservation_tests.cpp
-    resource_offers_tests.cpp
-    resources_tests.cpp
-    role_tests.cpp
-    scheduler_driver_tests.cpp
-    scheduler_event_call_tests.cpp
-    scheduler_http_api_tests.cpp
-    scheduler_tests.cpp
     slave_authorization_tests.cpp
     slave_recovery_tests.cpp
-    slave_tests.cpp
-    slave_validation_tests.cpp
-    sorter_tests.cpp
     state_tests.cpp
-    status_update_manager_tests.cpp
     teardown_tests.cpp
-    uri_fetcher_tests.cpp
-    uri_tests.cpp
-    values_tests.cpp
-    zookeeper_url_tests.cpp
     )
 
   set(MESOS_TESTS_SRC
     ${MESOS_TESTS_SRC}
     common/command_utils_tests.cpp
-    common/http_tests.cpp
-    common/recordio_tests.cpp
-    common/type_utils_tests.cpp
     )
 
   set(MESOS_TESTS_SRC
@@ -288,4 +292,4 @@ add_dependencies(${TEST_HELPER_TARGET} ${MESOS_TESTS_DEPENDENCIES})
 
 # ADD TEST TARGET (runs when you do, e.g., `make check`).
 #########################################################
-add_test(NAME MesosTests COMMAND ./${MESOS_TESTS_TARGET})
+add_test(NAME MesosTests COMMAND ${MESOS_TESTS_TARGET})

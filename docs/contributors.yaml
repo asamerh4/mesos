@@ -75,6 +75,14 @@
   jira_user: anandmazumdar
   reviewboard_user: anandmazumdar
 
+- name: Andrew Schwartzmeyer
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - andrew@schwartzmeyer.com
+  jira_user: andschwa
+  reviewboard_user: andschwa
+
 - name: Andrey Dyatlov
   affiliations:
     - {organization: Mesosphere}
@@ -351,6 +359,14 @@
   jira_user: js84
   reviewboard_user: joerg84
 
+- name: John Kordich
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - johnkord@microsoft.com
+  jira_user: johnkord
+  reviewboard_user: johnkord
+
 - name: Jojy Varghese
   affiliations:
     - {organization: Mesosphere}
@@ -487,6 +503,14 @@
     - mcypark@gmail.com
   jira_user: mcypark
   reviewboard_user: mcypark
+
+- name: Miguel Bernadin
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - miguel.bernadin@gmail.com
+  jira_user: bernadinm
+  reviewboard_user: bernadinm
 
 - name: Neil Conway
   affiliations:

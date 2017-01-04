@@ -1578,7 +1578,7 @@ Future<Nothing> Master::recover()
 Future<Nothing> Master::_recover(const Registry& registry)
 {
   foreach (const Registry::Slave& slave, registry.slaves().slaves()) {
-    slaves.recovered.insert(slave.info().id());
+    slaves.recovered.put(slave.info().id(), slave.info());
   }
 
   foreach (const Registry::UnreachableSlave& unreachable,
@@ -1727,7 +1727,9 @@ void Master::doRegistryGc()
   TimeInfo currentTime = protobuf::getCurrentTime();
   hashset<SlaveID> toRemove;
 
-  foreach (const SlaveID& slave, slaves.unreachable.keys()) {
+  foreachpair (const SlaveID& slave,
+               const TimeInfo& unreachableTime,
+               slaves.unreachable) {
     // Count-based GC.
     CHECK(toRemove.size() <= unreachableCount);
 
@@ -1738,7 +1740,6 @@ void Master::doRegistryGc()
     }
 
     // Age-based GC.
-    const TimeInfo& unreachableTime = slaves.unreachable[slave];
     Duration age = Nanoseconds(
         currentTime.nanoseconds() - unreachableTime.nanoseconds());
 
@@ -1829,7 +1830,7 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
       << " there were " << slaves.recovered.size()
       << " (" << removalPercentage * 100 << "%) agents recovered from the"
       << " registry that did not re-register: \n"
-      << stringify(slaves.recovered) << "\n "
+      << stringify(slaves.recovered.keys()) << "\n "
       << " The configured removal limit is " << limit * 100 << "%. Please"
       << " investigate or increase this limit to proceed further";
   }
@@ -1860,7 +1861,7 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
     const string failure = "Agent removal rate limit acquisition failed";
 
     acquire
-      .then(defer(self(), &Self::markUnreachableAfterFailover, slave))
+      .then(defer(self(), &Self::markUnreachableAfterFailover, slave.info()))
       .onFailed(lambda::bind(fail, failure, lambda::_1))
       .onDiscarded(lambda::bind(fail, failure, "discarded"));
 
@@ -1869,13 +1870,13 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
 }
 
 
-Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
+Nothing Master::markUnreachableAfterFailover(const SlaveInfo& slave)
 {
   // The slave might have reregistered while we were waiting to
   // acquire the rate limit.
-  if (!slaves.recovered.contains(slave.info().id())) {
+  if (!slaves.recovered.contains(slave.id())) {
     LOG(INFO) << "Canceling transition of agent "
-              << slave.info().id() << " (" << slave.info().hostname() << ")"
+              << slave.id() << " (" << slave.hostname() << ")"
               << " to unreachable because it re-registered";
 
     ++metrics->slave_unreachable_canceled;
@@ -1883,17 +1884,17 @@ Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
   }
 
   // The slave might be in the process of reregistering.
-  if (slaves.reregistering.contains(slave.info().id())) {
+  if (slaves.reregistering.contains(slave.id())) {
     LOG(INFO) << "Canceling transition of agent "
-              << slave.info().id() << " (" << slave.info().hostname() << ")"
+              << slave.id() << " (" << slave.hostname() << ")"
               << " to unreachable because it is re-registering";
 
     ++metrics->slave_unreachable_canceled;
     return Nothing();
   }
 
-  LOG(WARNING) << "Agent " << slave.info().id()
-               << " (" << slave.info().hostname() << ") did not re-register"
+  LOG(WARNING) << "Agent " << slave.id()
+               << " (" << slave.hostname() << ") did not re-register"
                << " within " << flags.agent_reregister_timeout
                << " after master failover; marking it unreachable";
 
@@ -1901,13 +1902,13 @@ Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
 
   TimeInfo unreachableTime = protobuf::getCurrentTime();
 
-  slaves.markingUnreachable.insert(slave.info().id());
+  slaves.markingUnreachable.insert(slave.id());
 
   registrar->apply(Owned<Operation>(
-          new MarkSlaveUnreachable(slave.info(), unreachableTime)))
+          new MarkSlaveUnreachable(slave, unreachableTime)))
     .onAny(defer(self(),
                  &Self::_markUnreachableAfterFailover,
-                 slave.info(),
+                 slave,
                  unreachableTime,
                  lambda::_1));
 
@@ -4660,9 +4661,6 @@ void Master::killTask(
     const FrameworkID& frameworkId,
     const TaskID& taskId)
 {
-  LOG(INFO) << "Asked to kill task " << taskId
-            << " of framework " << frameworkId;
-
   Framework* framework = getFramework(frameworkId);
 
   if (framework == nullptr) {
@@ -4692,11 +4690,14 @@ void Master::kill(Framework* framework, const scheduler::Call::Kill& kill)
 {
   CHECK_NOTNULL(framework);
 
-  ++metrics->messages_kill_task;
-
   const TaskID& taskId = kill.task_id();
   const Option<SlaveID> slaveId =
     kill.has_slave_id() ? Option<SlaveID>(kill.slave_id()) : None();
+
+  LOG(INFO) << "Processing KILL call for task '" << taskId << "'"
+            << " of framework " << *framework;
+
+  ++metrics->messages_kill_task;
 
   if (framework->pendingTasks.contains(taskId)) {
     // Remove from pending tasks.
@@ -5452,10 +5453,12 @@ void Master::_reregisterSlave(
 
   ++metrics->slave_reregistrations;
 
-  // Check whether this master was the one that removed the
-  // reregistering agent from the cluster originally. This is false
-  // if the master has failed over since the agent was removed, for
-  // example.
+  // Check if this master was the one that removed the reregistering
+  // agent from the cluster originally. This is false if the master
+  // has failed over since the agent was removed, for example. Since
+  // `removed` is a cache, we might mistakenly think the master has
+  // failed over and neglect to remove non-partition-aware frameworks
+  // on reregistering agents, but that should be rare in practice.
   bool slaveWasRemoved = slaves.removed.get(slave->id).isSome();
 
   slaves.removed.erase(slave->id);
@@ -5935,11 +5938,17 @@ void Master::shutdown(
     return;
   }
 
-  Slave* slave = slaves.registered.get(shutdown.slave_id());
+  const SlaveID& slaveId = shutdown.slave_id();
+  const ExecutorID& executorId = shutdown.executor_id();
+
+  Slave* slave = slaves.registered.get(slaveId);
   CHECK_NOTNULL(slave);
 
+  LOG(INFO) << "Processing SHUTDOWN call for executor '" << executorId
+            << "' of framework " << *framework << " on agent " << slaveId;
+
   ShutdownExecutorMessage message;
-  message.mutable_executor_id()->CopyFrom(shutdown.executor_id());
+  message.mutable_executor_id()->CopyFrom(executorId);
   message.mutable_framework_id()->CopyFrom(framework->id());
   send(slave->pid, message);
 }
@@ -6950,7 +6959,8 @@ void Master::reconcileKnownSlave(
   //
   // TODO(vinod): Revisit this when registrar is in place. It would
   // likely involve storing this information in the registrar.
-  foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
+  foreachvalue (const Owned<Framework>& framework,
+                frameworks.completed) {
     if (slaveTasks.contains(framework->id())) {
       LOG(WARNING) << "Agent " << *slave
                    << " re-registered with completed framework " << *framework
@@ -6992,7 +7002,7 @@ void Master::addFramework(Framework* framework)
       << " of framework " << *framework;
 
     if (!activeRoles.contains(role)) {
-      activeRoles[role] = new Role();
+      activeRoles[role] = new Role(role);
     }
     activeRoles.at(role)->addFramework(framework);
   };
@@ -7447,8 +7457,8 @@ void Master::removeFramework(Framework* framework)
   frameworks.registered.erase(framework->id());
   allocator->removeFramework(framework->id());
 
-  // The completedFramework buffer now owns the framework pointer.
-  frameworks.completed.push_back(shared_ptr<Framework>(framework));
+  // The framework pointer is now owned by `frameworks.completed`.
+  frameworks.completed.set(framework->id(), Owned<Framework>(framework));
 }
 
 
@@ -8138,13 +8148,7 @@ void Master::removeInverseOffer(InverseOffer* inverseOffer, bool rescind)
 
 bool Master::isCompletedFramework(const FrameworkID& frameworkId)
 {
-  foreach (const shared_ptr<Framework>& framework, frameworks.completed) {
-    if (framework->id() == frameworkId) {
-      return true;
-    }
-  }
-
-  return false;
+  return frameworks.completed.contains(frameworkId);
 }
 
 

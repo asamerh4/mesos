@@ -14,7 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef __WINDOWS__
 #include <unistd.h>
+#endif // !__WINDOWS__
 
 #include <algorithm>
 #include <map>
@@ -37,6 +39,10 @@
 #include <process/reap.hpp>
 #include <process/subprocess.hpp>
 
+#include <stout/hashset.hpp>
+#include <stout/json.hpp>
+#include <stout/none.hpp>
+#include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -84,11 +90,15 @@ using mesos::v1::scheduler::Call;
 using mesos::v1::scheduler::Mesos;
 
 using process::Clock;
+using process::Failure;
 using process::Future;
+using process::Message;
 using process::Owned;
 using process::PID;
 using process::Promise;
 using process::UPID;
+
+using process::filter;
 
 using process::http::InternalServerError;
 using process::http::OK;
@@ -177,18 +187,21 @@ TEST_F(SlaveTest, Shutdown)
 // This test verifies that the slave rejects duplicate terminal
 // status updates for tasks before the first terminal update is
 // acknowledged.
-TEST_F(SlaveTest, DuplicateTerminalUpdateBeforeAck)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, DuplicateTerminalUpdateBeforeAck)
 {
   Clock::pause();
 
-  Try<Owned<cluster::Master>> master = StartMaster();
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
 
+  slave::Flags agentFlags = CreateSlaveFlags();
   Owned<MasterDetector> detector = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, agentFlags);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -208,6 +221,11 @@ TEST_F(SlaveTest, DuplicateTerminalUpdateBeforeAck)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   driver.start();
+
+  // Advance the clock to trigger both agent registration and a batch
+  // allocation.
+  Clock::advance(agentFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers->size());
@@ -285,7 +303,7 @@ TEST_F(SlaveTest, DuplicateTerminalUpdateBeforeAck)
 }
 
 
-TEST_F(SlaveTest, ShutdownUnregisteredExecutor)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, ShutdownUnregisteredExecutor)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -381,6 +399,7 @@ TEST_F(SlaveTest, ShutdownUnregisteredExecutor)
 }
 
 
+#ifndef __WINDOWS__
 // This test verifies that mesos agent gets notified of task
 // launch failure triggered by the executor register timeout
 // caused by slow URI fetching.
@@ -507,6 +526,7 @@ TEST_F(SlaveTest, ExecutorTimeoutCausedBySlowFetch)
   driver.stop();
   driver.join();
 }
+#endif // !__WINDOWS__
 
 
 // This test verifies that when an executor terminates before
@@ -586,7 +606,7 @@ TEST_F(SlaveTest, RemoveUnregisteredTerminatedExecutor)
 // mesos-executor args. For more details of this see MESOS-1873.
 //
 // This assumes the ability to execute '/bin/echo --author'.
-TEST_F(SlaveTest, CommandTaskWithArguments)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, CommandTaskWithArguments)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -667,7 +687,7 @@ TEST_F(SlaveTest, CommandTaskWithArguments)
 // Tests that task's kill policy grace period does not extend the time
 // a task responsive to SIGTERM needs to exit and the terminal status
 // to be delivered to the master.
-TEST_F(SlaveTest, CommandTaskWithKillPolicy)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, CommandTaskWithKillPolicy)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -1030,6 +1050,7 @@ TEST_F(SlaveTest, ROOT_RunTaskWithCommandInfoWithoutUser)
 }
 
 
+#ifndef __WINDOWS__
 // This test runs a command _with_ the command user field set. The
 // command will verify the assumption that the command is run as the
 // specified user. We use (and assume the presence) of the
@@ -1175,6 +1196,7 @@ TEST_F(SlaveTest, DISABLED_ROOT_RunTaskWithCommandInfoWithUser)
   driver.stop();
   driver.join();
 }
+#endif // !__WINDOWS__
 
 
 // This test ensures that a status update acknowledgement from a
@@ -1410,16 +1432,17 @@ TEST_F(SlaveTest, MetricsSlaveLaunchErrors)
 }
 
 
-TEST_F(SlaveTest, StateEndpoint)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, StateEndpoint)
 {
-  Try<Owned<cluster::Master>> master = StartMaster();
+  master::Flags masterFlags = this->CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
-  slave::Flags flags = this->CreateSlaveFlags();
+  slave::Flags agentFlags = this->CreateSlaveFlags();
 
-  flags.hostname = "localhost";
-  flags.resources = "cpus:4;gpus:0;mem:2048;disk:512;ports:[33000-34000]";
-  flags.attributes = "rack:abc;host:myhost";
+  agentFlags.hostname = "localhost";
+  agentFlags.resources = "cpus:4;gpus:0;mem:2048;disk:512;ports:[33000-34000]";
+  agentFlags.attributes = "rack:abc;host:myhost";
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
@@ -1432,7 +1455,7 @@ TEST_F(SlaveTest, StateEndpoint)
   Owned<MasterDetector> detector = master.get()->createDetector();
 
   Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), &containerizer, flags);
+    StartSlave(detector.get(), &containerizer, agentFlags);
   ASSERT_SOME(slave);
 
   // Ensure slave has finished recovery.
@@ -1472,26 +1495,36 @@ TEST_F(SlaveTest, StateEndpoint)
   EXPECT_EQ(build::TIME, state.values["build_time"]);
   EXPECT_EQ(build::USER, state.values["build_user"]);
 
+  // Even with a paused clock, the value of `start_time` from the
+  // state endpoint can differ slightly from the actual start time
+  // since the value went through a number of conversions (`double` to
+  // `string` to `JSON::Value`).  Since `Clock::now` is a floating
+  // point value, the actual maximal possible difference between the
+  // real and observed value depends on both the mantissa and the
+  // exponent of the compared values; for simplicity we compare with
+  // an epsilon of `1` which allows for e.g., changes in the integer
+  // part of values close to an integer value.
   ASSERT_TRUE(state.values["start_time"].is<JSON::Number>());
-  EXPECT_EQ(
-      static_cast<int>(Clock::now().secs()),
-      state.values["start_time"].as<JSON::Number>().as<int>());
+  EXPECT_NEAR(
+      Clock::now().secs(),
+      state.values["start_time"].as<JSON::Number>().as<double>(),
+      1);
 
   // TODO(bmahler): The slave must register for the 'id'
   // to be non-empty.
   ASSERT_TRUE(state.values["id"].is<JSON::String>());
 
   EXPECT_EQ(stringify(slave.get()->pid), state.values["pid"]);
-  EXPECT_EQ(flags.hostname.get(), state.values["hostname"]);
+  EXPECT_EQ(agentFlags.hostname.get(), state.values["hostname"]);
 
   Try<Resources> resources = Resources::parse(
-      flags.resources.get(), flags.default_role);
+      agentFlags.resources.get(), agentFlags.default_role);
 
   ASSERT_SOME(resources);
 
   EXPECT_EQ(model(resources.get()), state.values["resources"]);
 
-  Attributes attributes = Attributes::parse(flags.attributes.get());
+  Attributes attributes = Attributes::parse(agentFlags.attributes.get());
 
   EXPECT_EQ(model(attributes), state.values["attributes"]);
 
@@ -1506,7 +1539,7 @@ TEST_F(SlaveTest, StateEndpoint)
   EXPECT_TRUE(
       state.values["completed_frameworks"].as<JSON::Array>().values.empty());
 
-  // TODO(bmahler): Ensure this contains all the flags.
+  // TODO(bmahler): Ensure this contains all the agentFlags.
   ASSERT_TRUE(state.values["flags"].is<JSON::Object>());
   EXPECT_FALSE(state.values["flags"].as<JSON::Object>().values.empty());
 
@@ -1522,6 +1555,11 @@ TEST_F(SlaveTest, StateEndpoint)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   driver.start();
+
+  // Advance the clock to trigger both agent registration and a batch
+  // allocation.
+  Clock::advance(agentFlags.registration_backoff_factor);
+  Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
@@ -1605,7 +1643,9 @@ TEST_F(SlaveTest, StateEndpoint)
 
 // This test checks that when a slave is in RECOVERING state it responds
 // to HTTP requests for "/state" endpoint with ServiceUnavailable.
-TEST_F(SlaveTest, StateEndpointUnavailableDuringRecovery)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    SlaveTest,
+    StateEndpointUnavailableDuringRecovery)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -1919,7 +1959,7 @@ TEST_F(SlaveTest, StatisticsEndpointGetResourceUsageFailed)
 // This is an end-to-end test that verifies that the slave returns the
 // correct ResourceUsage based on the currently running executors, and
 // the values returned by the /monitor/statistics endpoint are as expected.
-TEST_F(SlaveTest, StatisticsEndpointRunningExecutor)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, StatisticsEndpointRunningExecutor)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -2648,7 +2688,7 @@ TEST_F(SlaveTest, TaskLaunchContainerizerUpdateFails)
 
 // This test ensures that the slave will re-register with the master
 // if it does not receive any pings after registering.
-TEST_F(SlaveTest, PingTimeoutNoPings)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, PingTimeoutNoPings)
 {
   // Set shorter ping timeout values.
   master::Flags masterFlags = CreateMasterFlags();
@@ -2670,7 +2710,8 @@ TEST_F(SlaveTest, PingTimeoutNoPings)
   Owned<MasterDetector> detector = master.get()->createDetector();
 
   // Start a slave.
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), agentFlags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
@@ -2691,15 +2732,16 @@ TEST_F(SlaveTest, PingTimeoutNoPings)
     FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
 
   Clock::advance(totalTimeout);
-
   AWAIT_READY(detected);
+
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregisteredMessage);
 }
 
 
 // This test ensures that the slave will re-register with the master
 // if it stops receiving pings.
-TEST_F(SlaveTest, PingTimeoutSomePings)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, PingTimeoutSomePings)
 {
   // Start a master.
   master::Flags masterFlags = CreateMasterFlags();
@@ -2712,7 +2754,8 @@ TEST_F(SlaveTest, PingTimeoutSomePings)
   Owned<MasterDetector> detector = master.get()->createDetector();
 
   // Start a slave.
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), agentFlags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
@@ -2738,8 +2781,9 @@ TEST_F(SlaveTest, PingTimeoutSomePings)
     FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
 
   Clock::advance(slave::DEFAULT_MASTER_PING_TIMEOUT());
-
   AWAIT_READY(detected);
+
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(slaveReregisteredMessage);
 }
 
@@ -2929,6 +2973,7 @@ TEST_F(SlaveTest, CancelSlaveRemoval)
 }
 
 
+#ifndef __WINDOWS__
 // This test checks that the master behaves correctly when a slave
 // fails health checks, but concurrently the slave unregisters from
 // the master.
@@ -3004,8 +3049,10 @@ TEST_F(SlaveTest, HealthCheckUnregisterRace)
   driver.stop();
   driver.join();
 }
+#endif // !__WINDOWS__
 
 
+#ifndef __WINDOWS__
 // This test checks that the master behaves correctly when a slave
 // fails health checks and is in the process of being marked
 // unreachable in the registry, but concurrently the slave unregisters
@@ -3116,6 +3163,7 @@ TEST_F(SlaveTest, UnreachableThenUnregisterRace)
   driver.stop();
   driver.join();
 }
+#endif // !__WINDOWS__
 
 
 // This test checks that the master behaves correctly when a slave is
@@ -3595,10 +3643,13 @@ TEST_F(SlaveTest, KillTaskUnregisteredHTTPExecutor)
 
 // This test verifies that when a slave re-registers with the master
 // it correctly includes the latest and status update task states.
-TEST_F(SlaveTest, ReregisterWithStatusUpdateTaskState)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, ReregisterWithStatusUpdateTaskState)
 {
+  Clock::pause();
+
   // Start a master.
-  Try<Owned<cluster::Master>> master = StartMaster();
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
@@ -3609,7 +3660,9 @@ TEST_F(SlaveTest, ReregisterWithStatusUpdateTaskState)
   StandaloneMasterDetector detector(master.get()->pid);
 
   // Start a slave.
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, &containerizer);
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(&detector, &containerizer, agentFlags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -3637,8 +3690,7 @@ TEST_F(SlaveTest, ReregisterWithStatusUpdateTaskState)
 
   driver.start();
 
-  // Pause the clock to avoid status update retries.
-  Clock::pause();
+  Clock::advance(masterFlags.allocation_interval);
 
   // Wait until TASK_RUNNING is sent to the master.
   AWAIT_READY(statusUpdateMessage);
@@ -3668,7 +3720,12 @@ TEST_F(SlaveTest, ReregisterWithStatusUpdateTaskState)
   // so that the slave will do a re-registration.
   detector.appoint(master.get()->pid);
 
+  // Force evaluation of master detection before we advance clock to trigger
+  // agent registration.
+  Clock::settle();
+
   // Capture and inspect the slave reregistration message.
+  Clock::advance(agentFlags.registration_backoff_factor);
   AWAIT_READY(reregisterSlaveMessage);
 
   ASSERT_EQ(1, reregisterSlaveMessage.get().tasks_size());
@@ -4268,7 +4325,7 @@ TEST_F(SlaveTest, TaskStatusContainerStatus)
 
 // Test that we can set the executors environment variables and it
 // won't inhert the slaves.
-TEST_F(SlaveTest, ExecutorEnvironmentVariables)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, ExecutorEnvironmentVariables)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -4587,7 +4644,7 @@ TEST_F(SlaveTest, HTTPSchedulerLiveUpgrade)
 // Ensures that the slave can restart when there is an empty
 // framework pid. Executor messages should go through the
 // master (instead of directly to the scheduler!).
-TEST_F(SlaveTest, HTTPSchedulerSlaveRestart)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, HTTPSchedulerSlaveRestart)
 {
   Try<Owned<cluster::Master>> master = this->StartMaster();
   ASSERT_SOME(master);
@@ -4994,10 +5051,14 @@ TEST_F(SlaveTest, RunTaskGroup)
   AWAIT_READY(launchGroupEvent);
 
   ASSERT_EQ(2, launchGroupEvent->task_group().tasks().size());
-  EXPECT_EQ(taskInfo1.task_id(),
-            launchGroupEvent->task_group().tasks(0).task_id());
-  EXPECT_EQ(taskInfo2.task_id(),
-            launchGroupEvent->task_group().tasks(1).task_id());
+
+  const hashset<v1::TaskID> tasks{taskInfo1.task_id(), taskInfo2.task_id()};
+
+  const hashset<v1::TaskID> launchedTasks{
+      launchGroupEvent->task_group().tasks(0).task_id(),
+      launchGroupEvent->task_group().tasks(1).task_id()};
+
+  EXPECT_EQ(tasks, launchedTasks);
 
   EXPECT_CALL(*executor, shutdown(_))
     .Times(AtMost(1));
@@ -5132,6 +5193,8 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   taskGroup.add_tasks()->CopyFrom(taskInfo1);
   taskGroup.add_tasks()->CopyFrom(taskInfo2);
 
+  const hashset<v1::TaskID> tasks{taskInfo1.task_id(), taskInfo2.task_id()};
+
   {
     Call call;
     call.mutable_framework_id()->CopyFrom(frameworkId);
@@ -5188,11 +5251,12 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   AWAIT_READY(update1);
   AWAIT_READY(update2);
 
-  EXPECT_EQ(TASK_KILLED, update1->status().state());
-  EXPECT_EQ(taskInfo1.task_id(), update1->status().task_id());
+  const hashset<v1::TaskID> killedTasks{
+    update1->status().task_id(), update2->status().task_id()};
 
+  EXPECT_EQ(TASK_KILLED, update1->status().state());
   EXPECT_EQ(TASK_KILLED, update2->status().state());
-  EXPECT_EQ(taskInfo2.task_id(), update2->status().task_id());
+  EXPECT_EQ(tasks, killedTasks);
 
   terminate(slave);
   wait(slave);
@@ -5201,7 +5265,7 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
 
 // This test verifies that the agent correctly populates the
 // command info for default executor.
-TEST_F(SlaveTest, DefaultExecutorCommandInfo)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, DefaultExecutorCommandInfo)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -5404,6 +5468,8 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
   taskGroup.add_tasks()->CopyFrom(taskInfo2);
   taskGroup.add_tasks()->CopyFrom(taskInfo3);
 
+  const hashset<v1::TaskID> tasks{taskInfo2.task_id(), taskInfo3.task_id()};
+
   {
     Call call;
     call.mutable_framework_id()->CopyFrom(frameworkId);
@@ -5454,11 +5520,12 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
   AWAIT_READY(update1);
   AWAIT_READY(update2);
 
-  EXPECT_EQ(TASK_KILLED, update1->status().state());
-  EXPECT_EQ(taskInfo2.task_id(), update1->status().task_id());
+  const hashset<v1::TaskID> killedTasks{
+    update1->status().task_id(), update2->status().task_id()};
 
+  EXPECT_EQ(TASK_KILLED, update1->status().state());
   EXPECT_EQ(TASK_KILLED, update2->status().state());
-  EXPECT_EQ(taskInfo3.task_id(), update2->status().task_id());
+  EXPECT_EQ(tasks, killedTasks);
 
   EXPECT_CALL(*executor, subscribed(_, _));
 
@@ -5491,7 +5558,9 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
 
 
 // Test the max_completed_executors_per_framework flag.
-TEST_F(SlaveTest, MaxCompletedExecutorsPerFrameworkFlag)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    SlaveTest,
+    MaxCompletedExecutorsPerFrameworkFlag)
 {
   Clock::pause();
 
@@ -5556,6 +5625,11 @@ TEST_F(SlaveTest, MaxCompletedExecutorsPerFrameworkFlag)
     AWAIT_READY(schedRegistered);
 
     for (size_t i = 0; i < totalExecutorsPerFramework; i++) {
+      // Advance the clock to trigger both agent registration and a
+      // batch allocation.
+      Clock::advance(agentFlags.registration_backoff_factor);
+      Clock::advance(masterFlags.allocation_interval);
+
       Future<Offer> offer = offers.get();
       AWAIT_READY(offer);
 
@@ -5586,9 +5660,6 @@ TEST_F(SlaveTest, MaxCompletedExecutorsPerFrameworkFlag)
 
       EXPECT_CALL(*executors[i], shutdown(_))
         .Times(AtMost(1));
-
-      // Advance the clock to trigger a batch allocation.
-      Clock::advance(masterFlags.allocation_interval);
     }
 
     // Destroy all of the containers to complete the executors.

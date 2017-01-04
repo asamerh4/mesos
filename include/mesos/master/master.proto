@@ -177,6 +177,7 @@ message Call {
     repeated MachineID machines = 1;
   }
 
+  // Sets the quota for resources to be used by a particular role.
   message SetQuota {
     required quota.QuotaRequest quota_request = 1;
   }
@@ -309,6 +310,9 @@ message Response {
 
     // Registered agents.
     repeated Agent agents = 1;
+
+    // Agents which are recovered from registry but not reregistered yet.
+    repeated SlaveInfo recovered_agents = 2;
   }
 
   // Information about all the frameworks known to the master at the current
