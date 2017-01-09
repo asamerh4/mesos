@@ -1396,34 +1396,36 @@ namespace internal {
 
 Future<Nothing> send(network::Socket socket, Encoder* encoder)
 {
-  size_t* size = new size_t();
-  return [=]() {
-    switch (encoder->kind()) {
-      case Encoder::DATA: {
-        const char* data = static_cast<DataEncoder*>(encoder)->next(size);
-        return socket.send(data, *size);
-      }
-      case Encoder::FILE: {
-        off_t offset = 0;
-        int fd = static_cast<FileEncoder*>(encoder)->next(&offset, size);
-        return socket.sendfile(fd, offset, *size);
-      }
-    }
-  }()
-  .then([=](size_t length) -> Future<Nothing> {
-    // Update the encoder with the amount sent.
-    encoder->backup(*size - length);
+  size_t* size = new size_t(0);
+  return loop(
+      None(),
+      [=]() {
+        switch (encoder->kind()) {
+          case Encoder::DATA: {
+            const char* data = static_cast<DataEncoder*>(encoder)->next(size);
+            return socket.send(data, *size);
+          }
+          case Encoder::FILE: {
+            off_t offset = 0;
+            int fd = static_cast<FileEncoder*>(encoder)->next(&offset, size);
+            return socket.sendfile(fd, offset, *size);
+          }
+        }
+      },
+      [=](size_t length) -> ControlFlow<Nothing> {
+        // Update the encoder with the amount sent.
+        encoder->backup(*size - length);
 
-    // See if there is any more of the message to send.
-    if (encoder->remaining() != 0) {
-      return send(socket, encoder);
-    }
+        // See if there is any more of the message to send.
+        if (encoder->remaining() != 0) {
+          return Continue();
+        }
 
-    return Nothing();
-  })
-  .onAny([=]() {
-    delete size;
-  });
+        return Break();
+      })
+    .onAny([=]() {
+      delete size;
+    });
 }
 
 
@@ -1515,36 +1517,40 @@ Future<Nothing> stream(
     const network::Socket& socket,
     http::Pipe::Reader reader)
 {
-  return reader.read()
-    .then([=](const string& data) mutable {
-      bool finished = false;
+  return loop(
+      None(),
+      [=]() mutable {
+        return reader.read();
+      },
+      [=](const string& data) mutable {
+        bool finished = false;
 
-      ostringstream out;
+        ostringstream out;
 
-      if (data.empty()) {
-        // Finished reading.
-        out << "0\r\n" << "\r\n";
-        finished = true;
-      } else {
-        out << std::hex << data.size() << "\r\n";
-        out << data;
-        out << "\r\n";
-      }
+        if (data.empty()) {
+          // Finished reading.
+          out << "0\r\n" << "\r\n";
+          finished = true;
+        } else {
+          out << std::hex << data.size() << "\r\n";
+          out << data;
+          out << "\r\n";
+        }
 
-      Encoder* encoder = new DataEncoder(out.str());
+        Encoder* encoder = new DataEncoder(out.str());
 
-      return send(socket, encoder)
-        .onAny([=]() {
-          delete encoder;
-        })
-        .then([=]() mutable -> Future<Nothing> {
-          if (!finished) {
-            return stream(socket, reader);
-          }
+        return send(socket, encoder)
+          .onAny([=]() {
+            delete encoder;
+          })
+          .then([=]() mutable -> ControlFlow<Nothing> {
+            if (!finished) {
+              return Continue();
+            }
 
-          return Nothing();
-        });
-    });
+            return Break();
+          });
+      });
 }
 
 
@@ -1607,9 +1613,9 @@ Future<Nothing> send(
       [=]() mutable {
         return pipeline.get();
       },
-      [=](const Option<Item>& item) -> Future<bool> {
+      [=](const Option<Item>& item) -> Future<ControlFlow<Nothing>> {
         if (item.isNone()) {
-          return false;
+          return Break();
         }
 
         Request* request = item->request;
@@ -1638,7 +1644,7 @@ Future<Nothing> send(
                 case Response::NONE: return send(socket, response, request);
               }
             }()
-            .then([=]() {
+            .then([=]() -> ControlFlow<Nothing> {
               // Persist the connection if the request expects it and
               // the response doesn't include 'Connection: close'.
               bool persist = request->keepAlive;
@@ -1647,7 +1653,10 @@ Future<Nothing> send(
                   persist = false;
                 }
               }
-              return persist;
+              if (persist) {
+                return Continue();
+              }
+              return Break();
             });
           })
           .onAny([=]() {
@@ -1678,9 +1687,9 @@ Future<Nothing> receive(
       [=]() {
         return socket.recv(data, size);
       },
-      [=](size_t length) mutable -> Future<bool> {
+      [=](size_t length) mutable -> Future<ControlFlow<Nothing>> {
         if (length == 0) {
-          return false;
+          return Break();
         }
 
         // Decode as much of the data as possible into HTTP requests.
@@ -1706,7 +1715,7 @@ Future<Nothing> receive(
           pipeline.put(Item{request, f(*request)});
         }
 
-        return true; // Keep looping!
+        return Continue(); // Keep looping!
       })
     .onAny([=]() {
       delete decoder;
@@ -1794,15 +1803,15 @@ Future<Nothing> serve(
              [=]() mutable {
                return pipeline.get();
              },
-             [=](Option<Item> item) {
+             [=](Option<Item> item) -> ControlFlow<Nothing> {
                if (item.isNone()) {
-                 return false;
+                 return Break();
                }
                delete item->request;
                if (promise->future().hasDiscard()) {
                  item->response.discard();
                }
-               return true;
+               return Continue();
              });
       }
 
