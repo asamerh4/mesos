@@ -152,6 +152,11 @@ public:
         "Enable dynamic reservation and creation of a persistent volume",
         false);
 
+    add(&Flags::remove_persistent_volume,
+        "remove_persistent_volume",
+        "Unreserves dynamic reservations and removes persistent volumes if any",
+        false);
+
     add(&Flags::persistent_volume_resource,
        "persistent_volume_resource",
        "message -> TaskInfo from mesos.proto");
@@ -200,6 +205,7 @@ public:
   string framework_name;
   Option<TaskGroupInfo> task_list;
   bool persistent_volume;
+  bool remove_persistent_volume;
   Option<TaskInfo> persistent_volume_resource;
   bool checkpoint;
   Option<std::set<string>> framework_capabilities;
@@ -327,14 +333,20 @@ protected:
       Resources unreserved = offered.unreserved();
       Resources reserved = offered.reserved(role);
       Resources requiredResources; // Resources needed for tasks.
+      // container for runnable tasks within current offer
+      vector<TaskInfo> runnable_tasks;
+
+      cout << "Received offer from agent "
+           << offer.hostname()
+           << " with: " << offer.resources() << endl;
 
       // Check if we need a new dynamic reservation.
       if (persistentVolume) {
-          if (reserved.contains(Resources(persistentVolumeResource
+        if (reserved.contains(Resources(persistentVolumeResource
           ->resources()))){
           persistentVolumeReserved = true;
         }
-          if(!persistentVolumeReserved &&
+        if(!persistentVolumeReserved &&
              !persistentVolumeCreated){
                 cout << "Requested reserved resources: " <<
                 persistentVolumeResource->resources() << endl;
@@ -358,44 +370,13 @@ protected:
                 persistentVolumeReserved = true;
                 cout << "Volume reserved using " <<
                 persistentVolumeResource->resources() << endl;
-                continue;
         }
-      }
-
-      cout << "Received offer from agent "
-           << offer.hostname()
-           << " with: " << offer.resources() << endl;
-
-      // container for runnable tasks within current offer
-      vector<TaskInfo> runnable_tasks;
-
-      // Once all tasks are sent -> UNRESERVE resources
-      cout << dTasksLaunched << " " << (int) tasks.size()-1 << endl;
-      if(persistentVolume && (dTasksLaunched == (int) tasks.size()-1)){
-        Call call;
-        call.set_type(Call::ACCEPT);
-
-        CHECK(frameworkInfo.has_id());
-
-        call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
-        Call::Accept* accept = call.mutable_accept();
-        accept->add_offer_ids()->CopyFrom(offer.id());
-
-        Offer::Operation* operation = accept->add_operations();
-        operation->set_type(Offer::Operation::UNRESERVE);
-
-        operation->mutable_unreserve()
-        ->mutable_resources()
-        ->CopyFrom(Resources(persistentVolumeResource->resources()));
-        cout << "Unreserved: " << dTasksLaunched << " " <<
-        persistentVolumeResource->resources() << endl;
-        mesos->send(call);
       }
 
       // Iterate over TaskGroupInfo content and push to runnable_tasks
       while (dTasksLaunched < (int) tasks.size()) {
-          TaskInfo _task = tasks[dTasksLaunched];
           if (persistentVolume && persistentVolumeReserved){
+            TaskInfo _task = tasks[dTasksLaunched];
             requiredResources = Resources(_task.resources());
 
               if (reserved.contains(requiredResources)) {
@@ -410,6 +391,7 @@ protected:
               reserved -= requiredResources;
           }
           else {
+              TaskInfo _task = tasks[dTasksLaunched];
               requiredResources = Resources(_task.resources());
 
               if (offered.contains(requiredResources)) {
@@ -573,8 +555,188 @@ private:
   const Option<TaskInfo> persistentVolumeResource;
   bool persistentVolumeReserved;
   bool persistentVolumeCreated;
+  bool persistentVolumeUnreserve;
   int terminatedTaskCount;
   int dTasksLaunched;
+  Owned<Mesos> mesos;
+};
+
+class UnreserveScheduler : public process::Process<UnreserveScheduler>
+{
+public:
+  UnreserveScheduler(
+      const FrameworkInfo& _frameworkInfo,
+      const string& _master,
+      const string& _role,
+      mesos::ContentType _contentType,
+      const Option<Credential>& _credential,
+      const bool& _removePersistentVolume,
+      const Option<TaskInfo>& _persistentVolumeResource)
+    : state(DISCONNECTED),
+      frameworkInfo(_frameworkInfo),
+      master(_master),
+      role(_role),
+      contentType(_contentType),
+      credential(_credential),
+      removePersistentVolume(_removePersistentVolume),
+      persistentVolumeResource(_persistentVolumeResource){}
+
+  virtual ~UnreserveScheduler() {}
+
+protected:
+  virtual void initialize()
+  {
+    // We initialize the library here to ensure that callbacks are only invoked
+    // after the process has spawned.
+    mesos.reset(new Mesos(
+      master,
+      contentType,
+      process::defer(self(), &Self::connected),
+      process::defer(self(), &Self::disconnected),
+      process::defer(self(), &Self::received, lambda::_1),
+      credential));
+  }
+
+  void connected()
+  {
+    state = CONNECTED;
+
+    doReliableRegistration();
+  }
+
+  void disconnected()
+  {
+    state = DISCONNECTED;
+  }
+
+  void doReliableRegistration()
+  {
+    if (state == SUBSCRIBED || state == DISCONNECTED) {
+      return;
+    }
+
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+
+    if (frameworkInfo.has_id()) {
+      call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
+    }
+
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(frameworkInfo);
+
+    mesos->send(call);
+
+    process::delay(Seconds(1), self(), &Self::doReliableRegistration);
+  }
+
+  void offers(const vector<Offer>& offers)
+  {
+    CHECK_EQ(SUBSCRIBED, state);
+
+    // loop all offers and place UNRESERVE Operation
+    foreach (const Offer& offer, offers) {
+      Resources offered = offer.resources();
+      Resources unreserved = offered.unreserved();
+      Resources reserved = offered.reserved(role);
+
+      cout << "Received offer from agent "
+           << offer.hostname()
+           << " with: " << offer.resources() << endl;
+
+      if (!reserved.contains(Resources(persistentVolumeResource
+          ->resources()))){
+        cout << "Nothing to unreserve..." << endl;
+        break;
+      }
+      Call call;
+      call.set_type(Call::ACCEPT);
+
+      CHECK(frameworkInfo.has_id());
+
+      call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
+      Call::Accept* accept = call.mutable_accept();
+      accept->add_offer_ids()->CopyFrom(offer.id());
+
+      Offer::Operation* operation = accept->add_operations();
+      operation->set_type(Offer::Operation::UNRESERVE);
+
+      operation->mutable_unreserve()
+        ->mutable_resources()
+        ->CopyFrom(Resources(persistentVolumeResource->resources()));
+      cout << "Unreserved: " << persistentVolumeResource->resources()
+           << endl;
+      mesos->send(call);
+    }
+  }
+
+  void received(queue<Event> events)
+  {
+    while (!events.empty()) {
+      Event event = events.front();
+      events.pop();
+
+      switch (event.type()) {
+        case Event::SUBSCRIBED: {
+          frameworkInfo.mutable_id()->
+            CopyFrom(event.subscribed().framework_id());
+
+          state = SUBSCRIBED;
+
+          cout << "Subscribed unreserve-framework: \033[1;33m**"
+               << frameworkInfo.name()
+               << "-->" << frameworkInfo.id() << "\033[0m" << endl;
+          break;
+        }
+
+        case Event::OFFERS: {
+          sleep(5);
+          offers(google::protobuf::convert(event.offers().offers()));
+          sleep(5);
+          terminate(self());
+          break;
+        }
+
+        case Event::ERROR: {
+          EXIT(EXIT_FAILURE)
+            << "Received an ERROR event: " << event.error().message();
+
+          break;
+        }
+
+        case Event::UPDATE:
+        case Event::HEARTBEAT:
+        case Event::INVERSE_OFFERS:
+        case Event::FAILURE:
+        case Event::RESCIND:
+        case Event::RESCIND_INVERSE_OFFER:
+        case Event::MESSAGE: {
+          break;
+        }
+
+        case Event::UNKNOWN: {
+          LOG(WARNING) << "Received an UNKNOWN event and ignored";
+          break;
+        }
+      }
+    }
+  }
+
+private:
+  enum State
+  {
+    DISCONNECTED,
+    CONNECTED,
+    SUBSCRIBED
+  } state;
+
+  FrameworkInfo frameworkInfo;
+  const string master;
+  const string role;
+  mesos::ContentType contentType;
+  const Option<Credential> credential;
+  bool removePersistentVolume;
+  const Option<TaskInfo> persistentVolumeResource;
   Owned<Mesos> mesos;
 };
 
@@ -672,23 +834,79 @@ int main(int argc, char** argv)
     }
   }
 
-  Option<TaskInfo> taskInfo = None();
-
   if (flags.task_list.isNone()) {
+    if(flags.remove_persistent_volume){
+     // empty
+    }
+    else{
+      cerr
+      << "No protobuf/json message for '--task_list' provided."
+      << endl;
       cout << flags.usage() << endl;
       return EXIT_FAILURE;
+    }
   }
 
   // Check optional persistent volume info
   if (flags.persistent_volume_resource.isNone() && flags.persistent_volume) {
-      cerr
-      << "No protobuf/json message for '--persistent_volume_resource' provided."
+    cerr
+    << "No protobuf/json message for '--persistent_volume_resource' provided."
+    << endl;
+    cout << flags.usage() << endl;
+    return EXIT_FAILURE;
+  }
+
+  if (flags.persistent_volume_resource.isNone()
+    && flags.remove_persistent_volume) {
+    cerr
+    << "No protobuf/json message for '--persistent_volume_resource' provided."
+    << endl;
+    cout << flags.usage() << endl;
+    return EXIT_FAILURE;
+  }
+
+  if (flags.persistent_volume_resource.isSome()
+      && flags.persistent_volume
+      && flags.remove_persistent_volume) {
+      cerr << "Flags 'persistent_volume' AND 'remove_persistent_volume'\n"
+              "were specified. Please use these flags exclusively"
       << endl;
       cout << flags.usage() << endl;
       return EXIT_FAILURE;
   }
 
-  Owned<CommandScheduler> scheduler(
+  if((flags.persistent_volume || flags.remove_persistent_volume)
+      && (flags.principal.isNone() || flags.role == "")){
+    cerr
+      << "Operations on reserved resources require valid flags\n"
+         "for 'role' AND 'principal'"
+      << endl;
+    cout << flags.usage() << endl;
+    return EXIT_FAILURE;
+  }
+
+  if(flags.remove_persistent_volume){
+      frameworkInfo.set_name("UNRESERVE_RESOURCES-"+flags.framework_name);
+      Owned<UnreserveScheduler> scheduler2(
+      new UnreserveScheduler(
+        frameworkInfo,
+        flags.master,
+        flags.role,
+        contentType,
+        credential,
+        flags.remove_persistent_volume,
+        flags.persistent_volume_resource));
+
+    process::spawn(scheduler2.get());
+    process::wait(scheduler2.get());
+
+    cout << "Unsubscribed unreserve-framework: "
+         << frameworkInfo.name()
+         << endl;
+    return EXIT_SUCCESS;
+  }
+  else {
+    Owned<CommandScheduler> scheduler(
       new CommandScheduler(
         frameworkInfo,
         flags.master,
@@ -700,25 +918,26 @@ int main(int argc, char** argv)
         flags.persistent_volume,
         flags.persistent_volume_resource));
 
-  process::spawn(scheduler.get());
-  process::wait(scheduler.get());
+    process::spawn(scheduler.get());
+    process::wait(scheduler.get());
 
-  cout << "Unsubscribed batch framework: "
-               << frameworkInfo.name()
-               << endl;
-  // Report failed tasks if any.
-  foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
-         cerr << "**failed task-->" << failedTaskId << " with command: '";
-         foreach (const TaskInfo& task, scheduler->tasks){
-             if(task.task_id() == failedTaskId && task.has_command()){
-                 cerr << task.command().value() << "'" << endl;
-             }
-         }
-  }
-  if(scheduler->failedTasks.size() > 0){
+    cout << "Unsubscribed batch framework: "
+         << frameworkInfo.name()
+         << endl;
+    // Report failed tasks if any.
+    foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
+      cerr << "**failed task-->" << failedTaskId << " with command: '";
+      foreach (const TaskInfo& task, scheduler->tasks){
+        if(task.task_id() == failedTaskId && task.has_command()){
+          cerr << task.command().value() << "'" << endl;
+        }
+      }
+    }
+    if(scheduler->failedTasks.size() > 0){
       return EXIT_FAILURE;
-  }
-  else {
+    }
+    else {
       return EXIT_SUCCESS;
+    }
   }
 }
