@@ -254,7 +254,10 @@ protected:
     if (future.isReady()) {
       ++metrics->slave_unreachable_completed;
 
-      dispatch(master, &Master::markUnreachable, slaveId);
+      dispatch(master,
+               &Master::markUnreachable,
+               slaveId,
+               "health check timed out");
     } else if (future.isDiscarded()) {
       LOG(INFO) << "Canceling transition of agent " << slaveId
                 << " to UNREACHABLE because a pong was received!";
@@ -1289,6 +1292,23 @@ void Master::exited(const UPID& pid)
           removeFramework(slave, framework);
         }
       }
+
+      // If the master -> agent socket breaks, we expect that either
+      // (a) the agent will fail to respond to pings and be marked
+      // unreachable, or (b) the agent will receive a ping, notice the
+      // master thinks it is disconnected, and then re-register. There
+      // is a third possibility: if the agent restarts but hangs
+      // during agent recovery, it will respond to pings but never
+      // attempt to re-register (MESOS-6286).
+      //
+      // To handle this case, we expect that an agent whose socket has
+      // broken will re-register within `agent_reregister_timeout`. If
+      // the agent doesn't re-register, it is marked unreachable.
+      slave->reregistrationTimer =
+        delay(flags.agent_reregister_timeout,
+              self(),
+              &Master::agentReregisterTimeout,
+              slave->id);
     } else {
       // NOTE: A duplicate exited() event is possible for a slave
       // because its PID doesn't change on restart. See MESOS-675
@@ -1297,6 +1317,59 @@ void Master::exited(const UPID& pid)
                    << "agent " << *slave;
     }
   }
+}
+
+
+void Master::agentReregisterTimeout(const SlaveID& slaveId)
+{
+  Slave* slave = slaves.registered.get(slaveId);
+
+  // The slave might have been removed or re-registered concurrently
+  // with the timeout expiring.
+  if (slave == nullptr || slave->connected) {
+    return;
+  }
+
+  // Remove the slave in a rate limited manner, similar to how the
+  // SlaveObserver removes slaves.
+  Future<Nothing> acquire = Nothing();
+
+  if (slaves.limiter.isSome()) {
+      LOG(INFO) << "Scheduling removal of agent "
+                << *slave
+                << "; did not re-register within "
+                << flags.agent_reregister_timeout << " after disconnecting";
+
+      acquire = slaves.limiter.get()->acquire();
+  }
+
+  acquire
+    .then(defer(self(), &Self::_agentReregisterTimeout, slaveId));
+
+  ++metrics->slave_unreachable_scheduled;
+}
+
+
+Nothing Master::_agentReregisterTimeout(const SlaveID& slaveId)
+{
+  Slave* slave = slaves.registered.get(slaveId);
+
+  // The slave might have been removed or re-registered while we were
+  // waiting to acquire the rate limit.
+  if (slave == nullptr || slave->connected) {
+    ++metrics->slave_unreachable_canceled;
+    return Nothing();
+  }
+
+  ++metrics->slave_unreachable_completed;
+
+  markUnreachable(
+      slaveId,
+      "agent did not re-register within " +
+      stringify(flags.agent_reregister_timeout) +
+      " after disconnecting");
+
+  return Nothing();
 }
 
 
@@ -3851,15 +3924,14 @@ void Master::_accept(
           drop(framework,
                operation,
                "Authorization of principal '" + framework->info.principal() +
-               "' to reserve resources failed: " +
-               authorization.failure());
+               "' to reserve resources failed: " + authorization.failure());
 
           continue;
         } else if (!authorization.get()) {
           drop(framework,
                operation,
                "Not authorized to reserve resources as '" +
-                 framework->info.principal() + "'");
+               framework->info.principal() + "'");
 
           continue;
         }
@@ -4181,7 +4253,7 @@ void Master::_accept(
                          << "'HealthCheck' without specifying 'type' will be "
                          << "deprecated in Mesos 2.0";
 
-            HealthCheck healthCheck = task.health_check();
+            const HealthCheck& healthCheck = task.health_check();
             if (healthCheck.has_command() && !healthCheck.has_http()) {
               task_.mutable_health_check()->set_type(HealthCheck::COMMAND);
             } else if (healthCheck.has_http() && !healthCheck.has_command()) {
@@ -5300,8 +5372,6 @@ void Master::reregisterSlave(
   if (slave != nullptr) {
     CHECK(!slaves.recovered.contains(slaveInfo.id()));
 
-    slave->reregisteredTime = Clock::now();
-
     // NOTE: This handles the case where a slave tries to
     // re-register with an existing master (e.g. because of a
     // spurious Zookeeper session expiration or after the slave
@@ -5340,8 +5410,10 @@ void Master::reregisterSlave(
     slave->pid = from;
     link(slave->pid);
 
-    // Update slave's version after re-registering successfully.
+    // Update slave's version and re-registration timestamp after
+    // re-registering successfully.
     slave->version = version;
+    slave->reregisteredTime = Clock::now();
 
     // Reconcile tasks between master and slave, and send the
     // `SlaveReregisteredMessage`.
@@ -5352,8 +5424,12 @@ void Master::reregisterSlave(
     // offers include the recovered resources initially on this
     // slave.
     if (!slave->connected) {
+      CHECK(slave->reregistrationTimer.isSome());
+      Clock::cancel(slave->reregistrationTimer.get());
+
       slave->connected = true;
       dispatch(slave->observer, &SlaveObserver::reconnect);
+
       slave->active = true;
       allocator->activateSlave(slave->id);
     }
@@ -5956,7 +6032,7 @@ void Master::shutdown(
 
 // TODO(neilc): Refactor to reduce code duplication with
 // `Master::removeSlave`.
-void Master::markUnreachable(const SlaveID& slaveId)
+void Master::markUnreachable(const SlaveID& slaveId, const string& message)
 {
   Slave* slave = slaves.registered.get(slaveId);
 
@@ -5971,11 +6047,14 @@ void Master::markUnreachable(const SlaveID& slaveId)
   }
 
   if (slaves.markingUnreachable.contains(slaveId)) {
-    // Possible if marking the slave unreachable in the registry takes
+    // We might already be marking this slave unreachable. This is
+    // possible if marking the slave unreachable in the registry takes
     // a long time. While the registry operation is in progress, the
     // `SlaveObserver` will continue to ping the slave; if the slave
     // fails another health check, the `SlaveObserver` will trigger
-    // another attempt to mark it unreachable.
+    // another attempt to mark it unreachable. Also possible if
+    // `agentReregisterTimeout` marks the slave unreachable
+    // concurrently with the slave observer doing so.
     LOG(WARNING) << "Not marking agent " << slaveId
                  << " unreachable because another unreachable"
                  << " transition is already in progress";
@@ -5989,7 +6068,7 @@ void Master::markUnreachable(const SlaveID& slaveId)
   }
 
   LOG(INFO) << "Marking agent " << *slave
-            << " unreachable: health check timed out";
+            << " unreachable: " << message;
 
   CHECK(!slaves.unreachable.contains(slaveId));
   CHECK(slaves.removed.get(slaveId).isNone());
@@ -6010,6 +6089,7 @@ void Master::markUnreachable(const SlaveID& slaveId)
                  &Self::_markUnreachable,
                  slave,
                  unreachableTime,
+                 message,
                  lambda::_1));
 }
 
@@ -6017,6 +6097,7 @@ void Master::markUnreachable(const SlaveID& slaveId)
 void Master::_markUnreachable(
     Slave* slave,
     const TimeInfo& unreachableTime,
+    const string& message,
     const Future<bool>& registrarResult)
 {
   CHECK_NOTNULL(slave);
@@ -6024,8 +6105,7 @@ void Master::_markUnreachable(
   slaves.markingUnreachable.erase(slave->info.id());
 
   if (registrarResult.isFailed()) {
-    LOG(FATAL) << "Failed to mark agent " << slave->info.id()
-               << " (" << slave->info.hostname() << ")"
+    LOG(FATAL) << "Failed to mark agent " << *slave
                << " unreachable in the registry: "
                << registrarResult.failure();
   }
@@ -6035,9 +6115,7 @@ void Master::_markUnreachable(
   // `MarkSlaveUnreachable` registry operation should never fail.
   CHECK(registrarResult.get());
 
-  LOG(INFO) << "Marked agent " << slave->info.id() << " ("
-            << slave->info.hostname() << ") unreachable: "
-            << "health check timed out";
+  LOG(INFO) << "Marked agent " << *slave << " unreachable: " << message;
 
   ++metrics->slave_removals;
   ++metrics->slave_removals_reason_unhealthy;
@@ -6085,7 +6163,7 @@ void Master::_markUnreachable(
           newTaskState,
           TaskStatus::SOURCE_MASTER,
           None(),
-          "Agent " + slave->info.hostname() + " is unreachable",
+          "Agent " + slave->info.hostname() + " is unreachable: " + message,
           TaskStatus::REASON_SLAVE_REMOVED,
           (task->has_executor_id() ?
               Option<ExecutorID>(task->executor_id()) : None()),
@@ -7687,19 +7765,17 @@ void Master::_removeSlave(
   CHECK(!registrarResult.isDiscarded());
 
   if (registrarResult.isFailed()) {
-    LOG(FATAL) << "Failed to remove agent " << slave->info.id()
-               << " (" << slave->info.hostname() << ")"
+    LOG(FATAL) << "Failed to remove agent " << *slave
                << " from the registrar: " << registrarResult.failure();
   }
 
   // Should not happen: the master will only try to remove agents that
   // are currently admitted.
   CHECK(registrarResult.get())
-    << "Agent " << slave->info.id() << " (" << slave->info.hostname() << ") "
+    << "Agent " << *slave
     << "already removed from the registrar";
 
-  LOG(INFO) << "Removed agent " << slave->info.id() << " ("
-            << slave->info.hostname() << "): " << removalCause;
+  LOG(INFO) << "Removed agent " << *slave << ": " << removalCause;
 
   ++metrics->slave_removals;
   if (reason.isSome()) {
@@ -8504,7 +8580,7 @@ void Slave::addTask(Task* task)
 
   LOG(INFO) << "Adding task " << taskId
             << " with resources " << task->resources()
-            << " on agent " << id << " (" << info.hostname() << ")";
+            << " on agent " << *this;
 }
 
 

@@ -191,7 +191,7 @@ Try<URL> URL::parse(const string& urlString)
 {
   // TODO(tnachen): Consider using C++11 regex support instead.
 
-  size_t schemePos = urlString.find_first_of("://");
+  size_t schemePos = urlString.find("://");
   if (schemePos == string::npos) {
     return Error("Missing scheme in url string");
   }
@@ -199,7 +199,7 @@ Try<URL> URL::parse(const string& urlString)
   const string scheme = strings::lower(urlString.substr(0, schemePos));
   const string urlPath = urlString.substr(schemePos + 3);
 
-  size_t pathPos = urlPath.find_first_of("/");
+  size_t pathPos = urlPath.find_first_of('/');
   if (pathPos == 0) {
     return Error("Host not found in url");
   }
@@ -427,26 +427,22 @@ Future<string> Pipe::Reader::read()
 
 Future<string> Pipe::Reader::readAll()
 {
+  Pipe::Reader reader = *this;
+
   std::shared_ptr<string> buffer(new string());
 
-  return _readAll(*this, buffer);
-}
-
-
-Future<string> Pipe::Reader::_readAll(
-    Pipe::Reader reader,
-    const std::shared_ptr<string>& buffer)
-{
-  return reader.read()
-    .then([reader, buffer](const string& read) -> Future<string> {
-      if (read.empty()) { // EOF.
-        return std::move(*buffer);
-      }
-
-      buffer->append(read);
-
-      return _readAll(reader, buffer);
-    });
+  return loop(
+      None(),
+      [=]() mutable {
+        return reader.read();
+      },
+      [=](const string& data) -> ControlFlow<string> {
+        if (data.empty()) { // EOF.
+          return Break(std::move(*buffer));
+        }
+        buffer->append(data);
+        return Continue();
+      });
 }
 
 

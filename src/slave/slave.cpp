@@ -1155,9 +1155,10 @@ void Slave::registered(
       VLOG(1) << "Checkpointing SlaveInfo to '" << path << "'";
       CHECK_SOME(state::checkpoint(path, info));
 
-      // If we don't get a ping from the master, trigger a
-      // re-registration. This needs to be done once registered,
-      // in case we never receive an initial ping.
+      // Setup a timer so that the agent attempts to re-register if it
+      // doesn't receive a ping from the master for an extended period
+      // of time. This needs to be done once registered, in case we
+      // never receive an initial ping.
       Clock::cancel(pingTimer);
 
       pingTimer = delay(
@@ -1235,9 +1236,10 @@ void Slave::reregistered(
       state = RUNNING;
       statusUpdateManager->resume(); // Resume status updates.
 
-      // If we don't get a ping from the master, trigger a
-      // re-registration. This needs to be done once re-registered,
-      // in case we never receive an initial ping.
+      // Setup a timer so that the agent attempts to re-register if it
+      // doesn't receive a ping from the master for an extended period
+      // of time. This needs to be done once re-registered, in case we
+      // never receive an initial ping.
       Clock::cancel(pingTimer);
 
       pingTimer = delay(
@@ -4270,12 +4272,20 @@ void Slave::executorMessage(
   metrics.valid_framework_messages++;
 }
 
+
+// NOTE: The agent will respond to pings from the master even if it is
+// not in the RUNNING state. This is because agent recovery might take
+// longer than the master's ping timeout. We don't want to cause
+// cluster churn by marking such agents unreachable. If the master
+// sees a broken agent socket, it waits `agent_reregister_timeout` for
+// the agent to re-register, which implies that recovery should finish
+// within that (more generous) timeout.
 void Slave::ping(const UPID& from, bool connected)
 {
   VLOG(1) << "Received ping from " << from;
 
   if (!connected && state == RUNNING) {
-    // This could happen if there is a one way partition between
+    // This could happen if there is a one-way partition between
     // the master and slave, causing the master to get an exited
     // event and marking the slave disconnected but the slave
     // thinking it is still connected. Force a re-registration with
@@ -4285,11 +4295,7 @@ void Slave::ping(const UPID& from, bool connected)
     detection.discard();
   }
 
-  // If we don't get a ping from the master, trigger a
-  // re-registration. This can occur when the master no
-  // longer considers the slave to be registered, so it is
-  // essential for the slave to attempt a re-registration
-  // when this occurs.
+  // We just received a ping from the master, so reset the ping timer.
   Clock::cancel(pingTimer);
 
   pingTimer = delay(
@@ -5127,8 +5133,8 @@ void Slave::registerExecutorTimeout(
       // Ignore the registration timeout.
       break;
     case Executor::REGISTERING: {
-      LOG(INFO) << "Terminating executor '" << *executor
-                << "' because it did not register within "
+      LOG(INFO) << "Terminating executor " << *executor
+                << " because it did not register within "
                 << flags.executor_registration_timeout;
 
       // Immediately kill the executor.

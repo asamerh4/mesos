@@ -493,7 +493,7 @@ private:
 class SupportedFilesystemTestFilter : public TestFilter
 {
 public:
-  explicit SupportedFilesystemTestFilter(const string fsname)
+  explicit SupportedFilesystemTestFilter(const string& fsname)
   {
 #ifdef __linux__
     Try<bool> check = fs::supported(fsname);
@@ -801,7 +801,7 @@ void Environment::SetUp()
     string variable = env[i];
     if (variable.find("MESOS_") == 0) {
       string key;
-      size_t eq = variable.find_first_of("=");
+      size_t eq = variable.find_first_of('=');
       if (eq == string::npos) {
         continue; // Not expecting a missing '=', but ignore anyway.
       }

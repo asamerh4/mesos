@@ -52,7 +52,6 @@
 #include "encoder.hpp"
 
 namespace authentication = process::http::authentication;
-namespace ID = process::ID;
 namespace http = process::http;
 #ifndef __WINDOWS__
 namespace unix = process::network::unix;
@@ -1598,6 +1597,7 @@ TEST(URLTest, ParseUrls)
 
   // Missing scheme.
   EXPECT_ERROR(URL::parse("mesos.com"));
+  EXPECT_ERROR(URL::parse("http/abcdef"));
   // Unknown scheme with no port.
   EXPECT_ERROR(URL::parse("abc://abc.com"));
   // Invalid urls.
