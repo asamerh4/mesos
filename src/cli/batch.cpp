@@ -647,26 +647,27 @@ protected:
       if (!reserved.contains(Resources(persistentVolumeResource
           ->resources()))){
         cout << "Nothing to unreserve..." << endl;
-        break;
       }
-      Call call;
-      call.set_type(Call::ACCEPT);
+      else {
+        Call call;
+        call.set_type(Call::ACCEPT);
 
-      CHECK(frameworkInfo.has_id());
+        CHECK(frameworkInfo.has_id());
 
-      call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
-      Call::Accept* accept = call.mutable_accept();
-      accept->add_offer_ids()->CopyFrom(offer.id());
+        call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
+        Call::Accept* accept = call.mutable_accept();
+        accept->add_offer_ids()->CopyFrom(offer.id());
 
-      Offer::Operation* operation = accept->add_operations();
-      operation->set_type(Offer::Operation::UNRESERVE);
+        Offer::Operation* operation = accept->add_operations();
+        operation->set_type(Offer::Operation::UNRESERVE);
 
-      operation->mutable_unreserve()
-        ->mutable_resources()
-        ->CopyFrom(Resources(persistentVolumeResource->resources()));
-      cout << "Unreserved: " << persistentVolumeResource->resources()
-           << endl;
-      mesos->send(call);
+        operation->mutable_unreserve()
+          ->mutable_resources()
+          ->CopyFrom(Resources(persistentVolumeResource->resources()));
+        cout << "Unreserved: " << persistentVolumeResource->resources()
+             << endl;
+        mesos->send(call);
+      }
     }
   }
 
