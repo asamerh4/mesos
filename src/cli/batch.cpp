@@ -174,7 +174,7 @@ public:
     add(&Flags::framework_capabilities,
         "framework_capabilities",
         "Comma separated list of optional framework capabilities to enable.\n"
-        "(the only valid value is currently 'GPU_RESOURCES')");
+        "(e.g. 'SHARED_RESOURCES' or 'GPU_RESOURCES')");
 
     add(&Flags::role,
         "role",
@@ -348,28 +348,31 @@ protected:
         }
         if(!persistentVolumeReserved &&
              !persistentVolumeCreated){
-                cout << "Requested reserved resources: " <<
-                persistentVolumeResource->resources() << endl;
-                Call call;
-                call.set_type(Call::ACCEPT);
+          cout << "Requested reserved resources: " <<
+          persistentVolumeResource->resources() << endl;
+          Call call;
+          call.set_type(Call::ACCEPT);
 
-                CHECK(frameworkInfo.has_id());
+		  CHECK(!reserved.contains(Resources(persistentVolumeResource
+          ->resources())));
+          CHECK(frameworkInfo.has_id());
 
-                call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
-                Call::Accept* accept = call.mutable_accept();
-                accept->add_offer_ids()->CopyFrom(offer.id());
+          call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
+          Call::Accept* accept = call.mutable_accept();
+          accept->add_offer_ids()->CopyFrom(offer.id());
 
-                Offer::Operation* operation = accept->add_operations();
-                operation->set_type(Offer::Operation::RESERVE);
+          Offer::Operation* operation = accept->add_operations();
+          operation->set_type(Offer::Operation::RESERVE);
 
-                operation->mutable_reserve()
-                ->mutable_resources()
-                ->CopyFrom(Resources(persistentVolumeResource->resources()));
+          operation->mutable_reserve()
+            ->mutable_resources()
+            ->CopyFrom(Resources(persistentVolumeResource->resources()));
 
-                mesos->send(call);
-                persistentVolumeReserved = true;
-                cout << "Volume reserved using " <<
-                persistentVolumeResource->resources() << endl;
+          mesos->send(call);
+		  sleep(5);
+          persistentVolumeReserved = true;
+          cout << "Volume reserved using " <<
+          persistentVolumeResource->resources() << endl;
         }
       }
 
@@ -800,14 +803,6 @@ int main(int argc, char** argv)
                 " '" << capability << "'" << endl;
         return EXIT_FAILURE;
       }
-
-      if (type != FrameworkInfo::Capability::GPU_RESOURCES) {
-        cerr << "Flags '--framework_capabilities'"
-                " specifes an unsupported capability"
-                " '" << capability << "'" << endl;
-        return EXIT_FAILURE;
-      }
-
       frameworkCapabilities.push_back(type);
     }
   }
