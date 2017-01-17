@@ -347,7 +347,9 @@ protected:
           persistentVolumeReserved = true;
         }
         if(!persistentVolumeReserved &&
-             !persistentVolumeCreated){
+             !persistentVolumeCreated &&
+             offered.contains(Resources(persistentVolumeResource
+               ->resources()).flatten())){
           cout << "Requested reserved resources: " <<
           persistentVolumeResource->resources() << endl;
           Call call;
@@ -369,7 +371,6 @@ protected:
             ->CopyFrom(Resources(persistentVolumeResource->resources()));
 
           mesos->send(call);
-          sleep(5);
           persistentVolumeReserved = true;
           cout << "Volume reserved using " <<
           persistentVolumeResource->resources() << endl;
