@@ -558,7 +558,6 @@ private:
   const Option<TaskInfo> persistentVolumeResource;
   bool persistentVolumeReserved;
   bool persistentVolumeCreated;
-  bool persistentVolumeUnreserve;
   int terminatedTaskCount;
   int dTasksLaunched;
   Owned<Mesos> mesos;
