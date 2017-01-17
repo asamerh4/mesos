@@ -353,7 +353,7 @@ protected:
           Call call;
           call.set_type(Call::ACCEPT);
 
-		  CHECK(!reserved.contains(Resources(persistentVolumeResource
+          CHECK(!reserved.contains(Resources(persistentVolumeResource
           ->resources())));
           CHECK(frameworkInfo.has_id());
 
@@ -369,7 +369,7 @@ protected:
             ->CopyFrom(Resources(persistentVolumeResource->resources()));
 
           mesos->send(call);
-		  sleep(5);
+          sleep(5);
           persistentVolumeReserved = true;
           cout << "Volume reserved using " <<
           persistentVolumeResource->resources() << endl;
