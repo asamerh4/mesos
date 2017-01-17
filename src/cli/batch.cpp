@@ -350,8 +350,11 @@ protected:
              !persistentVolumeCreated &&
              offered.contains(Resources(persistentVolumeResource
                ->resources()).flatten())){
-          cout << "Requested reserved resources: " <<
-          persistentVolumeResource->resources() << endl;
+          cout << "Requested reserved resources: "
+               << persistentVolumeResource->resources()
+               << " for -> **"
+               << offer.hostname()
+               << endl;
           Call call;
           call.set_type(Call::ACCEPT);
 
@@ -372,8 +375,11 @@ protected:
 
           mesos->send(call);
           persistentVolumeReserved = true;
-          cout << "Volume reserved using " <<
-          persistentVolumeResource->resources() << endl;
+          cout << "Volume reserved using "
+               << persistentVolumeResource->resources()
+               << " from -> "
+               << offer.hostname()
+               << endl;
         }
       }
 
