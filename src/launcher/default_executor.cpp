@@ -43,10 +43,10 @@
 #include <stout/os.hpp>
 #include <stout/uuid.hpp>
 
+#include "checks/health_checker.hpp"
+
 #include "common/http.hpp"
 #include "common/status_utils.hpp"
-
-#include "health-check/health_checker.hpp"
 
 #include "internal/devolve.hpp"
 #include "internal/evolve.hpp"
@@ -398,8 +398,8 @@ protected:
         CHECK_NE(HealthCheck::COMMAND, task.health_check().type())
           << "Command health checks are not supported yet";
 
-        Try<Owned<health::HealthChecker>> _checker =
-          health::HealthChecker::create(
+        Try<Owned<checks::HealthChecker>> _checker =
+          checks::HealthChecker::create(
               task.health_check(),
               launcherDirectory,
               defer(self(), &Self::taskHealthUpdated, lambda::_1),
@@ -632,9 +632,9 @@ protected:
       taskState = TASK_FAILED;
     } else {
       CHECK(WIFEXITED(status.get()) || WIFSIGNALED(status.get()))
-        << status.get();
+        << "Unexpected wait status " << status.get();
 
-      if (WIFEXITED(status.get()) && WEXITSTATUS(status.get()) == 0) {
+      if (WSUCCEEDED(status.get())) {
         taskState = TASK_FINISHED;
       } else if (shuttingDown) {
         // Send TASK_KILLED if the task was killed as a result of
@@ -695,7 +695,7 @@ protected:
     shuttingDown = true;
 
     // Stop health checking all tasks because we are shutting down.
-    foreach (const Owned<health::HealthChecker>& checker, checkers.values()) {
+    foreach (const Owned<checks::HealthChecker>& checker, checkers.values()) {
       checker->stop();
     }
     checkers.clear();
@@ -1034,7 +1034,7 @@ private:
   // a `connected()` callback.
   Option<UUID> connectionId;
 
-  hashmap<TaskID, Owned<health::HealthChecker>> checkers; // Health checkers.
+  hashmap<TaskID, Owned<checks::HealthChecker>> checkers; // Health checkers.
 };
 
 } // namespace internal {
@@ -1058,6 +1058,8 @@ public:
 
 int main(int argc, char** argv)
 {
+  process::initialize();
+
   Flags flags;
   mesos::FrameworkID frameworkId;
   mesos::ExecutorID executorId;
@@ -1137,6 +1139,8 @@ int main(int argc, char** argv)
 
   process::spawn(executor.get());
   process::wait(executor.get());
+
+  process::finalize(true);
 
   return EXIT_SUCCESS;
 }

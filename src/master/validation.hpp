@@ -119,6 +119,8 @@ namespace executor {
 // Functions in this namespace are only exposed for testing.
 namespace internal {
 
+Option<Error> validateExecutorID(const ExecutorInfo& executor);
+
 // Validates that fields are properly set depending on the type of the executor.
 Option<Error> validateType(const ExecutorInfo& executor);
 
@@ -152,6 +154,9 @@ Option<Error> validateTaskAndExecutorResources(const TaskInfo& task);
 
 // Validates the kill policy of the task.
 Option<Error> validateKillPolicy(const TaskInfo& task);
+
+// Validates the check of the task.
+Option<Error> validateCheck(const TaskInfo& task);
 
 // Validates the health check of the task.
 Option<Error> validateHealthCheck(const TaskInfo& task);

@@ -832,6 +832,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   authorizer/acls.cpp							\
   authorizer/authorizer.cpp						\
   authorizer/local/authorizer.cpp					\
+  checks/checker.cpp							\
+  checks/health_checker.cpp						\
   common/attributes.cpp							\
   common/command_utils.cpp						\
   common/http.cpp							\
@@ -840,6 +842,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   common/resources_utils.cpp						\
   common/roles.cpp							\
   common/type_utils.cpp							\
+  common/validation.cpp							\
   common/values.cpp							\
   docker/docker.cpp							\
   docker/spec.cpp							\
@@ -847,7 +850,6 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   executor/executor.cpp							\
   executor/v0_v1executor.cpp						\
   files/files.cpp							\
-  health-check/health_checker.cpp					\
   hdfs/hdfs.cpp								\
   hook/manager.cpp							\
   internal/devolve.cpp							\
@@ -958,6 +960,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   authentication/cram_md5/authenticator.hpp				\
   authentication/cram_md5/auxprop.hpp					\
   authorizer/local/authorizer.hpp					\
+  checks/checker.hpp							\
+  checks/health_checker.hpp						\
   common/build.hpp							\
   common/command_utils.hpp						\
   common/http.hpp							\
@@ -966,6 +970,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   common/recordio.hpp							\
   common/resources_utils.hpp						\
   common/status_utils.hpp						\
+  common/validation.hpp							\
   credentials/credentials.hpp						\
   docker/docker.hpp							\
   docker/executor.hpp							\
@@ -974,7 +979,6 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   examples/utils.hpp							\
   executor/v0_v1executor.hpp						\
   files/files.hpp							\
-  health-check/health_checker.hpp					\
   hdfs/hdfs.hpp								\
   hook/manager.hpp							\
   internal/devolve.hpp							\
@@ -1491,7 +1495,7 @@ mesos_docker_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_docker_executor_LDADD = libmesos.la $(LDADD)
 
 pkglibexec_PROGRAMS += mesos-tcp-connect
-mesos_tcp_connect_SOURCES = health-check/tcp_connect.cpp
+mesos_tcp_connect_SOURCES = checks/tcp_connect.cpp
 mesos_tcp_connect_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_tcp_connect_LDADD = libmesos.la $(LDADD)
 
@@ -2197,6 +2201,7 @@ mesos_tests_SOURCES =						\
   tests/attributes_tests.cpp					\
   tests/authentication_tests.cpp				\
   tests/authorization_tests.cpp					\
+  tests/check_tests.cpp						\
   tests/cluster.cpp						\
   tests/command_executor_tests.cpp				\
   tests/container_logger_tests.cpp				\

@@ -554,6 +554,11 @@ void Slave::initialize()
   statusUpdateManager->initialize(defer(self(), &Slave::forward, lambda::_1)
     .operator std::function<void(StatusUpdate)>());
 
+  // We pause the status update manager so that it doesn't forward any updates
+  // while the slave is still recovering. It is unpaused/resumed when the slave
+  // (re-)registers with the master.
+  statusUpdateManager->pause();
+
   // Start disk monitoring.
   // NOTE: We send a delayed message here instead of directly calling
   // checkDiskUsage, to make disabling this feature easy (e.g by specifying
@@ -6218,25 +6223,6 @@ double Slave::_resources_revocable_percent(const string& name)
 }
 
 
-Executor* Slave::locateExecutor(const ContainerID& containerId) const
-{
-  // Locate the executor (for now we just loop since we don't
-  // index based on container id and this likely won't have a
-  // significant performance impact due to the low number of
-  // executors per-agent).
-  // TODO(adam-mesos): Support more levels of nesting.
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      if (executor->containerId == containerId ||
-          executor->containerId == containerId.parent()) {
-        return executor;
-      }
-    }
-  }
-  return nullptr;
-}
-
-
 Framework::Framework(
     Slave* _slave,
     const Flags& slaveFlags,
@@ -6486,6 +6472,26 @@ Executor* Framework::getExecutor(const TaskID& taskId)
       return executor;
     }
   }
+  return nullptr;
+}
+
+
+Executor* Slave::getExecutor(const ContainerID& containerId) const
+{
+  const ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
+
+  // Locate the executor (for now we just loop since we don't
+  // index based on container id and this likely won't have a
+  // significant performance impact due to the low number of
+  // executors per-agent).
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      if (rootContainerId == executor->containerId) {
+        return executor;
+      }
+    }
+  }
+
   return nullptr;
 }
 

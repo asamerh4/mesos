@@ -351,8 +351,7 @@ TEST_P(MasterAPITest, GetExecutors)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -371,8 +370,7 @@ TEST_P(MasterAPITest, GetExecutors)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(exec, registered(_, _, _, _));
 
   EXPECT_CALL(exec, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
@@ -598,8 +596,7 @@ TEST_P(MasterAPITest, GetTasks)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2012,8 +2009,7 @@ TEST_P(MasterAPITest, CreateAndDestroyVolumes)
   MesosSchedulerDriver driver(
       &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2038,8 +2034,7 @@ TEST_P(MasterAPITest, CreateAndDestroyVolumes)
       "sleep 1",
       DEFAULT_EXECUTOR_ID);
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(exec, registered(_, _, _, _));
 
   EXPECT_CALL(exec, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_FINISHED));
@@ -3555,8 +3550,7 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, NestedContainerLaunchFalse)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -3567,8 +3561,7 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, NestedContainerLaunchFalse)
   EXPECT_CALL(exec, registered(_, _, _, _))
     .WillOnce(FutureSatisfy(&executorRegistered));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .Times(1);
+  EXPECT_CALL(exec, launchTask(_, _));
 
   driver.start();
 
@@ -3613,49 +3606,6 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, NestedContainerLaunchFalse)
 
   driver.stop();
   driver.join();
-}
-
-
-TEST_P(AgentAPITest, NestedContainerLaunchGrandchildNotSupported)
-{
-  ContentType contentType = GetParam();
-
-  Clock::pause();
-
-  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
-
-  StandaloneMasterDetector detector;
-  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
-
-  ASSERT_SOME(slave);
-
-  // Wait for the agent to finish recovery.
-  AWAIT_READY(__recover);
-  Clock::settle();
-
-  // Try to launch a grandchild container.
-  v1::ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
-  containerId.mutable_parent()->set_value(UUID::random().toString());
-  containerId.mutable_parent()->mutable_parent()
-    ->set_value(UUID::random().toString());
-
-  {
-    v1::agent::Call call;
-    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER);
-
-    call.mutable_launch_nested_container()->mutable_container_id()
-      ->CopyFrom(containerId);
-
-    Future<http::Response> response = http::post(
-      slave.get()->pid,
-      "api/v1",
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
-      serialize(contentType, call),
-      stringify(contentType));
-
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::NotImplemented().status, response);
-  }
 }
 
 
@@ -3771,6 +3721,194 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, NestedContainerLaunch)
 
   // The test containerizer sets exit status to 0 when destroyed.
   EXPECT_EQ(0, wait->wait_nested_container().exit_status());
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+}
+
+
+TEST_P_TEMP_DISABLED_ON_WINDOWS(AgentAPITest, TwoLevelNestedContainerLaunch)
+{
+  ContentType contentType = GetParam();
+
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  slave::Flags agentFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, agentFlags);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 0.1, 32, "*"))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  Future<Nothing> executorRegistered;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(FutureSatisfy(&executorRegistered));
+
+  EXPECT_CALL(exec, launchTask(_, _));
+
+  driver.start();
+
+  // Trigger authentication and registration for the agent.
+  Clock::advance(agentFlags.authentication_backoff_factor);
+  Clock::advance(agentFlags.registration_backoff_factor);
+
+  AWAIT_READY(executorRegistered);
+
+  Future<hashset<ContainerID>> containerIds = containerizer.containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
+
+  // Launch a two level nested parent/child container and then wait for them to
+  // finish.
+  v1::ContainerID parentContainerId;
+  parentContainerId.set_value(UUID::random().toString());
+  parentContainerId.mutable_parent()->set_value(containerIds->begin()->value());
+
+  // Launch the parent container.
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER);
+
+    call.mutable_launch_nested_container()->mutable_container_id()
+      ->CopyFrom(parentContainerId);
+
+    Future<http::Response> response = http::post(
+      slave.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, call),
+      stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  }
+
+  // Launch the child container.
+  v1::ContainerID childContainerId;
+  childContainerId.set_value(UUID::random().toString());
+  childContainerId.mutable_parent()->CopyFrom(parentContainerId);
+
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER);
+
+    call.mutable_launch_nested_container()->mutable_container_id()
+      ->CopyFrom(childContainerId);
+
+    Future<http::Response> response = http::post(
+      slave.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, call),
+      stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  }
+
+  // Wait for the parent container.
+  Future<v1::agent::Response> waitParent;
+
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::WAIT_NESTED_CONTAINER);
+
+    call.mutable_wait_nested_container()->mutable_container_id()
+      ->CopyFrom(parentContainerId);
+
+    waitParent = post(slave.get()->pid, call, contentType);
+
+    Clock::settle();
+
+    EXPECT_TRUE(waitParent.isPending());
+  }
+
+  // Wait for the child container.
+  Future<v1::agent::Response> waitChild;
+
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::WAIT_NESTED_CONTAINER);
+
+    call.mutable_wait_nested_container()->mutable_container_id()
+      ->CopyFrom(childContainerId);
+
+    waitChild = post(slave.get()->pid, call, contentType);
+
+    Clock::settle();
+
+    EXPECT_TRUE(waitChild.isPending());
+  }
+
+  // Kill the child container.
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::KILL_NESTED_CONTAINER);
+
+    call.mutable_kill_nested_container()->mutable_container_id()
+      ->CopyFrom(childContainerId);
+
+    Future<http::Response> response = http::post(
+      slave.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, call),
+      stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  }
+
+  AWAIT_READY(waitChild);
+  ASSERT_EQ(v1::agent::Response::WAIT_NESTED_CONTAINER, waitChild->type());
+
+  // The test containerizer sets exit status to 0 when destroyed.
+  EXPECT_EQ(0, waitChild->wait_nested_container().exit_status());
+
+  // The parent container should still be running.
+  EXPECT_TRUE(waitParent.isPending());
+
+  // Kill the parent container.
+  {
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::KILL_NESTED_CONTAINER);
+
+    call.mutable_kill_nested_container()->mutable_container_id()
+      ->CopyFrom(parentContainerId);
+
+    Future<http::Response> response = http::post(
+      slave.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, call),
+      stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  }
+
+  AWAIT_READY(waitParent);
+  ASSERT_EQ(v1::agent::Response::WAIT_NESTED_CONTAINER, waitParent->type());
+
+  // The test containerizer sets exit status to 0 when destroyed.
+  EXPECT_EQ(0, waitParent->wait_nested_container().exit_status());
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -4212,44 +4350,72 @@ TEST_P_TEMP_DISABLED_ON_WINDOWS(
 }
 
 
+// This test verifies that attaching to the output of a container fails if the
+// containerizer doesn't support the operation.
 TEST_P(AgentAPITest, AttachContainerOutputFailure)
 {
   ContentType contentType = GetParam();
 
-  Clock::pause();
-
-  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
-
-  StandaloneMasterDetector detector;
-  MockContainerizer mockContainerizer;
-
-  EXPECT_CALL(mockContainerizer, recover(_))
-    .WillOnce(Return(Future<Nothing>(Nothing())));
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
 
   slave::Flags flags = CreateSlaveFlags();
 
   // Disable authorization in the agent.
   flags.acls = None();
 
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
   Try<Owned<cluster::Slave>> slave =
-      StartSlave(
-          &detector,
-          &mockContainerizer,
-          flags);
+    StartSlave(detector.get(), &containerizer, flags);
 
   ASSERT_SOME(slave);
 
-  // Wait for the agent to finish recovery.
-  AWAIT_READY(__recover);
-  Clock::settle();
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  EXPECT_CALL(exec, registered(_, _, _, _));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status->state());
+
+  Future<hashset<ContainerID>> containerIds = containerizer.containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
 
   v1::agent::Call call;
   call.set_type(v1::agent::Call::ATTACH_CONTAINER_OUTPUT);
 
   call.mutable_attach_container_output()->mutable_container_id()
-    ->set_value(UUID::random().toString());
+    ->set_value(containerIds->begin()->value());
 
-  EXPECT_CALL(mockContainerizer, attach(_))
+  EXPECT_CALL(containerizer, attach(_))
     .WillOnce(Return(process::Failure("Unsupported")));
 
   Future<http::Response> response = http::post(
@@ -4262,41 +4428,70 @@ TEST_P(AgentAPITest, AttachContainerOutputFailure)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::InternalServerError().status, response);
   AWAIT_EXPECT_RESPONSE_BODY_EQ("Unsupported", response);
 
-  // The destructor of `cluster::Slave` will try to clean up any
-  // remaining containers by inspecting the result of `containers()`.
-  EXPECT_CALL(mockContainerizer, containers())
-    .WillRepeatedly(Return(hashset<ContainerID>()));
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
 }
 
 
+// This test verifies that attaching to the input of a container fails if the
+// containerizer doesn't support the operation.
 TEST_F(AgentAPITest, AttachContainerInputFailure)
 {
-  Clock::pause();
-
-  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
-
-  StandaloneMasterDetector detector;
-  MockContainerizer mockContainerizer;
-
-  EXPECT_CALL(mockContainerizer, recover(_))
-    .WillOnce(Return(Future<Nothing>(Nothing())));
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
 
   slave::Flags flags = CreateSlaveFlags();
 
   // Disable authorization in the agent.
   flags.acls = None();
 
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
   Try<Owned<cluster::Slave>> slave =
-      StartSlave(
-          &detector,
-          &mockContainerizer,
-          flags);
+    StartSlave(detector.get(), &containerizer, flags);
 
   ASSERT_SOME(slave);
 
-  // Wait for the agent to finish recovery.
-  AWAIT_READY(__recover);
-  Clock::settle();
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  EXPECT_CALL(exec, registered(_, _, _, _));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  ASSERT_EQ(TASK_RUNNING, status->state());
+
+  Future<hashset<ContainerID>> containerIds = containerizer.containers();
+  AWAIT_READY(containerIds);
+  ASSERT_EQ(1u, containerIds->size());
 
   v1::agent::Call call;
   call.set_type(v1::agent::Call::ATTACH_CONTAINER_INPUT);
@@ -4305,14 +4500,14 @@ TEST_F(AgentAPITest, AttachContainerInputFailure)
         v1::agent::Call::AttachContainerInput::CONTAINER_ID);
 
   call.mutable_attach_container_input()->mutable_container_id()
-    ->set_value(UUID::random().toString());
+    ->set_value(containerIds->begin()->value());
 
   ContentType contentType = ContentType::STREAMING_PROTOBUF;
 
   ::recordio::Encoder<v1::agent::Call> encoder(lambda::bind(
         serialize, contentType, lambda::_1));
 
-  EXPECT_CALL(mockContainerizer, attach(_))
+  EXPECT_CALL(containerizer, attach(_))
     .WillOnce(Return(process::Failure("Unsupported")));
 
   Future<http::Response> response = http::post(
@@ -4325,10 +4520,11 @@ TEST_F(AgentAPITest, AttachContainerInputFailure)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::InternalServerError().status, response);
   AWAIT_EXPECT_RESPONSE_BODY_EQ("Unsupported", response);
 
-  // The destructor of `cluster::Slave` will try to clean up any
-  // remaining containers by inspecting the result of `containers()`.
-  EXPECT_CALL(mockContainerizer, containers())
-    .WillRepeatedly(Return(hashset<ContainerID>()));
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
 }
 
 

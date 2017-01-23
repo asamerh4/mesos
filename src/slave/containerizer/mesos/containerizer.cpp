@@ -746,7 +746,8 @@ Future<Nothing> MesosContainerizerProcess::recover(
     // Determine the sandbox if this is a nested container.
     Option<string> directory;
     if (containerId.has_parent()) {
-      const ContainerID& rootContainerId = getRootContainerId(containerId);
+      const ContainerID& rootContainerId =
+        protobuf::getRootContainerId(containerId);
       CHECK(containers_.contains(rootContainerId));
 
       if (containers_[rootContainerId]->directory.isSome()) {
@@ -783,7 +784,7 @@ Future<Nothing> MesosContainerizerProcess::recover(
     // on other types of containers, we may need duplicate this logic
     // elsewhere.
     if (containerId.has_parent() &&
-        alive.contains(getRootContainerId(containerId)) &&
+        alive.contains(protobuf::getRootContainerId(containerId)) &&
         pid.isSome() &&
         !containerizer::paths::getContainerForceDestroyOnRecovery(
             flags.runtime_dir, containerId)) {
@@ -1603,12 +1604,12 @@ Future<bool> MesosContainerizerProcess::_launch(
 
   // Fork the child using launcher.
   vector<string> argv(2);
-  argv[0] = MESOS_CONTAINERIZER;
+  argv[0] = path::join(flags.launcher_dir, MESOS_CONTAINERIZER);
   argv[1] = MesosContainerizerLaunch::NAME;
 
   Try<pid_t> forked = launcher->fork(
       containerId,
-      path::join(flags.launcher_dir, MESOS_CONTAINERIZER),
+      argv[0],
       argv,
       in.isSome() ? in.get() : Subprocess::FD(STDIN_FILENO),
       out.isSome() ? out.get() : Subprocess::FD(STDOUT_FILENO),
@@ -1806,7 +1807,7 @@ Future<bool> MesosContainerizerProcess::launch(
 
   LOG(INFO) << "Starting nested container " << containerId;
 
-  const ContainerID rootContainerId = getRootContainerId(containerId);
+  const ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
 
   CHECK(containers_.contains(rootContainerId));
   if (containers_[rootContainerId]->directory.isNone()) {

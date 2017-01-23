@@ -27,10 +27,10 @@
 #include <stout/path.hpp>
 #include <stout/net.hpp>
 
+#include "common/protobuf_utils.hpp"
+
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
-
-#include "slave/containerizer/mesos/utils.hpp"
 
 #include "slave/containerizer/mesos/isolators/network/cni/cni.hpp"
 
@@ -539,6 +539,7 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
   }
 
   hashmap<string, ContainerNetwork> containerNetworks;
+  Option<string> hostname;
 
   if (!containerId.has_parent()) {
     const ExecutorInfo& executorInfo = containerConfig.executor_info();
@@ -548,6 +549,10 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
 
     if (executorInfo.container().type() != ContainerInfo::MESOS) {
       return Failure("Can only prepare CNI networks for a MESOS container");
+    }
+
+    if (executorInfo.container().has_hostname()) {
+      hostname = executorInfo.container().hostname();
     }
 
     int ifIndex = 0;
@@ -588,7 +593,7 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
           "parent and nested containers.");
     }
 
-    ContainerID rootContainerId = getRootContainerId(containerId);
+    ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
 
     // NOTE: The `network/cni` isolator checkpoints only the following
     // top-level containers:
@@ -646,7 +651,7 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
   } else {
     // This is the case where the container is joining a non-host
     // network namespace. Non-DEBUG containers will need a new mount
-    // namespaces to bind mount their network files (/etc/hosts,
+    // namespace to bind mount their network files (/etc/hosts,
     // /etc/hostname, /etc/resolv.conf) which will be different than
     // those on the host file system.
     //
@@ -660,14 +665,16 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
         containerConfig.has_container_class() &&
         containerConfig.container_class() == ContainerClass::DEBUG) {
       // Nested DEBUG containers never need a new MOUNT namespace, so
-      // we don't mantain information about them in the `infos` map.
+      // we don't maintain information about them in the `infos` map.
     } else {
+      Option<string> rootfs = None();
+
       if (containerConfig.has_rootfs()) {
-        Owned<Info> info(new Info(containerNetworks, containerConfig.rootfs()));
-        infos.put(containerId, info);
-      } else {
-        infos.put(containerId, Owned<Info>(new Info(containerNetworks)));
+        rootfs = containerConfig.rootfs();
       }
+
+      infos.put(containerId, Owned<Info>(
+          new Info(containerNetworks, rootfs, hostname)));
     }
 
     ContainerLaunchInfo launchInfo;
@@ -778,7 +785,7 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
     // to which this container belongs. We will use the network files
     // of the top level root container to setup the network files for
     // this nested container.
-    ContainerID rootContainerId = getRootContainerId(containerId);
+    ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
 
     // Since the nested container joins non-host networks, its root
     // container has to join non-host networks because we have the
@@ -904,6 +911,11 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
 
   CHECK(infos.contains(containerId));
 
+  const Owned<Info>& info = infos[containerId];
+  string hostname = info->hostname.isSome()
+    ? info->hostname.get()
+    : stringify(containerId);
+
   const string containerDir =
     paths::getContainerDir(rootDir.get(), containerId.value());
 
@@ -915,7 +927,7 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
   string resolvPath = path::join(containerDir, "resolv.conf");
 
   // Update the `hostname` file.
-  Try<Nothing> write = os::write(hostnamePath, stringify(containerId));
+  Try<Nothing> write = os::write(hostnamePath, hostname);
   if (write.isError()) {
     return Failure(
         "Failed to write the hostname to '" + hostnamePath +
@@ -928,10 +940,10 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
 
   hosts << "127.0.0.1 localhost" << endl;
   foreachvalue (const ContainerNetwork& network,
-                infos[containerId]->containerNetworks) {
+                info->containerNetworks) {
     // NOTE: Update /etc/hosts with hostname and IP address. In case
-    // there are multiple IP addreses associated with the container we
-    // pick the first one.
+    // there are multiple IP addresses associated with the container
+    // we pick the first one.
     if (network.cniNetworkInfo.isSome() && network.cniNetworkInfo->has_ip4()) {
       // IP are always stored in CIDR notation so need to retrieve the
       // address without the subnet mask.
@@ -946,7 +958,7 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
             " for the container: " + ip.error());
       }
 
-      hosts << ip->address() << " " << containerId << endl;
+      hosts << ip->address() << " " << hostname << endl;
       break;
     }
   }
@@ -964,7 +976,7 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
   // ('/etc/resolv.conf').
   stringstream resolv;
   foreachvalue (const ContainerNetwork& network,
-                infos[containerId]->containerNetworks) {
+                info->containerNetworks) {
     if (network.cniNetworkInfo.isNone() || !network.cniNetworkInfo->has_dns()) {
       continue;
     }
@@ -1002,8 +1014,8 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
   // container's filesystem and UTS namespace.
   NetworkCniIsolatorSetup setup;
   setup.flags.pid = pid;
-  setup.flags.hostname = stringify(containerId);
-  setup.flags.rootfs = infos[containerId]->rootfs;
+  setup.flags.hostname = hostname;
+  setup.flags.rootfs = info->rootfs;
   setup.flags.etc_hosts_path = hostsPath;
   setup.flags.etc_hostname_path = hostnamePath;
   setup.flags.etc_resolv_conf = resolvPath;
@@ -1115,8 +1127,7 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
   if (value.isSome()) {
     environment["PATH"] = value.get();
   } else {
-    environment["PATH"] =
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    environment["PATH"] = os::host_default_path();
   }
 
   // Inject Mesos metadata to the network configuration JSON that will
@@ -1499,8 +1510,7 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
   if (value.isSome()) {
     environment["PATH"] = value.get();
   } else {
-    environment["PATH"] =
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    environment["PATH"] = os::host_default_path();
   }
 
   // Use the checkpointed CNI network configuration to call the
@@ -1973,7 +1983,7 @@ int NetworkCniIsolatorSetup::execute()
       return EXIT_FAILURE;
     }
 
-    if (os::system("ifconfig lo up") != 0) {
+    if (os::spawn("ifconfig", {"ifconfig", "lo", "up"}) != 0) {
       cerr << "Failed to bring up the loopback interface in the new "
            << "network namespace of pid " << flags.pid.get()
            << ": " << os::strerror(errno) << endl;

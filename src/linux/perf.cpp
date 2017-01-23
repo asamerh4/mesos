@@ -24,6 +24,7 @@
 
 #include <list>
 #include <sstream>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -199,11 +200,20 @@ Future<Version> version()
 
   return output
     .then([](const string& output) -> Future<Version> {
-      string trimmed = strings::trim(output);
+      string trimmed = strings::remove(
+          strings::trim(output), "perf version ", strings::PREFIX);
+
+      // `perf` may have a version like "4.8.16.300.fc25.x86_64.ge69a".
+      // We really only care about the first 3 components, which show
+      // the software release of the perf package.
+      vector<string> components = strings::split(trimmed, ".");
+      if (components.size() > 3) {
+        components.resize(3);
+        trimmed = strings::join(".", components);
+      }
 
       // Trim off the leading 'perf version ' text to convert.
-      return Version::parse(
-          strings::remove(trimmed, "perf version ", strings::PREFIX));
+      return Version::parse(trimmed);
     });
 };
 
@@ -316,16 +326,23 @@ Future<hashmap<string, mesos::PerfStatistics>> sample(
 
 bool valid(const set<string>& events)
 {
-  ostringstream command;
+  vector<string> argv = {"stat"};
 
-  // Log everything to stderr which is then redirected to /dev/null.
-  command << "perf stat --log-fd 2";
   foreach (const string& event, events) {
-    command << " --event " << event;
+    argv.push_back("--event");
+    argv.push_back(event);
   }
-  command << " true 2>/dev/null";
 
-  return (os::system(command.str()) == 0);
+  argv.push_back("true");
+
+  internal::Perf* perf = new internal::Perf(argv);
+  Future<string> output = perf->output();
+  spawn(perf, true);
+
+  output.await();
+
+  // We don't care about the output, just whether it exited non-zero.
+  return output.isReady();
 }
 
 

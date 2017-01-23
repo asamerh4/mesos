@@ -1730,6 +1730,38 @@ TEST_F(ExecutorValidationTest, ExecutorType)
 }
 
 
+TEST_F(ExecutorValidationTest, ExecutorID)
+{
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+    executorInfo.mutable_executor_id()->set_value("abc");
+
+    EXPECT_NONE(::executor::internal::validateExecutorID(executorInfo));
+  }
+
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+    executorInfo.mutable_executor_id()->set_value("");
+
+    EXPECT_SOME(::executor::internal::validateExecutorID(executorInfo));
+  }
+
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+    executorInfo.mutable_executor_id()->set_value("ab c");
+
+    EXPECT_NONE(::executor::internal::validateExecutorID(executorInfo));
+  }
+
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+    executorInfo.mutable_executor_id()->set_value("ab/c");
+
+    EXPECT_SOME(::executor::internal::validateExecutorID(executorInfo));
+  }
+}
+
+
 class TaskGroupValidationTest : public MesosTest {};
 
 
@@ -2494,8 +2526,7 @@ TEST_F(FrameworkInfoValidationTest, MissingMultiRoleCapability)
 }
 
 
-// This test ensures subscription succeeds for multi-role
-// framework when MULTI_ROLE capability is enabled.
+// This test ensures that a multi-role framework can register.
 TEST_F(FrameworkInfoValidationTest, AcceptMultiRoleFramework)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -2521,8 +2552,8 @@ TEST_F(FrameworkInfoValidationTest, AcceptMultiRoleFramework)
 }
 
 
-// This test ensures subscription fails for multi-role
-// framework with non-whitelisted role.
+// This test ensures that a multi-role framework using
+// a non-whitelisted role is denied registration.
 TEST_F(FrameworkInfoValidationTest, MultiRoleWhitelist)
 {
   master::Flags masterFlags = CreateMasterFlags();
@@ -2548,6 +2579,75 @@ TEST_F(FrameworkInfoValidationTest, MultiRoleWhitelist)
   driver.start();
 
   AWAIT_READY(error);
+}
+
+
+// This test verifies that a not yet MULTI_ROLE capable framework can
+// upgrade to be MULTI_ROLE capable, given that it does not change its
+// roles, i.e., the previously used `FrameworkInfo.role` equals
+// `FrameworkInfo.roles` (both set to the same single value; note
+// that `FrameworkInfo.role` being unset is equivalent to being
+// set to "*").
+TEST_F(FrameworkInfoValidationTest, UpgradeToMultiRole)
+{
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+
+  // Set a long failover timeout so the framework isn't immediately removed.
+  frameworkInfo.set_failover_timeout(Weeks(1).secs());
+
+  Future<FrameworkID> frameworkId;
+
+  {
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    EXPECT_CALL(sched, registered(&driver, _, _))
+      .WillOnce(FutureArg<1>(&frameworkId));
+
+    driver.start();
+
+    Clock::settle();
+
+    AWAIT_READY(frameworkId);
+
+    driver.stop(true); // Failover.
+    driver.join();
+  }
+
+  frameworkInfo.mutable_id()->CopyFrom(frameworkId.get());
+
+  // Upgrade `frameworkInfo` to declare the MULTI_ROLE capability,
+  // and migrate from `role` to `roles` field.
+  frameworkInfo.add_roles(frameworkInfo.role());
+  frameworkInfo.clear_role();
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  {
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    Future<Nothing> registered;
+    EXPECT_CALL(sched, registered(&driver, _, _))
+      .WillOnce(FutureSatisfy(&registered));
+
+    driver.start();
+
+    Clock::settle();
+
+    AWAIT_READY(registered);
+
+    driver.stop();
+    driver.join();
+  }
 }
 
 } // namespace tests {

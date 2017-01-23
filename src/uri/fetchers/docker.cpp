@@ -165,6 +165,25 @@ static Future<http::Response> curl(
       Try<vector<http::Response>> responses =
         http::decodeResponses(output.get());
 
+      // TODO(nfnt): If we're behing a proxy, curl will use 'HTTP
+      // CONNECT tunneling' to access HTTPS. The HTTP parser will
+      // put the actual response(s) to the body of the 'CONNECT'
+      // response. Therefore, in that case, we'll parse the body of
+      // 'CONNECT' response again. See MESOS-6010 for more details.
+      bool hasProxy =
+        os::getenv("https_proxy").isSome() ||
+        os::getenv("HTTPS_PROXY").isSome();
+
+      if (hasProxy && responses.isSome() && responses->size() == 1) {
+        const http::Response& response = responses->back();
+
+        if (response.code == 200 &&
+            !response.headers.contains("Content-Length") &&
+            response.headers.get("Transfer-Encoding") != Some("chunked")) {
+          responses = http::decodeResponses(response.body);
+        }
+      }
+
       if (responses.isError()) {
         return Failure(
             "Failed to decode HTTP responses: " + responses.error() +
@@ -472,6 +491,19 @@ Future<Nothing> DockerFetcherPluginProcess::__fetch(
   }
 
   CHECK_EQ(response.type, http::Response::BODY);
+
+  // Check if we got a V2 Schema 1 manifest.
+  // TODO(ipronin): We have to support Schema 2 manifests to be able to use
+  // digests for pulling images that were pushed with Docker 1.10+ to
+  // Registry 2.3+.
+  Option<string> contentType = response.headers.get("Content-Type");
+  if (contentType.isSome() &&
+      !strings::startsWith(
+          contentType.get(),
+          "application/vnd.docker.distribution.manifest.v1")) {
+    return Failure(
+        "Unsupported manifest MIME type: " + contentType.get());
+  }
 
   Try<spec::v2::ImageManifest> manifest = spec::v2::parse(response.body);
   if (manifest.isError()) {

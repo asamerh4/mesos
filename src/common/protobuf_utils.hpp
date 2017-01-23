@@ -82,7 +82,7 @@ StatusUpdate createStatusUpdate(
     const Option<bool>& healthy = None(),
     const Option<Labels>& labels = None(),
     const Option<ContainerStatus>& containerStatus = None(),
-    const Option<TimeInfo> unreachableTime = None());
+    const Option<TimeInfo>& unreachableTime = None());
 
 
 StatusUpdate createStatusUpdate(
@@ -119,7 +119,33 @@ TimeInfo getCurrentTime();
 // Helper function that creates a `FileInfo` from data returned by `stat()`.
 FileInfo createFileInfo(const std::string& path, const struct stat& s);
 
+
+ContainerID getRootContainerId(const ContainerID& containerId);
+
 namespace slave {
+
+struct Capabilities
+{
+  Capabilities() = default;
+
+  template <typename Iterable>
+  Capabilities(const Iterable& capabilities)
+  {
+    foreach (const SlaveInfo::Capability& capability, capabilities) {
+      switch (capability.type()) {
+        case SlaveInfo::Capability::UNKNOWN:
+          break;
+        case SlaveInfo::Capability::MULTI_ROLE:
+          multiRole = true;
+          break;
+      }
+    }
+  }
+
+  // See mesos.proto for the meaning of agent capabilities.
+  bool multiRole = false;
+};
+
 
 mesos::slave::ContainerLimitation createContainerLimitation(
     const Resources& resources,

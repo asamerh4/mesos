@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "launcher/executor.hpp"
+
 #include <signal.h>
 #include <stdio.h>
 
@@ -27,7 +29,6 @@
 #include <vector>
 
 #include <mesos/mesos.hpp>
-
 #include <mesos/type_utils.hpp>
 
 #include <process/clock.hpp>
@@ -42,10 +43,6 @@
 #include <process/reap.hpp>
 #include <process/time.hpp>
 #include <process/timer.hpp>
-
-#ifdef __WINDOWS__
-#include <process/windows/winsock.hpp> // WSAStartup code.
-#endif // __WINDOWS__
 
 #include <stout/duration.hpp>
 #include <stout/flags.hpp>
@@ -64,19 +61,17 @@
 #include <stout/os/kill.hpp>
 #include <stout/os/killtree.hpp>
 
+#include "checks/health_checker.hpp"
+
 #include "common/http.hpp"
 #include "common/parse.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/status_utils.hpp"
 
-#include "internal/devolve.hpp"
-#include "internal/evolve.hpp"
-
 #include "executor/v0_v1executor.hpp"
 
-#include "health-check/health_checker.hpp"
-
-#include "launcher/executor.hpp"
+#include "internal/devolve.hpp"
+#include "internal/evolve.hpp"
 
 #include "logging/logging.hpp"
 
@@ -433,8 +428,8 @@ protected:
         namespaces.push_back("mnt");
       }
 
-      Try<Owned<health::HealthChecker>> _checker =
-        health::HealthChecker::create(
+      Try<Owned<checks::HealthChecker>> _checker =
+        checks::HealthChecker::create(
             task->health_check(),
             launcherDir,
             defer(self(), &Self::taskHealthUpdated, lambda::_1),
@@ -639,9 +634,10 @@ private:
       message = "Failed to get exit status for Command";
     } else {
       int status = status_.get().get();
-      CHECK(WIFEXITED(status) || WIFSIGNALED(status)) << status;
+      CHECK(WIFEXITED(status) || WIFSIGNALED(status))
+        << "Unexpected wait status " << status;
 
-      if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+      if (WSUCCEEDED(status)) {
         taskState = TASK_FINISHED;
       } else if (killed) {
         // Send TASK_KILLED if the task was killed as a result of
@@ -801,7 +797,7 @@ private:
   Owned<MesosBase> mesos;
   LinkedHashMap<UUID, Call::Update> updates; // Unacknowledged updates.
   Option<TaskInfo> task; // Unacknowledged task.
-  Owned<health::HealthChecker> checker;
+  Owned<checks::HealthChecker> checker;
 };
 
 } // namespace internal {
@@ -866,9 +862,7 @@ int main(int argc, char** argv)
   mesos::FrameworkID frameworkId;
   mesos::ExecutorID executorId;
 
-#ifdef __WINDOWS__
-  process::Winsock winsock;
-#endif
+  process::initialize();
 
   // Load flags from command line.
   Try<flags::Warnings> load = flags.load(None(), &argc, &argv);
@@ -936,6 +930,8 @@ int main(int argc, char** argv)
 
   process::spawn(executor.get());
   process::wait(executor.get());
+  executor.reset();
 
+  process::finalize(true);
   return EXIT_SUCCESS;
 }

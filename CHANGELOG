@@ -29,6 +29,7 @@ Release Notes - Mesos - Version 1.1.1 (WIP)
 All Issues:
 ** Bug
   * [MESOS-6002] - The whiteout file cannot be removed correctly using aufs backend.
+  * [MESOS-6010] - Docker registry puller shows decode error "No response decoded".
   * [MESOS-6142] - Frameworks may RESERVE for an arbitrary role.
   * [MESOS-6360] - The handling of whiteout files in provisioner is not correct.
   * [MESOS-6411] - Add documentation for CNI port-mapper plugin.
@@ -39,6 +40,7 @@ All Issues:
   * [MESOS-6676] - Always re-link with scheduler during re-registration.
   * [MESOS-6848] - The default executor does not exit if a single task pod fails.
   * [MESOS-6852] - Nested container's launch command is not set correctly in docker/runtime isolator.
+  * [MESOS-6917] - Segfault when the executor sets an invalid UUID when sending a status update.
 
 
 Release Notes - Mesos - Version 1.1.0
@@ -461,6 +463,7 @@ All Issues:
     * [MESOS-6142] - Frameworks may RESERVE for an arbitrary role.
     * [MESOS-6621] - SSL downgrade path will CHECK-fail when using both temporary and persistent sockets
     * [MESOS-6676] - Always re-link with scheduler during re-registration.
+    * [MESOS-6917] - Segfault when the executor sets an invalid UUID when sending a status update.
 
 
 Release Notes - Mesos - Version 1.0.2

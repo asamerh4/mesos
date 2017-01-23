@@ -37,6 +37,7 @@
 #include <mesos/slave/containerizer.hpp>
 
 #include "common/parse.hpp"
+#include "common/status_utils.hpp"
 
 #ifdef __linux__
 #include "linux/capabilities.hpp"
@@ -393,9 +394,11 @@ int MesosContainerizerLaunch::execute()
       status = os::spawn(command.value(), args);
     }
 
-    if (!WIFEXITED(status) || (WEXITSTATUS(status) != 0)) {
+    if (!WSUCCEEDED(status)) {
       cerr << "Failed to execute pre-exec command '"
-           << JSON::protobuf(command) << "'" << endl;
+           << JSON::protobuf(command) << "': "
+           << WSTRINGIFY(status)
+           << endl;
       exitWithStatus(EXIT_FAILURE);
     }
   }
@@ -674,8 +677,7 @@ int MesosContainerizerLaunch::execute()
     }
 
     if (!environment.contains("PATH")) {
-      environment["PATH"] =
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+      environment["PATH"] = os::host_default_path();
     }
 
     envp = os::raw::Envp(environment);

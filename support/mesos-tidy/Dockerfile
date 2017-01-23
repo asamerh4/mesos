@@ -34,52 +34,35 @@ RUN \
   git clone --depth 1 -b mesos_39 http://github.com/mesos/clang.git /tmp/llvm/tools/clang && \
   git clone --depth 1 -b mesos_39 http://github.com/mesos/clang-tools-extra.git /tmp/llvm/tools/clang/tools/extra && \
   \
-  cmake /tmp/llvm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/ && \
-  make -j $(nproc) install && \
+  cmake /tmp/llvm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt && \
+  cmake --build tools/clang/lib/Headers --target install -- -j $(nproc) && \
+  cmake --build tools/clang/tools/extra/clang-tidy --target install -- -j $(nproc) && \
   \
   cd / && \
   rm -rf /tmp/llvm && \
   rm -rf /tmp/build
 
-# Install Bear.
-RUN apt-get install -qy \
-  curl && \
-  apt-get clean
-
-RUN \
-  curl -k -O https://codeload.github.com/rizsotto/Bear/tar.gz/2.2.0 && \
-  tar xzf 2.2.0 && \
-  rm 2.2.0 && \
-  cd Bear-2.2.0/ && \
-  cmake . -DCMAKE_INSTALL_PREFIX=/opt && \
-  make -j $(nproc) install && \
-  \
-  cd / && \
-  rm -rf Bear-2.2.0
-
 ENV PATH /opt/bin:$PATH
 
 # Install Mesos dependencies
+# TODO(mpark): Remove `libssl-dev` from this list once `MESOS-6942` is resolved.
 RUN apt-get install -qy \
   autoconf \
-  jq \
   libapr1-dev \
   libcurl4-nss-dev \
-  libev-dev \
-  libevent-dev \
   libsasl2-dev \
   libsasl2-modules \
   libssl-dev \
   libsvn-dev \
   libtool \
-  maven \
-  openjdk-8-jdk \
   zlib1g-dev && \
   apt-get clean
 
-# Install parallel for clang-tidy invocation.
+# Install `jq` and `parallel` for `clang-tidy` invocation.
 RUN apt-get install -qy \
-  parallel
+  jq \
+  parallel && \
+  apt-get clean
 
 # Wire up the script which performs the actual work.
 WORKDIR /BUILD

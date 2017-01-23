@@ -54,6 +54,7 @@
 #include <stout/strings.hpp>
 #include <stout/synchronized.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 
 #include "decoder.hpp"
 #include "encoder.hpp"
@@ -762,25 +763,24 @@ Try<vector<Response>> decodeResponses(const string& s)
 {
   ResponseDecoder decoder;
 
-  deque<http::Response*> responses = decoder.decode(s.data(), s.length());
+  vector<Response> result;
 
-  if (decoder.failed()) {
+  auto appendResult = [&result](const deque<http::Response*>& responses) {
     foreach (Response* response, responses) {
+      result.push_back(*response);
       delete response;
     }
+  };
 
+  appendResult(decoder.decode(s.data(), s.length()));
+  appendResult(decoder.decode("", 0));
+
+  if (decoder.failed()) {
     return Error("Decoding failed");
   }
 
-  if (responses.empty()) {
+  if (result.empty()) {
     return Error("No response decoded");
-  }
-
-  vector<Response> result;
-
-  foreach (Response* response, responses) {
-    result.push_back(*response);
-    delete response;
   }
 
   return result;
@@ -1407,6 +1407,7 @@ Future<Nothing> send(network::Socket socket, Encoder* encoder)
             return socket.sendfile(fd, offset, *size);
           }
         }
+        UNREACHABLE();
       },
       [=](size_t length) -> ControlFlow<Nothing> {
         // Update the encoder with the amount sent.
@@ -1639,6 +1640,7 @@ Future<Nothing> send(
                 case Response::BODY:
                 case Response::NONE: return send(socket, response, request);
               }
+              UNREACHABLE();
             }()
             .then([=]() -> ControlFlow<Nothing> {
               // Persist the connection if the request expects it and

@@ -1360,11 +1360,7 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
         inspect.discard();
         promise->fail("Failed to obtain exit status of container");
       } else {
-        bool exitedCleanly =
-          WIFEXITED(run->get()) &&
-          WEXITSTATUS(run->get()) == 0;
-
-        if (!exitedCleanly) {
+        if (!WSUCCEEDED(run->get())) {
           inspect.discard();
           promise->fail("Container " + WSTRINGIFY(run->get()));
         }
@@ -1405,8 +1401,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
   }
 
   if (environment.count("PATH") == 0) {
-    environment["PATH"] =
-      "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    environment["PATH"] = os::host_default_path();
   }
 
   vector<string> argv;

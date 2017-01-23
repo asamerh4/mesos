@@ -39,7 +39,7 @@
 
 namespace mesos {
 namespace internal {
-namespace health {
+namespace checks {
 
 // Forward declarations.
 class HealthCheckerProcess;
@@ -155,11 +155,14 @@ private:
 
 namespace validation {
 
+// TODO(alexr): A better place for this function would be something like
+// "mesos_validation.cpp", since it validates API protobuf which is not
+// solely related to the health checking library.
 Option<Error> healthCheck(const HealthCheck& check);
 
 } // namespace validation {
 
-} // namespace health {
+} // namespace checks {
 } // namespace internal {
 } // namespace mesos {
 
