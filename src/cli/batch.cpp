@@ -926,6 +926,9 @@ int main(int argc, char** argv)
     cout << "Unsubscribed batch framework: "
          << frameworkInfo.name()
          << endl;
+    /* Use curl master.mesos:5050/frameworks |
+    jq --compact-output '.[] | .[] | select(.id=="ID")' for JSON stats */
+
     // Report failed tasks if any.
     foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
       cerr << "**failed task-->" << failedTaskId << " with command: '";
