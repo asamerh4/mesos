@@ -796,18 +796,30 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  mesos::internal::docker::DockerExecutor executor(
-      docker.get(),
-      flags.container.get(),
-      flags.sandbox_directory.get(),
-      flags.mapped_directory.get(),
-      shutdownGracePeriod,
-      flags.launcher_dir.get(),
-      taskEnvironment);
+  Owned<mesos::internal::docker::DockerExecutor> executor(
+      new mesos::internal::docker::DockerExecutor(
+          docker.get(),
+          flags.container.get(),
+          flags.sandbox_directory.get(),
+          flags.mapped_directory.get(),
+          shutdownGracePeriod,
+          flags.launcher_dir.get(),
+          taskEnvironment));
 
-  mesos::MesosExecutorDriver driver(&executor);
-  bool success = driver.run() == mesos::DRIVER_STOPPED;
+  Owned<mesos::MesosExecutorDriver> driver(
+      new mesos::MesosExecutorDriver(executor.get()));
 
+  bool success = driver->run() == mesos::DRIVER_STOPPED;
+
+  // NOTE: We need to delete the executor and driver before we call
+  // `process::finalize` because the executor/driver will try to terminate
+  // and wait on a libprocess actor in their destructor.
+  driver.reset();
+  executor.reset();
+
+  // NOTE: We need to finalize libprocess, on Windows especially,
+  // as any binary that uses the networking stack on Windows must
+  // also clean up the networking stack before exiting.
   process::finalize(true);
   return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

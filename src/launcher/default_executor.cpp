@@ -1140,7 +1140,14 @@ int main(int argc, char** argv)
   process::spawn(executor.get());
   process::wait(executor.get());
 
-  process::finalize(true);
+  // NOTE: We need to delete the executor before we call `process::finalize`
+  // because the executor will try to terminate and wait on a libprocess
+  // actor in the executor's destructor.
+  executor.reset();
 
+  // NOTE: We need to finalize libprocess, on Windows especially,
+  // as any binary that uses the networking stack on Windows must
+  // also clean up the networking stack before exiting.
+  process::finalize(true);
   return EXIT_SUCCESS;
 }

@@ -21,6 +21,7 @@
 
 #include <list>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -59,8 +60,10 @@
 #include <stout/hashset.hpp>
 #include <stout/linkedhashmap.hpp>
 #include <stout/multihashmap.hpp>
+#include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/recordio.hpp>
+#include <stout/try.hpp>
 #include <stout/uuid.hpp>
 
 #include "common/http.hpp"
@@ -116,180 +119,53 @@ struct Slave
         const process::UPID& _pid,
         const MachineID& _machineId,
         const std::string& _version,
+        const std::vector<SlaveInfo::Capability>& _capabilites,
         const process::Time& _registeredTime,
         const Resources& _checkpointedResources,
         const std::vector<ExecutorInfo> executorInfos =
           std::vector<ExecutorInfo>(),
         const std::vector<Task> tasks =
-          std::vector<Task>())
-    : master(_master),
-      id(_info.id()),
-      info(_info),
-      machineId(_machineId),
-      pid(_pid),
-      version(_version),
-      registeredTime(_registeredTime),
-      connected(true),
-      active(true),
-      checkpointedResources(_checkpointedResources),
-      observer(nullptr),
-      capabilities(_info.capabilities())
-  {
-    CHECK(_info.has_id());
+          std::vector<Task>());
 
-    Try<Resources> resources = applyCheckpointedResources(
-        info.resources(),
-        _checkpointedResources);
+  ~Slave();
 
-    // NOTE: This should be validated during slave recovery.
-    CHECK_SOME(resources);
-    totalResources = resources.get();
-
-    foreach (const ExecutorInfo& executorInfo, executorInfos) {
-      CHECK(executorInfo.has_framework_id());
-      addExecutor(executorInfo.framework_id(), executorInfo);
-    }
-
-    foreach (const Task& task, tasks) {
-      addTask(new Task(task));
-    }
-  }
-
-  ~Slave()
-  {
-    if (reregistrationTimer.isSome()) {
-      process::Clock::cancel(reregistrationTimer.get());
-    }
-  }
-
-  Task* getTask(const FrameworkID& frameworkId, const TaskID& taskId)
-  {
-    if (tasks.contains(frameworkId) && tasks[frameworkId].contains(taskId)) {
-      return tasks[frameworkId][taskId];
-    }
-    return nullptr;
-  }
+  Task* getTask(
+      const FrameworkID& frameworkId,
+      const TaskID& taskId) const;
 
   void addTask(Task* task);
 
-  // Notification of task termination, for resource accounting.
+  // Update slave to recover the resources that were previously
+  // being used by `task`.
+  //
   // TODO(bmahler): This is a hack for performance. We need to
   // maintain resource counters because computing task resources
   // functionally for all tasks is expensive, for now.
-  void taskTerminated(Task* task)
-  {
-    const TaskID& taskId = task->task_id();
-    const FrameworkID& frameworkId = task->framework_id();
+  void recoverResources(Task* task);
 
-    CHECK(protobuf::isTerminalState(task->state()));
-    CHECK(tasks.at(frameworkId).contains(taskId))
-      << "Unknown task " << taskId << " of framework " << frameworkId;
+  void removeTask(Task* task);
 
-    usedResources[frameworkId] -= task->resources();
-    if (usedResources[frameworkId].empty()) {
-      usedResources.erase(frameworkId);
-    }
-  }
+  void addOffer(Offer* offer);
 
-  void removeTask(Task* task)
-  {
-    const TaskID& taskId = task->task_id();
-    const FrameworkID& frameworkId = task->framework_id();
+  void removeOffer(Offer* offer);
 
-    CHECK(tasks.at(frameworkId).contains(taskId))
-      << "Unknown task " << taskId << " of framework " << frameworkId;
+  void addInverseOffer(InverseOffer* inverseOffer);
 
-    if (!protobuf::isTerminalState(task->state())) {
-      usedResources[frameworkId] -= task->resources();
-      if (usedResources[frameworkId].empty()) {
-        usedResources.erase(frameworkId);
-      }
-    }
+  void removeInverseOffer(InverseOffer* inverseOffer);
 
-    tasks[frameworkId].erase(taskId);
-    if (tasks[frameworkId].empty()) {
-      tasks.erase(frameworkId);
-    }
+  bool hasExecutor(
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId) const;
 
-    killedTasks.remove(frameworkId, taskId);
-  }
+  void addExecutor(
+      const FrameworkID& frameworkId,
+      const ExecutorInfo& executorInfo);
 
-  void addOffer(Offer* offer)
-  {
-    CHECK(!offers.contains(offer)) << "Duplicate offer " << offer->id();
+  void removeExecutor(
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId);
 
-    offers.insert(offer);
-    offeredResources += offer->resources();
-  }
-
-  void removeOffer(Offer* offer)
-  {
-    CHECK(offers.contains(offer)) << "Unknown offer " << offer->id();
-
-    offeredResources -= offer->resources();
-    offers.erase(offer);
-  }
-
-  void addInverseOffer(InverseOffer* inverseOffer)
-  {
-    CHECK(!inverseOffers.contains(inverseOffer))
-      << "Duplicate inverse offer " << inverseOffer->id();
-
-    inverseOffers.insert(inverseOffer);
-  }
-
-  void removeInverseOffer(InverseOffer* inverseOffer)
-  {
-    CHECK(inverseOffers.contains(inverseOffer))
-      << "Unknown inverse offer " << inverseOffer->id();
-
-    inverseOffers.erase(inverseOffer);
-  }
-
-  bool hasExecutor(const FrameworkID& frameworkId,
-                   const ExecutorID& executorId) const
-  {
-    return executors.contains(frameworkId) &&
-      executors.get(frameworkId).get().contains(executorId);
-  }
-
-  void addExecutor(const FrameworkID& frameworkId,
-                   const ExecutorInfo& executorInfo)
-  {
-    CHECK(!hasExecutor(frameworkId, executorInfo.executor_id()))
-      << "Duplicate executor '" << executorInfo.executor_id()
-      << "' of framework " << frameworkId;
-
-    executors[frameworkId][executorInfo.executor_id()] = executorInfo;
-    usedResources[frameworkId] += executorInfo.resources();
-  }
-
-  void removeExecutor(const FrameworkID& frameworkId,
-                      const ExecutorID& executorId)
-  {
-    CHECK(hasExecutor(frameworkId, executorId))
-      << "Unknown executor '" << executorId << "' of framework " << frameworkId;
-
-    usedResources[frameworkId] -=
-      executors[frameworkId][executorId].resources();
-    if (usedResources[frameworkId].empty()) {
-      usedResources.erase(frameworkId);
-    }
-
-    executors[frameworkId].erase(executorId);
-    if (executors[frameworkId].empty()) {
-      executors.erase(frameworkId);
-    }
-  }
-
-  void apply(const Offer::Operation& operation)
-  {
-    Try<Resources> resources = totalResources.apply(operation);
-    CHECK_SOME(resources);
-
-    totalResources = resources.get();
-    checkpointedResources = totalResources.filter(needCheckpointing);
-  }
+  void apply(const Offer::Operation& operation);
 
   Master* const master;
   const SlaveID id;
@@ -301,6 +177,9 @@ struct Slave
 
   // TODO(bmahler): Use stout's Version when it can parse labels, etc.
   std::string version;
+
+  // Agent capabilities.
+  protobuf::slave::Capabilities capabilities;
 
   process::Time registeredTime;
   Option<process::Time> reregisteredTime;
@@ -366,9 +245,6 @@ struct Slave
   Resources totalResources;
 
   SlaveObserver* observer;
-
-  // Agent capabilities.
-  protobuf::slave::Capabilities capabilities;
 
 private:
   Slave(const Slave&);              // No copying.
@@ -504,7 +380,8 @@ public:
       const process::UPID& from,
       const SlaveInfo& slaveInfo,
       const std::vector<Resource>& checkpointedResources,
-      const std::string& version);
+      const std::string& version,
+      const std::vector<SlaveInfo::Capability>& agentCapabilities);
 
   void reregisterSlave(
       const process::UPID& from,
@@ -514,7 +391,8 @@ public:
       const std::vector<Task>& tasks,
       const std::vector<FrameworkInfo>& frameworks,
       const std::vector<Archive::Framework>& completedFrameworks,
-      const std::string& version);
+      const std::string& version,
+      const std::vector<SlaveInfo::Capability>& agentCapabilities);
 
   void unregisterSlave(
       const process::UPID& from,
@@ -629,6 +507,7 @@ protected:
       const process::UPID& pid,
       const std::vector<Resource>& checkpointedResources,
       const std::string& version,
+      const std::vector<SlaveInfo::Capability>& agentCapabilities,
       const process::Future<bool>& admit);
 
   void _reregisterSlave(
@@ -640,6 +519,7 @@ protected:
       const std::vector<FrameworkInfo>& frameworks,
       const std::vector<Archive::Framework>& completedFrameworks,
       const std::string& version,
+      const std::vector<SlaveInfo::Capability>& agentCapabilities,
       const process::Future<bool>& readmit);
 
   void __reregisterSlave(
@@ -689,7 +569,7 @@ protected:
   // activate it. This happens at most once after master failover, the
   // first time that the framework re-registers with the new master.
   // Exactly one of `newPid` or `http` must be provided.
-  void activateRecoveredFramework(
+  Try<Nothing> activateRecoveredFramework(
       Framework* framework,
       const FrameworkInfo& frameworkInfo,
       const Option<process::UPID>& pid,
@@ -714,7 +594,7 @@ protected:
   void removeFramework(Slave* slave, Framework* framework);
 
   void disconnect(Framework* framework);
-  void deactivate(Framework* framework);
+  void deactivate(Framework* framework, bool rescind);
 
   void disconnect(Slave* slave);
   void deactivate(Slave* slave);
@@ -1033,6 +913,22 @@ private:
    * (and access control is done via ACLs).
    */
   bool isWhitelistedRole(const std::string& name);
+
+  /**
+   * Indicates whether a task in the given state can safely be removed
+   * from the master's in-memory state. When a task becomes removable,
+   * it is erased from the master's primary task data structures; a
+   * limited number of such tasks are kept as a cache (see
+   * `framework.unreachableTasks` and `framework.completedTasks`).
+   */
+  static bool isRemovable(const TaskState& state)
+  {
+    if (state == TASK_UNREACHABLE) {
+      return true;
+    }
+
+    return protobuf::isTerminalState(state);
+  }
 
   /**
    * Inner class used to namespace the handling of quota requests.
@@ -1912,6 +1808,7 @@ private:
   double _slaves_disconnected();
   double _slaves_active();
   double _slaves_inactive();
+  double _slaves_unreachable();
 
   double _frameworks_connected();
   double _frameworks_disconnected();
@@ -1941,6 +1838,7 @@ private:
   double _tasks_staging();
   double _tasks_starting();
   double _tasks_running();
+  double _tasks_unreachable();
   double _tasks_killing();
 
   double _resources_total(const std::string& name);
@@ -2228,19 +2126,22 @@ struct Framework
 {
   enum State
   {
-    // Framework is currently connected. Note that frameworks must
-    // also be `active` to be eligible to receive offers.
-    CONNECTED,
+    // Framework has never connected to this master. This implies the
+    // master failed over and the framework has not yet re-registered,
+    // but some framework state has been recovered from re-registering
+    // agents that are running tasks for the framework.
+    RECOVERED,
 
     // Framework was previously connected to this master. A framework
     // becomes disconnected when there is a socket error.
     DISCONNECTED,
 
-    // Framework has never connected to this master. This implies the
-    // master failed over and the framework has not yet re-registered,
-    // but some framework state has been recovered from re-registering
-    // agents that are running tasks for the framework.
-    RECOVERED
+    // The framework is connected but not active.
+    INACTIVE,
+
+    // Framework is connected and eligible to receive offers. No
+    // offers will be made to frameworks that are not active.
+    ACTIVE
   };
 
   Framework(Master* const _master,
@@ -2252,11 +2153,11 @@ struct Framework
       info(_info),
       capabilities(_info.capabilities()),
       pid(_pid),
-      state(CONNECTED),
-      active(true),
+      state(ACTIVE),
       registeredTime(time),
       reregisteredTime(time),
-      completedTasks(masterFlags.max_completed_tasks_per_framework) {}
+      completedTasks(masterFlags.max_completed_tasks_per_framework),
+      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework) {}
 
   Framework(Master* const _master,
             const Flags& masterFlags,
@@ -2267,11 +2168,11 @@ struct Framework
       info(_info),
       capabilities(_info.capabilities()),
       http(_http),
-      state(CONNECTED),
-      active(true),
+      state(ACTIVE),
       registeredTime(time),
       reregisteredTime(time),
-      completedTasks(masterFlags.max_completed_tasks_per_framework) {}
+      completedTasks(masterFlags.max_completed_tasks_per_framework),
+      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework) {}
 
   Framework(Master* const _master,
             const Flags& masterFlags,
@@ -2280,8 +2181,8 @@ struct Framework
       info(_info),
       capabilities(_info.capabilities()),
       state(RECOVERED),
-      active(false),
-      completedTasks(masterFlags.max_completed_tasks_per_framework) {}
+      completedTasks(masterFlags.max_completed_tasks_per_framework),
+      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework) {}
 
   ~Framework()
   {
@@ -2307,19 +2208,21 @@ struct Framework
 
     tasks[task->task_id()] = task;
 
-    if (!protobuf::isTerminalState(task->state())) {
+    if (!Master::isRemovable(task->state())) {
       totalUsedResources += task->resources();
       usedResources[task->slave_id()] += task->resources();
     }
   }
 
-  // Notification of task termination, for resource accounting.
+  // Update framework to recover the resources that were previously
+  // being used by `task`.
+  //
   // TODO(bmahler): This is a hack for performance. We need to
   // maintain resource counters because computing task resources
   // functionally for all tasks is expensive, for now.
-  void taskTerminated(Task* task)
+  void recoverResources(Task* task)
   {
-    CHECK(protobuf::isTerminalState(task->state()));
+    CHECK(Master::isRemovable(task->state()));
     CHECK(tasks.contains(task->task_id()))
       << "Unknown task " << task->task_id()
       << " of framework " << task->framework_id();
@@ -2361,13 +2264,22 @@ struct Framework
     completedTasks.push_back(process::Owned<Task>(new Task(task)));
   }
 
+  void addUnreachableTask(const Task& task)
+  {
+    CHECK(protobuf::frameworkHasCapability(
+              info, FrameworkInfo::Capability::PARTITION_AWARE));
+
+    // TODO(adam-mesos): Check if unreachable task already exists.
+    unreachableTasks.set(task.task_id(), process::Owned<Task>(new Task(task)));
+  }
+
   void removeTask(Task* task)
   {
     CHECK(tasks.contains(task->task_id()))
       << "Unknown task " << task->task_id()
       << " of framework " << task->framework_id();
 
-    if (!protobuf::isTerminalState(task->state())) {
+    if (!Master::isRemovable(task->state())) {
       totalUsedResources -= task->resources();
       usedResources[task->slave_id()] -= task->resources();
       if (usedResources[task->slave_id()].empty()) {
@@ -2375,7 +2287,11 @@ struct Framework
       }
     }
 
-    addCompletedTask(*task);
+    if (task->state() == TASK_UNREACHABLE) {
+      addUnreachableTask(*task);
+    } else {
+      addCompletedTask(*task);
+    }
 
     tasks.erase(task->task_id());
   }
@@ -2461,14 +2377,53 @@ struct Framework
   // Update fields in 'info' using those in 'source'. Currently this
   // only updates 'name', 'failover_timeout', 'hostname', 'webui_url',
   // 'capabilities', and 'labels'.
-  void updateFrameworkInfo(const FrameworkInfo& source)
+  Try<Nothing> updateFrameworkInfo(const FrameworkInfo& source)
   {
-    // TODO(jmlvanre): We can't check 'FrameworkInfo.id' yet because
-    // of MESOS-2559. Once this is fixed we can 'CHECK' that we only
-    // merge 'info' from the same framework 'id'.
+    // We only merge 'info' from the same framework 'id'.
+    CHECK_EQ(info.id(), source.id());
 
     // TODO(jmlvanre): Merge other fields as per design doc in
     // MESOS-703.
+
+    // We currently do not allow frameworks to add or remove roles. We
+    // do however allow frameworks to opt in and out of `MULTI_ROLE`
+    // capability, given that the `role` and `roles` field contain the
+    // same number of roles.
+    if (protobuf::frameworkHasCapability(
+            source, FrameworkInfo::Capability::MULTI_ROLE) ||
+        protobuf::frameworkHasCapability(
+            info, FrameworkInfo::Capability::MULTI_ROLE)) {
+      // Two `roles` sets are equivalent if they contain the same
+      // elements. A `role` `*` is not equivalent to an empty `roles`
+      // set, but to the set `{*}`. Since we might be dealing with a
+      // framework upgrading to `MULTI_ROLE` capability or dropping
+      // it, we need to examine either `role` or `roles` in order to
+      // determine the roles a framework is subscribed to.
+      const std::set<std::string> newRoles =
+        protobuf::frameworkHasCapability(
+            source, FrameworkInfo::Capability::MULTI_ROLE)
+          ? std::set<std::string>(
+                {source.roles().begin(), source.roles().end()})
+          : std::set<std::string>({source.role()});
+
+      const std::set<std::string> oldRoles =
+        protobuf::frameworkHasCapability(
+            info, FrameworkInfo::Capability::MULTI_ROLE)
+          ? std::set<std::string>({info.roles().begin(), info.roles().end()})
+          : std::set<std::string>({info.role()});
+
+      if (oldRoles != newRoles) {
+        return Error(
+            "Frameworks cannot change their roles: expected '" +
+            stringify(oldRoles) + "', but got '" + stringify(newRoles) + "'");
+      }
+    } else {
+      if (source.role() != info.role()) {
+        LOG(WARNING) << "Cannot update FrameworkInfo.role to '" << source.role()
+                     << "' for framework " << id() << ". Check MESOS-703";
+      }
+    }
+
 
     if (source.user() != info.user()) {
       LOG(WARNING) << "Cannot update FrameworkInfo.user to '" << source.user()
@@ -2487,11 +2442,6 @@ struct Framework
       LOG(WARNING) << "Cannot update FrameworkInfo.checkpoint to '"
                    << stringify(source.checkpoint()) << "' for framework "
                    << id() << ". Check MESOS-703";
-    }
-
-    if (source.role() != info.role()) {
-      LOG(WARNING) << "Cannot update FrameworkInfo.role to '" << source.role()
-                   << "' for framework " << id() << ". Check MESOS-703";
     }
 
     if (source.has_hostname()) {
@@ -2523,6 +2473,8 @@ struct Framework
     } else {
       info.clear_labels();
     }
+
+    return Nothing();
   }
 
   void updateConnection(const process::UPID& newPid)
@@ -2591,8 +2543,8 @@ struct Framework
     process::spawn(heartbeater.get().get());
   }
 
-  bool connected() const { return state == CONNECTED; }
-
+  bool active() const    { return state == ACTIVE; }
+  bool connected() const { return state == ACTIVE || state == INACTIVE; }
   bool recovered() const { return state == RECOVERED; }
 
   Master* const master;
@@ -2610,14 +2562,6 @@ struct Framework
 
   State state;
 
-  // Framework becomes deactivated when it is disconnected or
-  // the master receives a DeactivateFrameworkMessage.
-  // No offers will be made to a deactivated framework.
-  //
-  // TODO(neilc): Consider replacing this with an additional
-  // `state` enumeration value (MESOS-6719).
-  bool active;
-
   process::Time registeredTime;
   process::Time reregisteredTime;
   process::Time unregisteredTime;
@@ -2630,8 +2574,19 @@ struct Framework
 
   // Tasks launched by this framework that have reached a terminal
   // state and have had all their updates acknowledged. We only keep a
-  // fixed-size cache to avoid consuming too much memory.
+  // fixed-size cache to avoid consuming too much memory. We use
+  // boost::circular_buffer rather than BoundedHashMap because there
+  // can be multiple completed tasks with the same task ID.
+  //
+  // NOTE: When an agent is marked unreachable, non-partition-aware
+  // tasks are marked TASK_LOST and stored here; partition-aware tasks
+  // are marked TASK_UNREACHABLE and stored in `unreachableTasks`.
   boost::circular_buffer<process::Owned<Task>> completedTasks;
+
+  // Partition-aware tasks running on agents that have been marked
+  // unreachable. We only keep a fixed-size cache to avoid consuming
+  // too much memory.
+  BoundedHashMap<TaskID, process::Owned<Task>> unreachableTasks;
 
   hashset<Offer*> offers; // Active offers for framework.
 

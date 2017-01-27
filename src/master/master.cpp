@@ -793,7 +793,8 @@ void Master::initialize()
       &Master::registerSlave,
       &RegisterSlaveMessage::slave,
       &RegisterSlaveMessage::checkpointed_resources,
-      &RegisterSlaveMessage::version);
+      &RegisterSlaveMessage::version,
+      &RegisterSlaveMessage::agent_capabilities);
 
   install<ReregisterSlaveMessage>(
       &Master::reregisterSlave,
@@ -803,7 +804,8 @@ void Master::initialize()
       &ReregisterSlaveMessage::tasks,
       &ReregisterSlaveMessage::frameworks,
       &ReregisterSlaveMessage::completed_frameworks,
-      &ReregisterSlaveMessage::version);
+      &ReregisterSlaveMessage::version,
+      &ReregisterSlaveMessage::agent_capabilities);
 
   install<UnregisterSlaveMessage>(
       &Master::unregisterSlave,
@@ -1378,7 +1380,9 @@ void Master::_exited(Framework* framework)
   LOG(INFO) << "Framework " << *framework << " disconnected";
 
   // Disconnect the framework.
-  disconnect(framework);
+  if (framework->connected()) {
+    disconnect(framework);
+  }
 
   // We can assume framework's failover_timeout is valid
   // because it has been validated in framework subscription.
@@ -2577,7 +2581,20 @@ void Master::_subscribe(
     // it may or may not currently be connected.
     LOG(INFO) << "Updating info for framework " << framework->id();
 
-    framework->updateFrameworkInfo(frameworkInfo);
+    Try<Nothing> updateFrameworkInfo =
+      framework->updateFrameworkInfo(frameworkInfo);
+
+    if (updateFrameworkInfo.isError()) {
+      LOG(INFO) << "Could not update FrameworkInfo of framework '"
+                << frameworkInfo.name() << "': " << updateFrameworkInfo.error();
+
+      FrameworkErrorMessage message;
+      message.set_message(updateFrameworkInfo.error());
+      http.send(message);
+      http.close();
+      return;
+    }
+
     allocator->updateFramework(framework->id(), framework->info);
 
     framework->reregisteredTime = Clock::now();
@@ -2586,7 +2603,19 @@ void Master::_subscribe(
     failoverFramework(framework, http);
   } else {
     // The framework has not yet re-registered after master failover.
-    activateRecoveredFramework(framework, frameworkInfo, None(), http);
+    Try<Nothing> activate =
+      activateRecoveredFramework(framework, frameworkInfo, None(), http);
+
+    if (activate.isError()) {
+      LOG(INFO) << "Could not update FrameworkInfo of framework '"
+                << frameworkInfo.name() << "': " << activate.error();
+
+      FrameworkErrorMessage message;
+      message.set_message(activate.error());
+      http.send(message);
+      http.close();
+      return;
+    }
   }
 
   // Broadcast the new framework pid to all the slaves. We have to
@@ -2860,7 +2889,19 @@ void Master::_subscribe(
     // re-registration.
     LOG(INFO) << "Updating info for framework " << framework->id();
 
-    framework->updateFrameworkInfo(frameworkInfo);
+    Try<Nothing> updateFrameworkInfo =
+      framework->updateFrameworkInfo(frameworkInfo);
+
+    if (updateFrameworkInfo.isError()) {
+      LOG(INFO) << "Could not update frameworkInfo of framework '" << *framework
+                << "': " << updateFrameworkInfo.error();
+
+      FrameworkErrorMessage message;
+      message.set_message(updateFrameworkInfo.error());
+      send(from, message);
+      return;
+    }
+
     allocator->updateFramework(framework->id(), framework->info);
 
     framework->reregisteredTime = Clock::now();
@@ -2904,16 +2945,15 @@ void Master::_subscribe(
         removeInverseOffer(inverseOffer, true); // Rescind.
       }
 
-      // Relink to the framework and mark it connected. Relinking
-      // might be necessary if the framework link previously broke.
+      // Relink to the framework. This might be necessary if the
+      // framework link previously broke.
       link(framework->pid.get());
-      framework->state = Framework::State::CONNECTED;
 
       // Reactivate the framework.
       // NOTE: We do this after recovering resources (above) so that
       // the allocator has the correct view of the framework's share.
-      if (!framework->active) {
-        framework->active = true;
+      if (!framework->active()) {
+        framework->state = Framework::State::ACTIVE;
         allocator->activateFramework(framework->id());
       }
 
@@ -2925,7 +2965,18 @@ void Master::_subscribe(
     }
   } else {
     // The framework has not yet re-registered after master failover.
-    activateRecoveredFramework(framework, frameworkInfo, from, None());
+    Try<Nothing> activate =
+      activateRecoveredFramework(framework, frameworkInfo, from, None());
+
+    if (activate.isError()) {
+      LOG(INFO) << "Could not update FrameworkInfo of framework '"
+                << frameworkInfo.name() << "': " << activate.error();
+
+      FrameworkErrorMessage message;
+      message.set_message(activate.error());
+      send(from, message);
+      return;
+    }
   }
 
   // Broadcast the new framework pid to all the slaves. We have to
@@ -2981,13 +3032,27 @@ void Master::deactivateFramework(
     return;
   }
 
-  deactivate(framework);
+  if (!framework->connected()) {
+    LOG(INFO)
+      << "Ignoring deactivate framework message for framework" << *framework
+      << " because it is disconnected";
+    return;
+  }
+
+  if (framework->active()) {
+    deactivate(framework, true);
+  }
 }
 
 
 void Master::disconnect(Framework* framework)
 {
   CHECK_NOTNULL(framework);
+  CHECK(framework->connected());
+
+  if (framework->active()) {
+    deactivate(framework, true);
+  }
 
   LOG(INFO) << "Disconnecting framework " << *framework;
 
@@ -3004,19 +3069,17 @@ void Master::disconnect(Framework* framework)
     // been closed due to scheduler disconnection.
     framework->http.get().close();
   }
-
-  deactivate(framework);
 }
 
 
-void Master::deactivate(Framework* framework)
+void Master::deactivate(Framework* framework, bool rescind)
 {
   CHECK_NOTNULL(framework);
+  CHECK(framework->active());
 
   LOG(INFO) << "Deactivating framework " << *framework;
 
-  // Stop sending offers here for now.
-  framework->active = false;
+  framework->state = Framework::State::INACTIVE;
 
   // Tell the allocator to stop allocating resources to this framework.
   allocator->deactivateFramework(framework->id());
@@ -3024,9 +3087,12 @@ void Master::deactivate(Framework* framework)
   // Remove the framework's offers.
   foreach (Offer* offer, utils::copy(framework->offers)) {
     allocator->recoverResources(
-        offer->framework_id(), offer->slave_id(), offer->resources(), None());
+        offer->framework_id(),
+        offer->slave_id(),
+        offer->resources(),
+        None());
 
-    removeOffer(offer, true); // Rescind.
+    removeOffer(offer, rescind);
   }
 
   // Remove the framework's inverse offers.
@@ -3039,7 +3105,7 @@ void Master::deactivate(Framework* framework)
             inverseOffer->unavailability()},
         None());
 
-    removeInverseOffer(inverseOffer, true); // Rescind.
+    removeInverseOffer(inverseOffer, rescind);
   }
 }
 
@@ -3076,7 +3142,10 @@ void Master::deactivate(Slave* slave)
   // Remove and rescind offers.
   foreach (Offer* offer, utils::copy(slave->offers)) {
     allocator->recoverResources(
-        offer->framework_id(), slave->id, offer->resources(), None());
+        offer->framework_id(),
+        slave->id,
+        offer->resources(),
+        None());
 
     removeOffer(offer, true); // Rescind!
   }
@@ -5132,7 +5201,8 @@ void Master::registerSlave(
     const UPID& from,
     const SlaveInfo& slaveInfo,
     const vector<Resource>& checkpointedResources,
-    const string& version)
+    const string& version,
+    const vector<SlaveInfo::Capability>& agentCapabilities)
 {
   ++metrics->messages_register_slave;
 
@@ -5146,7 +5216,8 @@ void Master::registerSlave(
                      from,
                      slaveInfo,
                      checkpointedResources,
-                     version));
+                     version,
+                     agentCapabilities));
     return;
   }
 
@@ -5239,6 +5310,7 @@ void Master::registerSlave(
                  from,
                  checkpointedResources,
                  version,
+                 agentCapabilities,
                  lambda::_1));
 }
 
@@ -5248,6 +5320,7 @@ void Master::_registerSlave(
     const UPID& pid,
     const vector<Resource>& checkpointedResources,
     const string& version,
+    const vector<SlaveInfo::Capability>& agentCapabilities,
     const Future<bool>& admit)
 {
   CHECK(slaves.registering.contains(pid));
@@ -5283,6 +5356,7 @@ void Master::_registerSlave(
       pid,
       machineId,
       version,
+      agentCapabilities,
       Clock::now(),
       checkpointedResources);
 
@@ -5313,7 +5387,8 @@ void Master::reregisterSlave(
     const vector<Task>& tasks,
     const vector<FrameworkInfo>& frameworks,
     const vector<Archive::Framework>& completedFrameworks,
-    const string& version)
+    const string& version,
+    const vector<SlaveInfo::Capability>& agentCapabilities)
 {
   ++metrics->messages_reregister_slave;
 
@@ -5331,7 +5406,8 @@ void Master::reregisterSlave(
                      tasks,
                      frameworks,
                      completedFrameworks,
-                     version));
+                     version,
+                     agentCapabilities));
     return;
   }
 
@@ -5408,10 +5484,11 @@ void Master::reregisterSlave(
     slave->pid = from;
     link(slave->pid);
 
-    // Update slave's version and re-registration timestamp after
-    // re-registering successfully.
+    // Update slave's version, re-registration timestamp and
+    // agent capabilities after re-registering successfully.
     slave->version = version;
     slave->reregisteredTime = Clock::now();
+    slave->capabilities = agentCapabilities;
 
     // Reconcile tasks between master and slave, and send the
     // `SlaveReregisteredMessage`.
@@ -5474,6 +5551,7 @@ void Master::reregisterSlave(
                  frameworks,
                  completedFrameworks,
                  version,
+                 agentCapabilities,
                  lambda::_1));
 }
 
@@ -5487,6 +5565,7 @@ void Master::_reregisterSlave(
     const vector<FrameworkInfo>& frameworks,
     const vector<Archive::Framework>& completedFrameworks,
     const string& version,
+    const vector<SlaveInfo::Capability>& agentCapabilities,
     const Future<bool>& readmit)
 {
   CHECK(slaves.reregistering.contains(slaveInfo.id()));
@@ -5512,28 +5591,103 @@ void Master::_reregisterSlave(
   machineId.set_hostname(slaveInfo.hostname());
   machineId.set_ip(stringify(pid.address.ip));
 
+  // For easy lookup, first determine the set of FrameworkIDs on the
+  // re-registering agent that are partition-aware. We examine both
+  // the frameworks and the tasks running on the agent. The former is
+  // necessary because the master might have failed over and not know
+  // about a framework running on the agent; the latter is necessary
+  // because pre-1.0 Mesos agents don't supply a list of running
+  // frameworks on re-registration.
+  hashset<FrameworkID> partitionAwareFrameworks;
+
+  // TODO(neilc): Remove this loop when we remove compatibility with
+  // pre-1.0 Mesos agents.
+  foreach (const Task& task, tasks) {
+    Framework* framework = getFramework(task.framework_id());
+
+    if (framework == nullptr) {
+      continue;
+    }
+
+    if (protobuf::frameworkHasCapability(
+            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      partitionAwareFrameworks.insert(framework->id());
+    }
+  }
+
+  foreach (const FrameworkInfo& framework, frameworks) {
+    if (protobuf::frameworkHasCapability(
+            framework, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      partitionAwareFrameworks.insert(framework.id());
+    }
+  }
+
+  // Check if this master was the one that removed the reregistering
+  // agent from the cluster originally. This is false if the master
+  // has failed over since the agent was removed, for example.
+  //
+  // TODO(neilc): Since `removed` is a cache, we might mistakenly
+  // think the master has failed over and neglect to shutdown
+  // non-partition-aware frameworks on reregistering agents.
+  bool slaveWasRemoved = slaves.removed.get(slaveInfo.id()).isSome();
+
+  // Decide how to handle the tasks running on the agent:
+  //
+  // (a) If the master has not failed over since the agent was marked
+  // unreachable, only partition-aware tasks are re-added to the
+  // master (those tasks were previously marked "unreachable", so they
+  // should be removed from that collection). Any non-partition-aware
+  // frameworks running on the agent are shutdown. We already marked
+  // such tasks "completed" when the agent was marked unreachable, so
+  // no further cleanup for non-partition-aware tasks is required.
+  //
+  // In addition, we also filter any tasks whose frameworks have
+  // completed. As in case (a), such frameworks will be shutdown and
+  // their tasks have already been marked "completed".
+  //
+  // (b) If the master has failed over, all tasks are re-added to the
+  // master. The master shouldn't have any record of the tasks running
+  // on the agent, so no further cleanup is required.
+  vector<Task> tasks_;
+  foreach (const Task& task, tasks) {
+    const FrameworkID& frameworkId = task.framework_id();
+    Framework* framework = getFramework(frameworkId);
+
+    // Don't re-add tasks whose framework has been shutdown at the
+    // master. Such frameworks will be shutdown on the agent below.
+    if (isCompletedFramework(task.framework_id())) {
+      continue;
+    }
+
+    // Always re-add partition-aware tasks.
+    if (partitionAwareFrameworks.contains(frameworkId)) {
+      tasks_.push_back(task);
+
+      if (framework != nullptr) {
+        framework->unreachableTasks.erase(task.task_id());
+      }
+    } else if (!slaveWasRemoved) {
+      // Only re-add non-partition-aware tasks if the master has
+      // failed over since the agent was marked unreachable.
+      tasks_.push_back(task);
+    }
+  }
+
   Slave* slave = new Slave(
       this,
       slaveInfo,
       pid,
       machineId,
       version,
+      agentCapabilities,
       Clock::now(),
       checkpointedResources,
       executorInfos,
-      tasks);
+      tasks_);
 
   slave->reregisteredTime = Clock::now();
 
   ++metrics->slave_reregistrations;
-
-  // Check if this master was the one that removed the reregistering
-  // agent from the cluster originally. This is false if the master
-  // has failed over since the agent was removed, for example. Since
-  // `removed` is a cache, we might mistakenly think the master has
-  // failed over and neglect to remove non-partition-aware frameworks
-  // on reregistering agents, but that should be rare in practice.
-  bool slaveWasRemoved = slaves.removed.get(slave->id).isSome();
 
   slaves.removed.erase(slave->id);
   slaves.unreachable.erase(slave->id);
@@ -5553,30 +5707,42 @@ void Master::_reregisterSlave(
   LOG(INFO) << "Re-registered agent " << *slave
             << " with " << slave->info.resources();
 
-  // Shutdown any frameworks running on the slave that don't have the
-  // PARTITION_AWARE capability, provided that this instance of the
-  // master previously added the slave to the `slaves.removed`
-  // collection. This matches the Mesos 1.0 "non-strict" semantics for
-  // frameworks that are not partition-aware: when a previously
-  // unreachable slave reregisters, its tasks are only shutdown if the
-  // master has not failed over.
-  if (slaveWasRemoved) {
-    foreach (const FrameworkInfo& framework, frameworks) {
-      if (!protobuf::frameworkHasCapability(
-              framework, FrameworkInfo::Capability::PARTITION_AWARE)) {
-        LOG(INFO) << "Shutting down framework " << framework.id()
-                  << " at reregistered agent " << *slave
-                  << " because the framework is not partition-aware";
+  // Determine which frameworks on the slave to shutdown, if any. This
+  // happens in two cases:
+  //
+  // (1) If this master marked the slave unreachable (i.e., master has
+  // not failed over), we shutdown any non-partition-aware frameworks
+  // running on the slave. This matches the Mesos <= 1.0 "non-strict"
+  // registry semantics.
+  //
+  // (2) Any framework that is completed at the master but still
+  // running at the slave is shutdown. This can occur if the framework
+  // was removed when the slave was partitioned. NOTE: This is just a
+  // short-term hack because information about completed frameworks is
+  // lost when the master fails over. Also, we only store a limited
+  // number of completed frameworks. A proper fix likely involves
+  // storing framework information in the registry (MESOS-1719).
+  foreach (const FrameworkInfo& framework, frameworks) {
+    if (slaveWasRemoved && !partitionAwareFrameworks.contains(framework.id())) {
+      LOG(INFO) << "Shutting down framework " << framework.id()
+                << " at re-registered agent " << *slave
+                << " because the framework is not partition-aware";
 
-        ShutdownFrameworkMessage message;
-        message.mutable_framework_id()->MergeFrom(framework.id());
-        send(slave->pid, message);
+      ShutdownFrameworkMessage message;
+      message.mutable_framework_id()->MergeFrom(framework.id());
+      send(slave->pid, message);
 
-        // Remove the framework's tasks from the master's in-memory state.
-        foreachvalue (Task* task, utils::copy(slave->tasks[framework.id()])) {
-          removeTask(task);
-        }
-      }
+      // The framework's tasks should not be stored in the master's
+      // in-memory state, because they were not re-added filtered above.
+      CHECK(!slave->tasks.contains(framework.id()));
+    } else if (isCompletedFramework(framework.id())) {
+      LOG(INFO) << "Shutting down framework " << framework.id()
+                << " at re-registered agent " << *slave
+                << " because the framework has been shutdown at the master";
+
+      ShutdownFrameworkMessage message;
+      message.mutable_framework_id()->MergeFrom(framework.id());
+      send(slave->pid, message);
     }
   }
 
@@ -5882,6 +6048,12 @@ void Master::statusUpdate(StatusUpdate update, const UPID& pid)
   // Lookup the task and see if we need to update anything locally.
   Task* task = slave->getTask(update.framework_id(), update.status().task_id());
   if (task == nullptr) {
+    // TODO(neilc): We might see status updates for non-partition
+    // aware tasks running on a partitioned agent that has
+    // re-registered with the master. The master marks such tasks
+    // completed when the agent partitions; it will shutdown the
+    // framework when the agent-reregisters, but we may see a number
+    // of status updates before the framework is shutdown.
     LOG(WARNING) << "Could not lookup task for status update " << update
                  << " from agent " << *slave;
     metrics->invalid_status_updates++;
@@ -6177,6 +6349,7 @@ void Master::_markUnreachable(
           None(),
           None(),
           None(),
+          None(),
           unreachableTime);
 
       updateTask(task, update);
@@ -6347,6 +6520,7 @@ void Master::_reconcileTasks(
           TaskStatus::REASON_RECONCILIATION,
           executorId,
           protobuf::getTaskHealth(*task),
+          protobuf::getTaskCheckStatus(*task),
           None(),
           protobuf::getTaskContainerStatus(*task));
 
@@ -6421,6 +6595,7 @@ void Master::_reconcileTasks(
           TaskStatus::REASON_RECONCILIATION,
           executorId,
           protobuf::getTaskHealth(*task),
+          protobuf::getTaskCheckStatus(*task),
           None(),
           protobuf::getTaskContainerStatus(*task));
     } else if (slaveId.isSome() && slaves.registered.contains(slaveId.get())) {
@@ -6469,6 +6644,7 @@ void Master::_reconcileTasks(
           None(),
           "Reconciliation: Task is unreachable",
           TaskStatus::REASON_RECONCILIATION,
+          None(),
           None(),
           None(),
           None(),
@@ -6532,7 +6708,7 @@ void Master::offer(const FrameworkID& frameworkId,
                    const hashmap<SlaveID, Resources>& resources)
 {
   if (!frameworks.registered.contains(frameworkId) ||
-      !frameworks.registered[frameworkId]->active) {
+      !frameworks.registered[frameworkId]->active()) {
     LOG(WARNING) << "Master returning resources offered to framework "
                  << frameworkId << " because the framework"
                  << " has terminated or is inactive";
@@ -6680,7 +6856,7 @@ void Master::inverseOffer(
     const hashmap<SlaveID, UnavailableResources>& resources)
 {
   if (!frameworks.registered.contains(frameworkId) ||
-      !frameworks.registered[frameworkId]->active) {
+      !frameworks.registered[frameworkId]->active()) {
     LOG(INFO) << "Master ignoring inverse offers to framework " << frameworkId
               << " because the framework has terminated or is inactive";
     return;
@@ -7107,7 +7283,7 @@ void Master::addFramework(Framework* framework)
       framework->id(),
       framework->info,
       framework->usedResources,
-      framework->active);
+      framework->active());
 
   // Export framework metrics if a principal is specified in `FrameworkInfo`.
 
@@ -7159,7 +7335,7 @@ void Master::recoverFramework(const FrameworkInfo& info)
 }
 
 
-void Master::activateRecoveredFramework(
+Try<Nothing> Master::activateRecoveredFramework(
     Framework* framework,
     const FrameworkInfo& frameworkInfo,
     const Option<UPID>& pid,
@@ -7170,7 +7346,6 @@ void Master::activateRecoveredFramework(
 
   CHECK_NOTNULL(framework);
   CHECK(framework->recovered());
-  CHECK(!framework->active);
   CHECK(framework->offers.empty());
   CHECK(framework->inverseOffers.empty());
   CHECK(framework->pid.isNone());
@@ -7179,7 +7354,13 @@ void Master::activateRecoveredFramework(
   // The `FrameworkInfo` might have changed.
   LOG(INFO) << "Updating info for framework " << framework->id();
 
-  framework->updateFrameworkInfo(frameworkInfo);
+  Try<Nothing> updateFrameworkInfo =
+    framework->updateFrameworkInfo(frameworkInfo);
+
+  if (updateFrameworkInfo.isError()) {
+    return updateFrameworkInfo;
+  }
+
   allocator->updateFramework(framework->id(), framework->info);
 
   // Updating `registeredTime` here is debatable: ideally,
@@ -7191,8 +7372,6 @@ void Master::activateRecoveredFramework(
   framework->reregisteredTime = Clock::now();
 
   // Update the framework's connection state.
-  framework->state = Framework::State::CONNECTED;
-
   if (pid.isSome()) {
     framework->updateConnection(pid.get());
     link(pid.get());
@@ -7203,7 +7382,7 @@ void Master::activateRecoveredFramework(
   }
 
   // Activate the framework.
-  framework->active = true;
+  framework->state = Framework::State::ACTIVE;
   allocator->activateFramework(framework->id());
 
   // Export framework metrics if a principal is specified in `FrameworkInfo`.
@@ -7242,6 +7421,8 @@ void Master::activateRecoveredFramework(
     // Start the heartbeat after sending SUBSCRIBED event.
     framework->heartbeat();
   }
+
+  return Nothing();
 }
 
 
@@ -7353,14 +7534,13 @@ void Master::_failoverFramework(Framework* framework)
     removeInverseOffer(inverseOffer);
   }
 
-  // Reconnect and reactivate the framework.
-  framework->state = Framework::State::CONNECTED;
+  CHECK(!framework->recovered());
 
-  // Reactivate the framework.
+  // Reactivate the framework, if needed.
   // NOTE: We do this after recovering resources (above) so that
   // the allocator has the correct view of the framework's share.
-  if (!framework->active) {
-    framework->active = true;
+  if (!framework->active()) {
+    framework->state = Framework::State::ACTIVE;
     allocator->activateFramework(framework->id());
   }
 
@@ -7391,12 +7571,16 @@ void Master::removeFramework(Framework* framework)
 
   LOG(INFO) << "Removing framework " << *framework;
 
-  if (framework->active) {
-    // Tell the allocator to stop allocating resources to this framework.
-    // TODO(vinod): Consider setting  framework->active to false here
-    // or just calling 'deactivate(Framework*)'.
-    allocator->deactivateFramework(framework->id());
+  if (framework->active()) {
+    // Deactivate framework, but don't bother rescinding offers
+    // because the framework is being removed.
+    deactivate(framework, false);
   }
+
+  // The framework's offers should have been removed when the
+  // framework was deactivated.
+  CHECK(framework->offers.empty());
+  CHECK(framework->inverseOffers.empty());
 
   foreachvalue (Slave* slave, slaves.registered) {
     // Remove the pending tasks from the slave.
@@ -7411,7 +7595,8 @@ void Master::removeFramework(Framework* framework)
   // Remove the pending tasks from the framework.
   framework->pendingTasks.clear();
 
-  // Remove pointers to the framework's tasks in slaves.
+  // Remove pointers to the framework's tasks in slaves and mark those
+  // tasks as completed.
   foreachvalue (Task* task, utils::copy(framework->tasks)) {
     Slave* slave = slaves.registered.get(task->slave_id());
 
@@ -7429,7 +7614,15 @@ void Master::removeFramework(Framework* framework)
     // collect the possible finished status. We tolerate this,
     // because we expect that if the framework has been asked to shut
     // down, its user is not interested in results anymore.
+    //
     // TODO(alex): Consider a more descriptive state, e.g. TASK_ABANDONED.
+    //
+    // TODO(neilc): Marking the task KILLED before it has actually
+    // terminated is misleading. Instead, we should consider leaving
+    // the task in its current state at the master; if/when the agent
+    // shuts down the framework, we should arrange for a terminal
+    // status update to be delivered to the master and update the
+    // state of the task at that time (MESOS-6608).
     const StatusUpdate& update = protobuf::createStatusUpdate(
         task->framework_id(),
         task->slave_id(),
@@ -7447,28 +7640,36 @@ void Master::removeFramework(Framework* framework)
     removeTask(task);
   }
 
-  // Remove the framework's offers (if they weren't removed before).
-  foreach (Offer* offer, utils::copy(framework->offers)) {
-    allocator->recoverResources(
-        offer->framework_id(),
-        offer->slave_id(),
-        offer->resources(),
-        None());
+  // Mark the framework's unreachable tasks as completed.
+  foreach (const TaskID& taskId, framework->unreachableTasks.keys()) {
+    const Owned<Task>& task = framework->unreachableTasks.at(taskId);
 
-    removeOffer(offer);
-  }
+    // TODO(neilc): Per comment above, using TASK_KILLED here is not
+    // ideal. It would be better to use TASK_UNREACHABLE here and only
+    // transition it to a terminal state when the agent re-registers
+    // and the task is shutdown (MESOS-6608).
+    const StatusUpdate& update = protobuf::createStatusUpdate(
+        task->framework_id(),
+        task->slave_id(),
+        task->task_id(),
+        TASK_KILLED,
+        TaskStatus::SOURCE_MASTER,
+        None(),
+        "Framework " + framework->id().value() + " removed",
+        TaskStatus::REASON_FRAMEWORK_REMOVED,
+        (task->has_executor_id()
+         ? Option<ExecutorID>(task->executor_id())
+         : None()));
 
-  // Also remove the inverse offers.
-  foreach (InverseOffer* inverseOffer, utils::copy(framework->inverseOffers)) {
-    allocator->updateInverseOffer(
-        inverseOffer->slave_id(),
-        inverseOffer->framework_id(),
-        UnavailableResources{
-            inverseOffer->resources(),
-            inverseOffer->unavailability()},
-        None());
+    updateTask(task.get(), update);
 
-    removeInverseOffer(inverseOffer);
+    // We don't need to remove the task from the slave, because the
+    // task was removed when the agent was marked unreachable.
+    CHECK(!slaves.registered.contains(task->slave_id()));
+
+    // Move task from unreachable map to completed map.
+    framework->addCompletedTask(*task.get());
+    framework->unreachableTasks.erase(taskId);
   }
 
   // Remove the framework's executors for correct resource accounting.
@@ -7901,12 +8102,11 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
   // task transitioned to a new state.
   bool sendSubscribersUpdate = false;
 
-  // Set 'terminated' to true if this is the first time the task
-  // transitioned to terminal state. Also set the latest state.
-  bool terminated;
+  // Set 'removable' to true if this is the first time the task
+  // transitioned to a removable state. Also set the latest state.
+  bool removable;
   if (latestState.isSome()) {
-    terminated = !protobuf::isTerminalState(task->state()) &&
-                 protobuf::isTerminalState(latestState.get());
+    removable = !isRemovable(task->state()) && isRemovable(latestState.get());
 
     // If the task has already transitioned to a terminal state,
     // do not update its state.
@@ -7918,14 +8118,13 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
       task->set_state(latestState.get());
     }
   } else {
-    terminated = !protobuf::isTerminalState(task->state()) &&
-                 protobuf::isTerminalState(status.state());
+    removable = !isRemovable(task->state()) && isRemovable(status.state());
 
     // If the task has already transitioned to a terminal state, do not update
     // its state. Note that we are being defensive here because this should not
     // happen unless there is a bug in the master code.
     if (!protobuf::isTerminalState(task->state())) {
-      if (task->state() != status.state()) {
+      if (status.state() != task->state()) {
         sendSubscribersUpdate = true;
       }
 
@@ -7958,8 +8157,8 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
             << " (latest state: " << task->state()
             << ", status update state: " << status.state() << ")";
 
-  // Once the task becomes terminal, we recover the resources.
-  if (terminated) {
+  // Once the task becomes removable, recover the resources.
+  if (removable) {
     allocator->recoverResources(
         task->framework_id(),
         task->slave_id(),
@@ -7970,11 +8169,11 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     Slave* slave = slaves.registered.get(task->slave_id());
     CHECK_NOTNULL(slave);
 
-    slave->taskTerminated(task);
+    slave->recoverResources(task);
 
     Framework* framework = getFramework(task->framework_id());
     if (framework != nullptr) {
-      framework->taskTerminated(task);
+      framework->recoverResources(task);
     }
 
     switch (status.state()) {
@@ -7993,9 +8192,6 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
       case TASK_ERROR:
         ++metrics->tasks_error;
         break;
-      case TASK_UNREACHABLE:
-        ++metrics->tasks_unreachable;
-        break;
       case TASK_DROPPED:
         ++metrics->tasks_dropped;
         break;
@@ -8009,6 +8205,7 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
       case TASK_STAGING:
       case TASK_RUNNING:
       case TASK_KILLING:
+      case TASK_UNREACHABLE:
         break;
       case TASK_UNKNOWN:
         // Should not happen.
@@ -8034,14 +8231,14 @@ void Master::removeTask(Task* task)
   Slave* slave = slaves.registered.get(task->slave_id());
   CHECK_NOTNULL(slave);
 
-  if (!protobuf::isTerminalState(task->state())) {
+  if (!isRemovable(task->state())) {
     LOG(WARNING) << "Removing task " << task->task_id()
                  << " with resources " << task->resources()
                  << " of framework " << task->framework_id()
                  << " on agent " << *slave
-                 << " in non-terminal state " << task->state();
+                 << " in non-removable state " << task->state();
 
-    // If the task is not terminal, then the resources have
+    // If the task is not removable, then the resources have
     // not yet been recovered.
     allocator->recoverResources(
         task->framework_id(),
@@ -8288,6 +8485,30 @@ SlaveID Master::newSlaveId()
 }
 
 
+double Master::_slaves_connected()
+{
+  double count = 0.0;
+  foreachvalue (Slave* slave, slaves.registered) {
+    if (slave->connected) {
+      count++;
+    }
+  }
+  return count;
+}
+
+
+double Master::_slaves_disconnected()
+{
+  double count = 0.0;
+  foreachvalue (Slave* slave, slaves.registered) {
+    if (!slave->connected) {
+      count++;
+    }
+  }
+  return count;
+}
+
+
 double Master::_slaves_active()
 {
   double count = 0.0;
@@ -8312,27 +8533,9 @@ double Master::_slaves_inactive()
 }
 
 
-double Master::_slaves_connected()
+double Master::_slaves_unreachable()
 {
-  double count = 0.0;
-  foreachvalue (Slave* slave, slaves.registered) {
-    if (slave->connected) {
-      count++;
-    }
-  }
-  return count;
-}
-
-
-double Master::_slaves_disconnected()
-{
-  double count = 0.0;
-  foreachvalue (Slave* slave, slaves.registered) {
-    if (!slave->connected) {
-      count++;
-    }
-  }
-  return count;
+  return slaves.unreachable.size();
 }
 
 
@@ -8364,7 +8567,7 @@ double Master::_frameworks_active()
 {
   double count = 0.0;
   foreachvalue (Framework* framework, frameworks.registered) {
-    if (framework->active) {
+    if (framework->active()) {
       count++;
     }
   }
@@ -8376,7 +8579,7 @@ double Master::_frameworks_inactive()
 {
   double count = 0.0;
   foreachvalue (Framework* framework, frameworks.registered) {
-    if (!framework->active) {
+    if (!framework->active()) {
       count++;
     }
   }
@@ -8440,6 +8643,18 @@ double Master::_tasks_running()
         }
       }
     }
+  }
+
+  return count;
+}
+
+
+double Master::_tasks_unreachable()
+{
+  double count = 0.0;
+
+  foreachvalue (Framework* framework, frameworks.registered) {
+    count += framework->unreachableTasks.size();
   }
 
   return count;
@@ -8563,30 +8778,6 @@ static bool isValidFailoverTimeout(const FrameworkInfo& frameworkInfo)
 }
 
 
-void Slave::addTask(Task* task)
-{
-  const TaskID& taskId = task->task_id();
-  const FrameworkID& frameworkId = task->framework_id();
-
-  CHECK(!tasks[frameworkId].contains(taskId))
-    << "Duplicate task " << taskId << " of framework " << frameworkId;
-
-  tasks[frameworkId][taskId] = task;
-
-  if (!protobuf::isTerminalState(task->state())) {
-    usedResources[frameworkId] += task->resources();
-  }
-
-  if (!master->subscribers.subscribed.empty()) {
-    master->subscribers.send(protobuf::master::event::createTaskAdded(*task));
-  }
-
-  LOG(INFO) << "Adding task " << taskId
-            << " with resources " << task->resources()
-            << " on agent " << *this;
-}
-
-
 void Master::Subscribers::send(const mesos::master::Event& event)
 {
   VLOG(1) << "Notifying all active subscribers about " << event.type() << " "
@@ -8623,6 +8814,216 @@ void Master::subscribe(const HttpConnection& http)
   subscribers.subscribed.put(
       http.streamId,
       Owned<Subscribers::Subscriber>(new Subscribers::Subscriber{http}));
+}
+
+
+Slave::Slave(
+    Master* const _master,
+    const SlaveInfo& _info,
+    const UPID& _pid,
+    const MachineID& _machineId,
+    const string& _version,
+    const vector<SlaveInfo::Capability>& _capabilites,
+    const Time& _registeredTime,
+    const Resources& _checkpointedResources,
+    const vector<ExecutorInfo> executorInfos,
+    const vector<Task> tasks)
+  : master(_master),
+    id(_info.id()),
+    info(_info),
+    machineId(_machineId),
+    pid(_pid),
+    version(_version),
+    capabilities(_capabilites),
+    registeredTime(_registeredTime),
+    connected(true),
+    active(true),
+    checkpointedResources(_checkpointedResources),
+    observer(nullptr)
+{
+  CHECK(_info.has_id());
+
+  Try<Resources> resources = applyCheckpointedResources(
+      info.resources(),
+      _checkpointedResources);
+
+  // NOTE: This should be validated during slave recovery.
+  CHECK_SOME(resources);
+  totalResources = resources.get();
+
+  foreach (const ExecutorInfo& executorInfo, executorInfos) {
+    CHECK(executorInfo.has_framework_id());
+    addExecutor(executorInfo.framework_id(), executorInfo);
+  }
+
+  foreach (const Task& task, tasks) {
+    addTask(new Task(task));
+  }
+}
+
+
+Slave::~Slave()
+{
+  if (reregistrationTimer.isSome()) {
+    process::Clock::cancel(reregistrationTimer.get());
+  }
+}
+
+
+Task* Slave::getTask(const FrameworkID& frameworkId, const TaskID& taskId) const
+{
+  if (tasks.contains(frameworkId) && tasks.at(frameworkId).contains(taskId)) {
+    return tasks.at(frameworkId).at(taskId);
+  }
+  return nullptr;
+}
+
+
+void Slave::addTask(Task* task)
+{
+  const TaskID& taskId = task->task_id();
+  const FrameworkID& frameworkId = task->framework_id();
+
+  CHECK(!tasks[frameworkId].contains(taskId))
+    << "Duplicate task " << taskId << " of framework " << frameworkId;
+
+  tasks[frameworkId][taskId] = task;
+
+  if (!Master::isRemovable(task->state())) {
+    usedResources[frameworkId] += task->resources();
+  }
+
+  if (!master->subscribers.subscribed.empty()) {
+    master->subscribers.send(protobuf::master::event::createTaskAdded(*task));
+  }
+
+  LOG(INFO) << "Adding task " << taskId
+            << " with resources " << task->resources()
+            << " on agent " << *this;
+}
+
+
+void Slave::recoverResources(Task* task)
+{
+  const TaskID& taskId = task->task_id();
+  const FrameworkID& frameworkId = task->framework_id();
+
+  CHECK(Master::isRemovable(task->state()));
+  CHECK(tasks.at(frameworkId).contains(taskId))
+    << "Unknown task " << taskId << " of framework " << frameworkId;
+
+  usedResources[frameworkId] -= task->resources();
+  if (usedResources[frameworkId].empty()) {
+    usedResources.erase(frameworkId);
+  }
+}
+
+
+void Slave::removeTask(Task* task)
+{
+  const TaskID& taskId = task->task_id();
+  const FrameworkID& frameworkId = task->framework_id();
+
+  CHECK(tasks.at(frameworkId).contains(taskId))
+    << "Unknown task " << taskId << " of framework " << frameworkId;
+
+  if (!Master::isRemovable(task->state())) {
+    usedResources[frameworkId] -= task->resources();
+    if (usedResources[frameworkId].empty()) {
+      usedResources.erase(frameworkId);
+    }
+  }
+
+  tasks[frameworkId].erase(taskId);
+  if (tasks[frameworkId].empty()) {
+    tasks.erase(frameworkId);
+  }
+
+  killedTasks.remove(frameworkId, taskId);
+}
+
+
+void Slave::addOffer(Offer* offer)
+{
+  CHECK(!offers.contains(offer)) << "Duplicate offer " << offer->id();
+
+  offers.insert(offer);
+  offeredResources += offer->resources();
+}
+
+
+void Slave::removeOffer(Offer* offer)
+{
+  CHECK(offers.contains(offer)) << "Unknown offer " << offer->id();
+
+  offeredResources -= offer->resources();
+  offers.erase(offer);
+}
+
+
+void Slave::addInverseOffer(InverseOffer* inverseOffer)
+{
+  CHECK(!inverseOffers.contains(inverseOffer))
+    << "Duplicate inverse offer " << inverseOffer->id();
+
+  inverseOffers.insert(inverseOffer);
+}
+
+
+void Slave::removeInverseOffer(InverseOffer* inverseOffer)
+{
+  CHECK(inverseOffers.contains(inverseOffer))
+    << "Unknown inverse offer " << inverseOffer->id();
+
+  inverseOffers.erase(inverseOffer);
+}
+
+
+bool Slave::hasExecutor(const FrameworkID& frameworkId,
+                        const ExecutorID& executorId) const
+{
+  return executors.contains(frameworkId) &&
+    executors.get(frameworkId).get().contains(executorId);
+}
+
+
+void Slave::addExecutor(const FrameworkID& frameworkId,
+                        const ExecutorInfo& executorInfo)
+{
+  CHECK(!hasExecutor(frameworkId, executorInfo.executor_id()))
+    << "Duplicate executor '" << executorInfo.executor_id()
+    << "' of framework " << frameworkId;
+
+  executors[frameworkId][executorInfo.executor_id()] = executorInfo;
+  usedResources[frameworkId] += executorInfo.resources();
+}
+
+void Slave::removeExecutor(const FrameworkID& frameworkId,
+                           const ExecutorID& executorId)
+{
+  CHECK(hasExecutor(frameworkId, executorId))
+    << "Unknown executor '" << executorId << "' of framework " << frameworkId;
+
+  usedResources[frameworkId] -=
+    executors[frameworkId][executorId].resources();
+  if (usedResources[frameworkId].empty()) {
+    usedResources.erase(frameworkId);
+  }
+
+  executors[frameworkId].erase(executorId);
+  if (executors[frameworkId].empty()) {
+    executors.erase(frameworkId);
+  }
+}
+
+
+void Slave::apply(const Offer::Operation& operation)
+{
+  Try<Resources> resources = totalResources.apply(operation);
+  CHECK_SOME(resources);
+
+  totalResources = resources.get();
+  checkpointedResources = totalResources.filter(needCheckpointing);
 }
 
 } // namespace master {

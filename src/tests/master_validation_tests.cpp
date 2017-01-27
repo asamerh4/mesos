@@ -40,10 +40,14 @@
 #include "master/master.hpp"
 #include "master/validation.hpp"
 
+#include "master/detector/standalone.hpp"
+
 #include "slave/slave.hpp"
 
 #include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
+
+#include "master/detector/standalone.hpp"
 
 using namespace mesos::internal::master::validation;
 
@@ -54,9 +58,11 @@ using mesos::internal::master::Master;
 using mesos::internal::slave::Slave;
 
 using mesos::master::detector::MasterDetector;
+using mesos::master::detector::StandaloneMasterDetector;
 
 using process::Clock;
 using process::Future;
+using process::Message;
 using process::Owned;
 using process::PID;
 
@@ -65,6 +71,7 @@ using std::vector;
 
 using testing::_;
 using testing::AtMost;
+using testing::Eq;
 using testing::Return;
 
 namespace mesos {
@@ -1429,6 +1436,147 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
 }
 
 
+// This test checks that if a task is launched with the same task ID
+// as an unreachable task, the second task will be rejected. The
+// master does not store all unreachable task IDs so we cannot prevent
+// all task ID collisions, but we try to prevent the common case.
+TEST_F(TaskValidationTest, TaskReusesUnreachableTaskID)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Allow the master to PING the slave, but drop all PONG messages
+  // from the slave. Note that we don't match on the master / slave
+  // PIDs because it's actually the `SlaveObserver` process that sends
+  // the pings.
+  Future<Message> ping = FUTURE_MESSAGE(
+      Eq(PingSlaveMessage().GetTypeName()), _, _);
+
+  DROP_PROTOBUFS(PongSlaveMessage(), _, _);
+
+  StandaloneMasterDetector detector1(master.get()->pid);
+  Try<Owned<cluster::Slave>> slave1 = StartSlave(&detector1);
+  ASSERT_SOME(slave1);
+
+  // Start a partition-aware scheduler.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::PARTITION_AWARE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers1;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers1));
+
+  driver.start();
+
+  AWAIT_READY(offers1);
+  ASSERT_FALSE(offers1->empty());
+
+  Offer offer1 = offers1.get()[0];
+  TaskInfo task1 = createTask(offer1, "sleep 60");
+
+  Future<TaskStatus> runningStatus;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&runningStatus));
+
+  Future<Nothing> statusUpdateAck = FUTURE_DISPATCH(
+      slave1.get()->pid, &Slave::_statusUpdateAcknowledgement);
+
+  driver.launchTasks(offer1.id(), {task1});
+
+  AWAIT_READY(runningStatus);
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
+  EXPECT_EQ(task1.task_id(), runningStatus->task_id());
+
+  const SlaveID slaveId1 = runningStatus->slave_id();
+
+  AWAIT_READY(statusUpdateAck);
+
+  // Now, induce a partition of the slave by having the master
+  // timeout the slave.
+  Clock::pause();
+
+  Future<TaskStatus> unreachableStatus;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&unreachableStatus));
+
+  Future<Nothing> slaveLost;
+  EXPECT_CALL(sched, slaveLost(&driver, _))
+    .WillOnce(FutureSatisfy(&slaveLost));
+
+  size_t pings = 0;
+  while (true) {
+    AWAIT_READY(ping);
+    pings++;
+    if (pings == masterFlags.max_agent_ping_timeouts) {
+      break;
+    }
+    ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
+    Clock::advance(masterFlags.agent_ping_timeout);
+  }
+
+  Clock::advance(masterFlags.agent_ping_timeout);
+
+  AWAIT_READY(unreachableStatus);
+  EXPECT_EQ(TASK_UNREACHABLE, unreachableStatus->state());
+  EXPECT_EQ(TaskStatus::REASON_SLAVE_REMOVED, unreachableStatus->reason());
+  EXPECT_EQ(task1.task_id(), unreachableStatus->task_id());
+  EXPECT_EQ(slaveId1, unreachableStatus->slave_id());
+
+  AWAIT_READY(slaveLost);
+
+  Clock::resume();
+
+  // Shutdown the first agent.
+  slave1->reset();
+
+  // Start a second agent.
+  StandaloneMasterDetector detector2(master.get()->pid);
+  slave::Flags agentFlags2 = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave2 = StartSlave(&detector2, agentFlags2);
+  ASSERT_SOME(slave2);
+
+  Future<vector<Offer>> offers2;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers2));
+
+  Clock::advance(agentFlags2.registration_backoff_factor);
+  AWAIT_READY(offers2);
+  ASSERT_FALSE(offers2->empty());
+
+  // Attempt to launch a new task that reuses the ID of the first
+  // (unreachable) task. This should result in TASK_ERROR.
+
+  Offer offer2 = offers2.get()[0];
+  TaskInfo task2 = createTask(
+      offer2,
+      "sleep 60",
+      None(),
+      "test-task-2",
+      task1.task_id().value());
+
+  Future<TaskStatus> errorStatus;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&errorStatus));
+
+  driver.launchTasks(offer2.id(), {task2});
+
+  AWAIT_READY(errorStatus);
+  EXPECT_EQ(TASK_ERROR, errorStatus->state());
+  EXPECT_EQ(task2.task_id(), errorStatus->task_id());
+
+  driver.stop();
+  driver.join();
+}
+
+
 // This test verifies that a task is not allowed to mix revocable and
 // non-revocable resources.
 TEST_F(TaskValidationTest, TaskUsesRevocableResources)
@@ -2648,6 +2796,263 @@ TEST_F(FrameworkInfoValidationTest, UpgradeToMultiRole)
     driver.stop();
     driver.join();
   }
+}
+
+
+// This tests verifies that when a multi-role capable framework
+// downgrades to remove multi-role capabilities, illegal attempts to
+// change the roles the framework is subscribed to are caught.
+TEST_F(FrameworkInfoValidationTest, DowngradeFromMultipleRoles)
+{
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.add_roles("role1");
+  frameworkInfo.add_roles("role2");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  // Set a long failover timeout so the framework isn't immediately removed.
+  frameworkInfo.set_failover_timeout(Weeks(1).secs());
+
+  Future<FrameworkID> frameworkId;
+
+  {
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    EXPECT_CALL(sched, registered(&driver, _, _))
+      .WillOnce(FutureArg<1>(&frameworkId));
+
+    driver.start();
+
+    Clock::settle();
+
+    AWAIT_READY(frameworkId);
+
+    driver.stop(true); // Failover.
+    driver.join();
+  }
+
+  frameworkInfo.mutable_id()->CopyFrom(frameworkId.get());
+
+  // Downgrade `frameworkInfo` to remove multi-role capability, and
+  // migrate from `roles` to `role` field. This illegally changes the
+  // number of roles the framework is subscribed to.
+  ASSERT_EQ(2u, frameworkInfo.roles_size());
+  frameworkInfo.set_role(frameworkInfo.roles(0));
+  frameworkInfo.clear_roles();
+  ASSERT_EQ(1u, frameworkInfo.capabilities_size());
+  frameworkInfo.clear_capabilities();
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<string> error;
+  EXPECT_CALL(sched, error(&driver, _))
+    .WillOnce(FutureArg<1>(&error));
+
+  driver.start();
+
+  Clock::settle();
+
+  AWAIT_EXPECT_EQ(
+      "Frameworks cannot change their roles: "
+      "expected '{ role1, role2 }', but got '{ role1 }'",
+      error);
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that a multi-role framework cannot change its
+// roles on failover.
+TEST_F(FrameworkInfoValidationTest, RejectRoleChangeWithMultiRole)
+{
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+
+  ASSERT_FALSE(frameworkInfo.has_role());
+  frameworkInfo.add_roles("role1");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  // Set a long failover timeout so the framework isn't immediately removed.
+  frameworkInfo.set_failover_timeout(Weeks(1).secs());
+
+  Future<FrameworkID> frameworkId;
+
+  {
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    EXPECT_CALL(sched, registered(&driver, _, _))
+      .WillOnce(FutureArg<1>(&frameworkId));
+
+    driver.start();
+
+    Clock::settle();
+
+    AWAIT_READY(frameworkId);
+
+    driver.stop(true); // Failover.
+    driver.join();
+  }
+
+  frameworkInfo.mutable_id()->CopyFrom(frameworkId.get());
+  frameworkInfo.add_roles("role2");
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<string> error;
+  EXPECT_CALL(sched, error(&driver, _))
+    .WillOnce(FutureArg<1>(&error));
+
+  driver.start();
+
+  Clock::settle();
+
+  AWAIT_EXPECT_EQ(
+      "Frameworks cannot change their roles: "
+      "expected '{ role1 }', but got '{ role1, role2 }'",
+      error);
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test checks that frameworks cannot change their `role` during
+// master failover. The scenario tested here sets up a one-agent
+// cluster with a single framework. On failover the master would
+// first learn about the framework from the agent, and then from the
+// framework. We require the information from the agent and the
+// framework to be consistent.
+TEST_F(FrameworkInfoValidationTest, RejectRoleChangeWithMultiRoleMasterFailover)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> agent = StartSlave(&detector, &containerizer);
+  ASSERT_SOME(agent);
+
+  // Set a role for the framework which we will change later. Also,
+  // set a long framework failover timeout so the framework isn't
+  // immediately cleaned up.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_failover_timeout(Weeks(1).secs());
+  frameworkInfo.set_role("role1");
+
+  Future<FrameworkID> frameworkId;
+
+  {
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    EXPECT_CALL(sched, registered(&driver, _, _))
+      .WillOnce(FutureArg<1>(&frameworkId));
+
+    Future<vector<Offer>> offers;
+    EXPECT_CALL(sched, resourceOffers(&driver, _))
+      .WillOnce(FutureArg<1>(&offers))
+      .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+    driver.start();
+
+    AWAIT_READY(frameworkId);
+
+    // Start a single task so the `FrameworkInfo` is known to the
+    // agent, and communicated back to the master after master failover.
+    AWAIT_READY(offers);
+    ASSERT_FALSE(offers->empty());
+
+    TaskInfo task;
+    task.set_name("");
+    task.mutable_task_id()->set_value("1");
+    task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+    task.mutable_resources()->MergeFrom(offers.get()[0].resources());
+    task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+    EXPECT_CALL(exec, registered(_, _, _, _));
+
+    EXPECT_CALL(exec, launchTask(_, _))
+      .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+    Future<TaskStatus> runningStatus;
+    EXPECT_CALL(sched, statusUpdate(&driver, _))
+      .WillOnce(FutureArg<1>(&runningStatus));
+
+    driver.launchTasks(offers.get()[0].id(), {task});
+
+    AWAIT_READY(runningStatus);
+    EXPECT_EQ(TASK_RUNNING, runningStatus.get().state());
+    EXPECT_EQ(task.task_id(), runningStatus.get().task_id());
+
+    driver.stop();
+    driver.join();
+  }
+
+  // Cause a master failover.
+  detector.appoint(None());
+
+  master->reset();
+  master = StartMaster();
+  ASSERT_SOME(master);
+
+  // Make sure the agent registers before the framework resubscribes.
+  // The master will learn about the framework from the agent.
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
+
+  detector.appoint(master.get()->pid);
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  // Change the `roles` of the framework in an illegal way (upgrade to
+  // `MULTI_ROLE` where `roles` is not identical to `role`). We do
+  // not simply change `role` here as this currently would not trigger
+  // an error, but would only be logged to the master's log.
+  frameworkInfo.mutable_id()->CopyFrom(frameworkId.get());
+  frameworkInfo.add_roles("role2");
+  frameworkInfo.clear_role();
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<string> error;
+  EXPECT_CALL(sched, error(&driver, _))
+    .WillOnce(FutureArg<1>(&error));
+
+  driver.start();
+
+  AWAIT_EXPECT_EQ(
+      "Frameworks cannot change their roles: "
+      "expected '{ role1 }', but got '{ role2 }'",
+      error);
+
+  driver.stop();
+  driver.join();
 }
 
 } // namespace tests {

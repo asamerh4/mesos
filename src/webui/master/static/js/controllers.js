@@ -16,13 +16,13 @@
   function pailer(host, path, window_title) {
     var url = '//' + host + '/files/read?path=' + path;
 
-    // The random id would be clean up once the pailer window loads the
-    // URL into its sessionStorage, so the possibility of collisions is
-    // acceptable here.
+    // The randomized `storageKey` is removed from `localStorage` once the
+    // pailer window loads the URL into its `sessionStorage`, therefore
+    // the probability of collisions is low and we do not use a uuid.
     var storageKey = Math.random().toString(36).substr(2, 8);
 
-    // Store the target URL in localStorage which would be used by the
-    // pailer window later.
+    // Store the target URL in `localStorage` which is
+    // accessed by the pailer window when opened.
     localStorage.setItem(storageKey, url);
 
     var pailer =
@@ -113,6 +113,7 @@
     $scope.offers = {};
     $scope.completed_frameworks = {};
     $scope.active_tasks = [];
+    $scope.unreachable_tasks = [];
     $scope.completed_tasks = [];
     $scope.orphan_tasks = [];
 
@@ -133,6 +134,7 @@
 
     $scope.activated_agents = $scope.state.activated_slaves;
     $scope.deactivated_agents = $scope.state.deactivated_slaves;
+    $scope.unreachable_agents = $scope.state.unreachable_slaves;
 
     _.each($scope.state.slaves, function(agent) {
       $scope.agents[agent.id] = agent;
@@ -164,7 +166,10 @@
           'TASK_FAILED',
           'TASK_FINISHED',
           'TASK_KILLED',
-          'TASK_LOST'
+          'TASK_LOST',
+          'TASK_DROPPED',
+          'TASK_GONE',
+          'TASK_GONE_BY_OPERATOR'
       ];
       return terminalStates.indexOf(taskState) > -1;
     };
@@ -218,9 +223,11 @@
       // TODO(brenden): Remove this once
       // https://issues.apache.org/jira/browse/MESOS-527 is fixed.
       _.each(framework.tasks, setTaskMetadata);
+      _.each(framework.unreachable_tasks, setTaskMetadata);
       _.each(framework.completed_tasks, setTaskMetadata);
 
       $scope.active_tasks = $scope.active_tasks.concat(framework.tasks);
+      $scope.unreachable_tasks = $scope.unreachable_tasks.concat(framework.unreachable_tasks);
       $scope.completed_tasks =
         $scope.completed_tasks.concat(framework.completed_tasks);
     });
@@ -268,10 +275,10 @@
   // Main controller that can be used to handle "global" events. E.g.,:
   //     $scope.$on('$afterRouteChange', function() { ...; });
   //
-  // In addition, the MainCntl encapsulates the "view", allowing the
+  // In addition, the MainCtrl encapsulates the "view", allowing the
   // active controller/view to easily access anything in scope (e.g.,
   // the state).
-  mesosApp.controller('MainCntl', [
+  mesosApp.controller('MainCtrl', [
       '$scope', '$http', '$location', '$timeout', '$modal',
       function($scope, $http, $location, $timeout, $modal) {
     $scope.doneLoading = true;
@@ -523,7 +530,7 @@
 
       // Set up polling for the monitor if this is the first update.
       if (!$top.started()) {
-        $top.start(host, $scope);
+        $top.start(host, id, $scope);
       }
 
       $http.jsonp('//' + host + '/' + id + '/state?jsonp=JSON_CALLBACK')
@@ -617,7 +624,7 @@
 
       // Set up polling for the monitor if this is the first update.
       if (!$top.started()) {
-        $top.start(host, $scope);
+        $top.start(host, id, $scope);
       }
 
       $http.jsonp('//' + host + '/' + id + '/state?jsonp=JSON_CALLBACK')
@@ -694,7 +701,7 @@
 
       // Set up polling for the monitor if this is the first update.
       if (!$top.started()) {
-        $top.start(host, $scope);
+        $top.start(host, id, $scope);
       }
 
       $http.jsonp('//' + host + '/' + id + '/state?jsonp=JSON_CALLBACK')

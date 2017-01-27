@@ -374,6 +374,8 @@ message CheckInfo {
     HTTP = 2;
 
     // TODO(alexr): Consider supporting TCP checks and custom user checks.
+    // The latter should probably be paired with a `data` field and
+    // complemented by a `data` response in `CheckStatusInfo`.
   }
 
   // Describes a command check. If applicable, enters mount and/or network
@@ -786,11 +788,6 @@ message AgentInfo {
     // Enum fields should be optional, see: MESOS-4997.
     optional Type type = 1;
   }
-
-  // This field allows an agent to advertise its set of
-  // capabilities (e.g., ability to launch tasks of 'multi-role'
-  // frameworks).
-  repeated Capability capabilities = 9;
 }
 
 
@@ -1680,7 +1677,7 @@ enum TaskState {
   TASK_KILLED = 4;   // TERMINAL: The task was killed by the executor.
   TASK_ERROR = 7;    // TERMINAL: The task description contains an error.
 
-  // In Mesos 1.2, this will only be sent when the framework does NOT
+  // In Mesos 1.3, this will only be sent when the framework does NOT
   // opt-in to the PARTITION_AWARE capability.
   TASK_LOST = 5;     // TERMINAL: The task failed but can be rescheduled.
 

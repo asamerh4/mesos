@@ -257,7 +257,7 @@ protected:
       const FrameworkID& frameworkID,
       const SlaveID& slaveID);
 
-  bool allocatable(const Resources& resources);
+  static bool allocatable(const Resources& resources);
 
   bool initialized;
   bool paused;
@@ -337,6 +337,10 @@ protected:
     //
     // Note that it's possible for the slave to be over-allocated!
     // In this case, allocated > total.
+    Resources available() const
+    {
+      return total - allocated;
+    }
 
     bool activated;  // Whether to offer resources.
 
