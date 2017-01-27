@@ -110,41 +110,47 @@ public:
         "\n"
         "Example:\n"
         "{\n"
-        "   \"tasks\" : [{\n"
-        "         \"name\" : \"sub01-docker\",\n"
-        "         \"task_id\" : {\n"
-        "            \"value\" : \"sub01-docker\"\n"
-        "         },\n"
-        "         \"agent_id\" : {\n"
-        "            \"value\" : \"\"\n"
-        "         },\n"
-        "         \"resources\" : [{\n"
-        "               \"name\" : \"cpus\",\n"
-        "               \"type\" : \"SCALAR\",\n"
-        "               \"scalar\" : {\n"
-        "                  \"value\" : 0.5\n"
-        "               },\n"
-        "               \"role\" : \"*\"\n"
-        "            }, {\n"
-        "               \"name\" : \"mem\",\n"
-        "               \"type\" : \"SCALAR\",\n"
-        "               \"scalar\" : {\n"
-        "                  \"value\" : 32\n"
-        "               },\n"
-        "               \"role\" : \"*\"\n"
-        "            }\n"
-        "         ],\n"
-        "         \"command\" : {\n"
-        "            \"value\" : \"sleep 60 && ls -ltr && df\"\n"
-        "         },\n"
-        "         \"container\" : {\n"
-        "            \"type\" : \"DOCKER\",\n"
-        "            \"docker\" : {\n"
-        "               \"image\" : \"alpine\"\n"
-        "            }\n"
-        "         }\n"
-        "      }\n"
-        "   ]\n"
+        "  \"tasks\": [{\n"
+        "        \"name\": \"sub01-docker\",\n"
+        "        \"task_id\": {\n"
+        "           \"value\": \"sub01-docker\"\n"
+        "        },\n"
+        "        \"agent_id\": {\n"
+        "           \"value\": \"\"\n"
+        "        },\n"
+        "        \"resources\": [{\n"
+        "              \"name\": \"cpus\",\n"
+        "              \"type\": \"SCALAR\",\n"
+        "              \"scalar\": {\n"
+        "                 \"value\": 2.5\n"
+        "              },\n"
+        "              \"role\": \"test\",\n"
+        "              \"reservation\": {\n"
+        "                 \"principal\": \"test\"\n"
+        "              }\n"
+        "           }, {\n"
+        "              \"name\": \"mem\",\n"
+        "              \"type\": \"SCALAR\",\n"
+        "              \"scalar\": {\n"
+        "                 \"value\": 32\n"
+        "              },\n"
+        "              \"role\": \"test\",\n"
+        "              \"reservation\": {\n"
+        "                 \"principal\": \"test\"\n"
+        "              }\n"
+        "           }\n"
+        "        ],\n"
+        "        \"command\": {\n"
+        "           \"value\": \"ls -ltr && df\"\n"
+        "        },\n"
+        "        \"container\": {\n"
+        "           \"type\": \"DOCKER\",\n"
+        "           \"docker\": {\n"
+        "              \"image\": \"alpine\"\n"
+        "           }\n"
+        "        }\n"
+        "     },{...},{...},{...},{...}\n"
+        "  ]\n"
         "}");
 
     add(&Flags::persistent_volume,
@@ -154,17 +160,77 @@ public:
 
     add(&Flags::remove_persistent_volume,
         "remove_persistent_volume",
-        "Unreserves dynamic reservations and removes persistent volumes if any",
+        "Unreserves dynamic reservations and removes persistent volumes\n"
+        "if any\n",
         false);
 
     add(&Flags::persistent_volume_resource,
-       "persistent_volume_resource",
-       "message -> TaskInfo from mesos.proto");
+        "persistent_volume_resource",
+        "The value could be a JSON formatted string of `TaskInfo` or a\n"
+        "file path containing the JSON/protobuf. Path must\n"
+        "be of the form `file:///path/to/file` or `/path/to/file`."
+        "\n"
+        "See the `TaskInfo` and the contained `Resource` messages\n"
+        "in `mesos.proto` for the expected format.\n"
+        "NOTE: `DiskInfo` inside the `disk` Resource must be present.\n"
+        "\n"
+        "Example:\n"
+        "{\n"
+        "  \"name\": \"persistent_vol_resource_spec\",\n"
+        "  \"task_id\": {\n"
+        "     \"value\": \"resource_spec001\"\n"
+        "  },\n"
+        "  \"agent_id\": {\n"
+        "     \"value\": \"\"\n"
+        "  },\n"
+        "  \"resources\": [{\n"
+        "       \"name\": \"cpus\",\n"
+        "        \"type\": \"SCALAR\",\n"
+        "        \"scalar\": {\n"
+        "           \"value\": 3.0\n"
+        "        },\n"
+        "        \"role\": \"test\",\n"
+        "        \"reservation\": {\n"
+        "           \"principal\": \"test\"\n"
+        "        }\n"
+        "     }, {\n"
+        "        \"name\": \"mem\",\n"
+        "        \"type\": \"SCALAR\",\n"
+        "        \"scalar\": {\n"
+        "           \"value\": 64\n"
+        "        },\n"
+        "        \"role\": \"test\",\n"
+        "        \"reservation\": {\n"
+        "           \"principal\": \"test\"\n"
+        "        }\n"
+        "     }, {\n"
+        "        \"name\": \"disk\",\n"
+        "        \"type\": \"SCALAR\",\n"
+        "        \"scalar\": {\n"
+        "           \"value\": 4096\n"
+        "        },\n"
+        "        \"role\": \"test\",\n"
+        "        \"reservation\": {\n"
+        "           \"principal\": \"test\"\n"
+        "        },\n"
+        "        \"disk\": {\n"
+        "           \"persistence\": {\n"
+        "              \"id\": \"22d664c4-15d2-4978-86e3-d9b5d310666f\",\n"
+        "              \"principal\": \"test\"\n"
+        "           },\n"
+        "           \"volume\": {\n"
+        "              \"container_path\": \"volume\",\n"
+        "              \"mode\": \"RW\"\n"
+        "           }\n"
+        "        }\n"
+        "     }\n"
+        "  ]\n"
+        "}");
 
     add(&Flags::framework_name,
         "framework_name",
         "name of the framework",
-        "mesos-execute instance");
+        "mesos-batch instance");
 
     add(&Flags::checkpoint,
         "checkpoint",
@@ -174,7 +240,9 @@ public:
     add(&Flags::framework_capabilities,
         "framework_capabilities",
         "Comma separated list of optional framework capabilities to enable.\n"
-        "(e.g. 'SHARED_RESOURCES' or 'GPU_RESOURCES')");
+        "TASK_KILLING_STATE is always enabled. PARTITION_AWARE is enabled\n"
+        "unless --no-partition-aware is specified.\n"
+        "other choices are e.g. 'SHARED_RESOURCES' or 'GPU_RESOURCES'");
 
     add(&Flags::role,
         "role",
@@ -199,6 +267,10 @@ public:
         "The content type to use for scheduler protocol messages. 'json'\n"
         "and 'protobuf' are valid choices.",
         "protobuf");
+    add(&Flags::partition_aware,
+        "partition_aware",
+        "Enable partition-awareness for the framework.",
+        true);
   }
 
   string master;
@@ -214,8 +286,8 @@ public:
   Option<string> principal;
   Option<string> secret;
   string content_type;
+  bool partition_aware;
 };
-
 
 class CommandScheduler : public process::Process<CommandScheduler>
 {
@@ -252,6 +324,10 @@ public:
 
   // Vector holding task_list.
   vector<TaskInfo> tasks;
+  // Vector holding persistent volume infos, but without DiskInfo.
+  vector<Resource> plainResources;
+  // Vector holding all persistent volume infos (including DiskInfo)
+  vector<Resource> disk;
 
 protected:
   virtual void initialize()
@@ -266,10 +342,29 @@ protected:
       process::defer(self(), &Self::received, lambda::_1),
       credential));
 
-      // Fill up tasks vector from task_list.
-      foreach (TaskInfo _task, taskGroup->tasks()) {
-          tasks.push_back(_task);
+    // Fill up tasks vector from task_list.
+    foreach (TaskInfo _task, taskGroup->tasks()) {
+      tasks.push_back(_task);
+    }
+
+    // Prepare vectors plainResource & disk
+    foreach (Resource _resource, persistentVolumeResource->resources()){
+      if(_resource.name() == "disk"){
+        Resource plain;
+        plain.set_name(_resource.name());
+        plain.set_type(_resource.type());
+        plain.mutable_scalar()->CopyFrom(_resource.scalar());
+        plain.set_role(_resource.role());
+        plain.mutable_reservation()->CopyFrom(_resource.reservation());
+        // Push to plainResources
+        plainResources.push_back(plain);
+        // Push to disk
+        disk.push_back(_resource);
       }
+      else {
+        plainResources.push_back(_resource);
+      }
+    }
   }
 
   void connected()
@@ -326,14 +421,14 @@ protected:
   void offers(const vector<Offer>& offers)
   {
     CHECK_EQ(SUBSCRIBED, state);
-
-    // loop all offers and place tasks...
+    // Loop all offers and place tasks...
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
       Resources unreserved = offered.unreserved();
       Resources reserved = offered.reserved(role);
-      Resources requiredResources; // Resources needed for tasks.
-      // container for runnable tasks within current offer
+      // Resources needed for tasks.
+      Resources requiredResources;
+      // Container for runnable tasks within current offer
       vector<TaskInfo> runnable_tasks;
 
       cout << "Received offer from agent "
@@ -342,47 +437,52 @@ protected:
 
       // Check if we need a new dynamic reservation.
       if (persistentVolume) {
-        if (reserved.contains(Resources(persistentVolumeResource
-          ->resources()))){
+        if (reserved.contains(Resources(plainResources))){
           persistentVolumeReserved = true;
         }
         if(!persistentVolumeReserved &&
              !persistentVolumeCreated &&
-             offered.contains(Resources(persistentVolumeResource
-               ->resources()).flatten())){
+             offered.contains(Resources(plainResources).flatten())){
           cout << "Requested reserved resources: "
-               << persistentVolumeResource->resources()
+               << plainResources
                << " for -> **"
                << offer.hostname()
                << endl;
           Call call;
           call.set_type(Call::ACCEPT);
 
-          CHECK(!reserved.contains(Resources(persistentVolumeResource
-          ->resources())));
+          CHECK(!reserved.contains(Resources(plainResources)));
           CHECK(frameworkInfo.has_id());
 
           call.mutable_framework_id()->CopyFrom(frameworkInfo.id());
           Call::Accept* accept = call.mutable_accept();
           accept->add_offer_ids()->CopyFrom(offer.id());
 
+          // Reserve Operation
           Offer::Operation* operation = accept->add_operations();
           operation->set_type(Offer::Operation::RESERVE);
 
-          operation->mutable_reserve()
-            ->mutable_resources()
-            ->CopyFrom(Resources(persistentVolumeResource->resources()));
+          operation->mutable_reserve()->mutable_resources()
+            ->CopyFrom(Resources(plainResources));
 
+          // Create Operation
+          Offer::Operation* operation2 = accept->add_operations();
+          operation2->set_type(Offer::Operation::CREATE);
+          operation2->mutable_create()->mutable_volumes()
+            ->CopyFrom(Resources(disk));
+
+          // Send the call including RESERVE and CREATE operations
           mesos->send(call);
+
           persistentVolumeReserved = true;
-          cout << "Volume reserved using "
-               << persistentVolumeResource->resources()
+          persistentVolumeCreated = true;
+          cout << "Resources reserved & Volume created using "
+               << plainResources
                << " from -> "
                << offer.hostname()
                << endl;
         }
       }
-
       // Iterate over TaskGroupInfo content and push to runnable_tasks
       while (dTasksLaunched < (int) tasks.size()) {
           if (persistentVolume && persistentVolumeReserved){
@@ -592,6 +692,11 @@ public:
 
   virtual ~UnreserveScheduler() {}
 
+  // Vector holding persistent volume infos, but without DiskInfo.
+  vector<Resource> plainResources;
+  // Vector holding all persistent volume infos (including DiskInfo)
+  vector<Resource> disk;
+
 protected:
   virtual void initialize()
   {
@@ -604,6 +709,23 @@ protected:
       process::defer(self(), &Self::disconnected),
       process::defer(self(), &Self::received, lambda::_1),
       credential));
+
+    foreach (Resource _resource, persistentVolumeResource->resources()) {
+      if(_resource.name() == "disk"){
+        Resource plain;
+        plain.set_name(_resource.name());
+        plain.set_type(_resource.type());
+        plain.mutable_scalar()->CopyFrom(_resource.scalar());
+        plain.set_role(_resource.role());
+        plain.mutable_reservation()->CopyFrom(_resource.reservation());
+        plainResources.push_back(plain);
+        // Push to disk
+        disk.push_back(_resource);
+      }
+      else {
+        plainResources.push_back(_resource);
+      }
+    }
   }
 
   void connected()
@@ -643,18 +765,19 @@ protected:
   {
     CHECK_EQ(SUBSCRIBED, state);
 
-    // loop all offers and place UNRESERVE Operation
+    // loop all offers and place DESTROY and UNRESERVE Operation
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
       Resources unreserved = offered.unreserved();
       Resources reserved = offered.reserved(role);
+      Resources created = offered.persistentVolumes();
 
       cout << "Received offer from agent "
            << offer.hostname()
            << " with: " << offer.resources() << endl;
 
-      if (!reserved.contains(Resources(persistentVolumeResource
-          ->resources()))){
+      if (!reserved.contains(Resources(plainResources))
+           && !created.contains(Resources(disk))){
         cout << "Nothing to unreserve..." << endl;
       }
       else {
@@ -667,14 +790,23 @@ protected:
         Call::Accept* accept = call.mutable_accept();
         accept->add_offer_ids()->CopyFrom(offer.id());
 
+        // Destroy Operation
+        Offer::Operation* operation2 = accept->add_operations();
+        operation2->set_type(Offer::Operation::DESTROY);
+        operation2->mutable_destroy()->mutable_volumes()
+          ->CopyFrom(Resources(disk));
+
+        // Unreserve Operation
         Offer::Operation* operation = accept->add_operations();
         operation->set_type(Offer::Operation::UNRESERVE);
 
         operation->mutable_unreserve()
           ->mutable_resources()
-          ->CopyFrom(Resources(persistentVolumeResource->resources()));
-        cout << "Unreserved: " << persistentVolumeResource->resources()
+          ->CopyFrom(Resources(plainResources));
+        cout << "Destroyed and unreserved: " << plainResources
              << endl;
+
+        // Send the call including DESTROY and UNRESERVE operations
         mesos->send(call);
       }
     }
@@ -753,6 +885,18 @@ private:
 
 int main(int argc, char** argv)
 {
+  cout << R"(
+ __ `__ \    _ \   __|   _ \    __|
+ |   |   |   __/ \__ \  (   | \__ \ __|
+_|  _|  _| \___| ____/ \___/  ____/
+ |             |          |
+ __ \    _` |  __|   __|  __ \
+ |   |  (   |  |    (     | | |
+_.__/  \__,_| \__| \___| _| |_|
+commandline batch processing framework for mesos 1.1++ -> github.com/asamerh4/mesos-batch
+
+)";
+
   Flags flags;
   mesos::ContentType contentType = mesos::ContentType::PROTOBUF;
 
@@ -795,9 +939,15 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  // We set the TASK_KILLING_STATE capability by default.
+  // Always enable the TASK_KILLING_STATE capability.
   vector<FrameworkInfo::Capability::Type> frameworkCapabilities =
     { FrameworkInfo::Capability::TASK_KILLING_STATE };
+
+  // Enable PARTITION_AWARE unless disabled by the user.
+  if (flags.partition_aware) {
+    frameworkCapabilities.push_back(
+        FrameworkInfo::Capability::PARTITION_AWARE);
+  }
 
   if (flags.framework_capabilities.isSome()) {
     foreach (const string& capability, flags.framework_capabilities.get()) {
@@ -805,7 +955,7 @@ int main(int argc, char** argv)
 
       if (!FrameworkInfo::Capability::Type_Parse(capability, &type)) {
         cerr << "Flags '--framework_capabilities'"
-                " specifes an unknown capability"
+                " specifies an unknown capability"
                 " '" << capability << "'" << endl;
         return EXIT_FAILURE;
       }
