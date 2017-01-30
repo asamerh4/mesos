@@ -679,7 +679,6 @@ public:
       const string& _role,
       mesos::ContentType _contentType,
       const Option<Credential>& _credential,
-      const bool& _removePersistentVolume,
       const Option<TaskInfo>& _persistentVolumeResource)
     : state(DISCONNECTED),
       frameworkInfo(_frameworkInfo),
@@ -687,7 +686,6 @@ public:
       role(_role),
       contentType(_contentType),
       credential(_credential),
-      removePersistentVolume(_removePersistentVolume),
       persistentVolumeResource(_persistentVolumeResource){}
 
   virtual ~UnreserveScheduler() {}
@@ -875,7 +873,6 @@ private:
   const string role;
   mesos::ContentType contentType;
   const Option<Credential> credential;
-  bool removePersistentVolume;
   const Option<TaskInfo> persistentVolumeResource;
   Owned<Mesos> mesos;
 };
@@ -1045,7 +1042,6 @@ commandline batch processing framework for mesos 1.1++ -> github.com/asamerh4/me
         flags.role,
         contentType,
         credential,
-        flags.remove_persistent_volume,
         flags.persistent_volume_resource));
 
     process::spawn(scheduler2.get());
