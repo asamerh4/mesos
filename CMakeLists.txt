@@ -16,7 +16,11 @@
 
 # THE MESOS PROJECT.
 ####################
-cmake_minimum_required(VERSION 2.8.10)
+if (NOT WIN32)
+  cmake_minimum_required(VERSION 2.8.10)
+else (NOT WIN32)
+  cmake_minimum_required(VERSION 3.6.3)
+endif (NOT WIN32)
 
 project(Mesos)
 set(MESOS_MAJOR_VERSION 1)
@@ -68,5 +72,10 @@ add_custom_target(
   check ${STOUT_TESTS_TARGET}
   COMMAND ${PROCESS_TESTS_TARGET}
   COMMAND ${MESOS_TESTS_TARGET}
-  DEPENDS ${STOUT_TESTS_TARGET} ${PROCESS_TESTS_TARGET}  ${MESOS_TESTS_TARGET}
+  DEPENDS ${STOUT_TESTS_TARGET} ${PROCESS_TESTS_TARGET} ${MESOS_TESTS_TARGET}
+  )
+
+add_custom_target(
+  tests
+  DEPENDS ${STOUT_TESTS_TARGET} ${PROCESS_TESTS_TARGET} ${MESOS_TESTS_TARGET}
   )

@@ -48,6 +48,19 @@ constexpr char DEFAULT_HTTP_AUTHENTICATOR[] = "basic";
 
 extern hashset<std::string> AUTHORIZABLE_ENDPOINTS;
 
+
+// Contains the media types corresponding to some of the "Content-*",
+// "Accept-*" and "Message-*" prefixed request headers in our internal
+// representation.
+struct RequestMediaTypes
+{
+  ContentType content; // 'Content-Type' header.
+  ContentType accept; // 'Accept' header.
+  Option<ContentType> messageContent; // 'Message-Content-Type' header.
+  Option<ContentType> messageAccept; // 'Message-Accept' header.
+};
+
+
 // Serializes a protobuf message for transmission
 // based on the HTTP content type.
 // NOTE: For streaming `contentType`, `message` would not
@@ -59,24 +72,20 @@ std::string serialize(
 
 // Deserializes a string message into a protobuf message based on the
 // HTTP content type.
-// NOTE: For streaming `contentType`, `body` should not be
-// in "Record-IO" format.
 template <typename Message>
 Try<Message> deserialize(
     ContentType contentType,
     const std::string& body)
 {
   switch (contentType) {
-    case ContentType::PROTOBUF:
-    case ContentType::STREAMING_PROTOBUF: {
+    case ContentType::PROTOBUF: {
       Message message;
       if (!message.ParseFromString(body)) {
         return Error("Failed to parse body into a protobuf object");
       }
       return message;
     }
-    case ContentType::JSON:
-    case ContentType::STREAMING_JSON: {
+    case ContentType::JSON: {
       Try<JSON::Value> value = JSON::parse(body);
       if (value.isError()) {
         return Error("Failed to parse body into JSON: " + value.error());
@@ -84,14 +93,18 @@ Try<Message> deserialize(
 
       return ::protobuf::parse<Message>(value.get());
     }
+    case ContentType::RECORDIO: {
+      return Error("Deserializing a RecordIO stream is not supported");
+    }
   }
 
   UNREACHABLE();
 }
 
 
-// Returns true if the content type can be used for streaming requests.
-bool requestStreaming(ContentType contentType);
+// Returns true if the media type can be used for
+// streaming requests/responses.
+bool streamingMediaType(ContentType contentType);
 
 
 JSON::Object model(const Resources& resources);

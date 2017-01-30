@@ -582,9 +582,7 @@ Try<Resources> Resources::parse(
   // Try to parse as a JSON Array. Otherwise, parse as a text string.
   Try<JSON::Array> json = JSON::parse<JSON::Array>(text);
 
-  Try<vector<Resource>> resources = json.isSome() ?
-    Resources::fromJSON(json.get(), defaultRole) :
-    Resources::fromSimpleString(text, defaultRole);
+  Try<vector<Resource>> resources = Resources::fromString(text, defaultRole);
 
   if (resources.isError()) {
     return Error(resources.error());
@@ -689,6 +687,19 @@ Try<vector<Resource>> Resources::fromSimpleString(
   }
 
   return resources;
+}
+
+
+Try<vector<Resource>> Resources::fromString(
+    const string& text,
+    const string& defaultRole)
+{
+  // Try to parse as a JSON Array. Otherwise, parse as a text string.
+  Try<JSON::Array> json = JSON::parse<JSON::Array>(text);
+
+  return json.isSome() ?
+    Resources::fromJSON(json.get(), defaultRole) :
+    Resources::fromSimpleString(text, defaultRole);
 }
 
 
@@ -1056,6 +1067,24 @@ size_t Resources::count(const Resource& that) const
 }
 
 
+void Resources::allocate(const string& role)
+{
+  foreach (Resource_& resource_, resources) {
+    resource_.resource.mutable_allocation_info()->set_role(role);
+  }
+}
+
+
+void Resources::unallocate()
+{
+  foreach (Resource_& resource_, resources) {
+    if (resource_.resource.has_allocation_info()) {
+      resource_.resource.clear_allocation_info();
+    }
+  }
+}
+
+
 Resources Resources::filter(
     const lambda::function<bool(const Resource&)>& predicate) const
 {
@@ -1192,6 +1221,7 @@ Resources Resources::createStrippedScalarQuantity() const
   foreach (const Resource& resource, resources) {
     if (resource.type() == Value::SCALAR) {
       Resource scalar = resource;
+      scalar.clear_allocation_info();
       scalar.clear_reservation();
       scalar.clear_disk();
       scalar.clear_shared();
@@ -1914,6 +1944,10 @@ ostream& operator<<(ostream& stream, const Resource& resource)
   }
 
   stream << ")";
+
+  if (resource.has_allocation_info()) {
+    stream << "(allocated: " << resource.allocation_info().role() << ")";
+  }
 
   if (resource.has_disk()) {
     stream << "[" << resource.disk() << "]";

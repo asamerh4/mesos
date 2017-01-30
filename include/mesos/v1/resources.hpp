@@ -344,6 +344,14 @@ public:
   // - If the resource is not in the Resources object, the count is 0.
   size_t count(const Resource& that) const;
 
+  // Allocates the resources to the given role (by setting the
+  // `AllocationInfo.role`). Any existing allocation will be
+  // over-written.
+  void allocate(const std::string& role);
+
+  // Unallocates the resources.
+  void unallocate();
+
   // Filter resources based on the given predicate.
   Resources filter(
       const lambda::function<bool(const Resource&)>& predicate) const;
@@ -396,11 +404,11 @@ public:
   Resources flatten() const;
 
   // Returns a Resources object that contains all the scalar resources
-  // in this object, but with their ReservationInfo and DiskInfo
-  // omitted. Note that the `role` and RevocableInfo, if any, are
-  // preserved. Because we clear ReservationInfo but preserve `role`,
-  // this means that stripping a dynamically reserved resource makes
-  // it effectively statically reserved.
+  // in this object, but with their ReservationInfo, AllocationInfo,
+  // and DiskInfo omitted. Note that the `role` and RevocableInfo,
+  // if any, are preserved. Because we clear ReservationInfo but
+  // preserve `role`, this means that stripping a dynamically
+  // reserved resource makes it effectively statically reserved.
   //
   // This is intended for code that would like to aggregate together
   // Resource values without regard for metadata like whether the

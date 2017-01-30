@@ -96,7 +96,8 @@ set(STOUT_TESTS_SRC
 # INCLUDE DIRECTIVES FOR STOUT TEST BINARY (generates, e.g., -I/path/to/thing
 # on Linux).
 #############################################################################
-include_directories(${STOUT_TEST_INCLUDE_DIRS})
+include_directories(SYSTEM ${STOUT_TEST_3RDPARTY_INCLUDE_DIRS})
+include_directories(${STOUT_INCLUDE_DIRS})
 
 # LINKING LIBRARIES BY DIRECTORY (might generate, e.g., -L/path/to/thing on
 # Linux).
@@ -107,10 +108,13 @@ link_directories(${STOUT_TEST_LIB_DIRS})
 ###########################################################################
 add_executable(${STOUT_TESTS_TARGET} ${STOUT_TESTS_SRC})
 
-source_group("tests" FILES ${STOUT_ROOT_TESTS_SRC})
-source_group("tests\\os" FILES ${STOUT_OS_TESTS_SRC})
-
 GROUP_STOUT_HEADERS()
+
+GROUP_SOURCE(
+  "tests"
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "*.[ch]*")
 
 # ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
 ######################################################

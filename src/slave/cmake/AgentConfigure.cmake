@@ -56,8 +56,12 @@ set(AGENT_INCLUDE_DIRS
   ${MESOS_BIN_INCLUDE_DIR}/mesos
   ${MESOS_BIN_SRC_DIR}
   ${MESOS_SRC_DIR}
+  )
 
+set(AGENT_3RDPARTY_INCLUDE_DIRS
+  ${AGENT_3RDPARTY_INCLUDE_DIRS}
   ${PROCESS_INCLUDE_DIRS}
+  ${PROCESS_3RDPARTY_INCLUDE_DIRS}
   ${ZOOKEEPER_INCLUDE_DIR}
   ${ZOOKEEPER_INCLUDE_GENDIR}
   ${LEVELDB_INCLUDE_DIR}
@@ -96,53 +100,3 @@ if (NOT ENABLE_LIBEVENT)
 elseif (ENABLE_LIBEVENT)
   set(AGENT_LIBS ${AGENT_LIBS} ${LIBEVENT_LFLAG})
 endif (NOT ENABLE_LIBEVENT)
-
-
-############################################################
-
-
-set(
-  PROCESS_AGENT_TARGET slave
-  CACHE STRING "Agent target")
-
-
-# DEFINE PROCESS AGENT LIBRARY DEPENDENCIES. Tells the process library build
-# tests target download/configure/build all third-party libraries before
-# attempting to build.
-###########################################################################
-set(PROCESS_AGENT_DEPENDENCIES
-  ${PROCESS_AGENT_DEPENDENCIES}
-  ${PROCESS_DEPENDENCIES}
-  )
-
-if (WIN32)
-  set(PROCESS_AGENT_DEPENDENCIES
-    ${PROCESS_AGENT_DEPENDENCIES}
-    )
-endif (WIN32)
-
-# DEFINE THIRD-PARTY INCLUDE DIRECTORIES. Tells compiler toolchain where to get
-# headers for our third party libs (e.g., -I/path/to/glog on Linux).
-###############################################################################
-set(PROCESS_AGENT_INCLUDE_DIRS
-  ${PROCESS_AGENT_INCLUDE_DIRS}
-  ${AGENT_INCLUDE_DIRS}
-  ${PROTOBUF_INCLUDE_DIR}
-  src
-  )
-
-if (WIN32)
-  set(PROCESS_AGENT_INCLUDE_DIRS
-    ${PROCESS_AGENT_INCLUDE_DIRS}
-    ${AGENT_INCLUDE_DIRS}
-  )
-endif (WIN32)
-
-# DEFINE THIRD-PARTY LIB INSTALL DIRECTORIES. Used to tell the compiler
-# toolchain where to find our third party libs (e.g., -L/path/to/glog on
-# Linux).
-########################################################################
-set(PROCESS_AGENT_LIB_DIRS
-  ${PROCESS_AGENT_LIB_DIRS}
-  ${AGENT_LIB_DIRS}
-  )
