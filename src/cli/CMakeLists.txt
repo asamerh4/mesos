@@ -14,9 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TODO(josephw): Enable this on Windows after sorting out the dependencies.
-if (NOT WIN32)
 
+if (WIN32)
 set(MESOS_EXECUTE_TARGET mesos-execute
   CACHE STRING "Utility used to schedule and run a command in a mesos cluster.")
 
@@ -40,4 +39,27 @@ target_link_libraries(${MESOS_EXECUTE_TARGET} ${MESOS_LIBS_TARGET})
 add_dependencies(${MESOS_TARGET} ${MESOS_EXECUTE_TARGET})
 add_dependencies(${MESOS_EXECUTE_TARGET} ${MESOS_LIBS_TARGET})
 
-endif (NOT WIN32)
+#MESOS-BATCH
+set(MESOS_BATCH_TARGET mesos-batch
+  CACHE STRING "Batch processing framework.")
+
+# THE MESOS-BATCH SOURCE.
+###########################
+set(MESOS_BATCH_SRC
+  ${MESOS_BATCH_SRC}
+  batch.cpp
+  )
+
+# THE MESOS BATCH.
+#######################
+add_executable(${MESOS_BATCH_TARGET} ${MESOS_BATCH_SRC})
+
+# ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
+######################################################
+target_link_libraries(${MESOS_BATCH_TARGET} ${MESOS_LIBS_TARGET})
+
+# ADD BINARY DEPENDENCIES (tells CMake what to compile/build first).
+####################################################################
+add_dependencies(${MESOS_TARGET} ${MESOS_BATCH_TARGET})
+add_dependencies(${MESOS_BATCH_TARGET} ${MESOS_LIBS_TARGET})
+endif(WIN32)
