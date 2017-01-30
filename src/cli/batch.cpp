@@ -886,9 +886,11 @@ private:
 int main(int argc, char** argv)
 {
   cout << R"(
-┌┬┐┌─┐┌─┐┌─┐┌─┐   ┌┐ ┌─┐┌┬┐┌─┐┬ ┬
-│││├┤ └─┐│ │└─┐───├┴┐├─┤ │ │  ├─┤
-┴ ┴└─┘└─┘└─┘└─┘   └─┘┴ ┴ ┴ └─┘┴ ┴
+    __          __       __
+   / /_  ____ _/ /______/ /
+  / __ \/ __ `/ __/ ___/ __ \
+ / /_/ / /_/ / /_/ /__/ / / /
+/_.___/\__,_/\__/\___/_/ /_/
 commandline batch processing framework for mesos 1.1++ -> github.com/asamerh4/mesos-batch
 
 )";
