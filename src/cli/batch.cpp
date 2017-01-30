@@ -832,9 +832,7 @@ protected:
         }
 
         case Event::OFFERS: {
-          sleep(5);
           offers(google::protobuf::convert(event.offers().offers()));
-          sleep(5);
           terminate(self());
           break;
         }
@@ -931,7 +929,7 @@ commandline batch processing framework for mesos 1.1++ -> github.com/asamerh4/me
     if (user.isError()) {
       cerr << "Failed to get username: " << user.error() << endl;
     } else {
-      cerr << "No username for uid " << ::getuid() << endl;
+      cerr << "No username for uid " << endl;
     }
     return EXIT_FAILURE;
   }
