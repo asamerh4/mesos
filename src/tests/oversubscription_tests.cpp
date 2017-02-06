@@ -50,6 +50,7 @@
 #include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
 #include "tests/mock_slave.hpp"
+#include "tests/resources_utils.hpp"
 #include "tests/utils.hpp"
 
 using namespace process;
@@ -398,9 +399,13 @@ TEST_F(OversubscriptionTest, RevocableOffer)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   // Inject an estimation of oversubscribable cpu resources.
+  estimations.put(createRevocableResources("cpus", "2"));
+
   Resources taskResources = createRevocableResources("cpus", "1");
+  taskResources.allocate(framework.role());
+
   Resources executorResources = createRevocableResources("cpus", "1");
-  estimations.put(taskResources + executorResources);
+  executorResources.allocate(framework.role());
 
   // Now the framework will get revocable resources.
   AWAIT_READY(offers2);
@@ -441,9 +446,7 @@ TEST_F(OversubscriptionTest, RevocableOffer)
 // This test verifies that when the master receives a new estimate for
 // oversubscribed resources it rescinds outstanding revocable offers.
 // In this test the oversubscribed resources are increased, so the master
-// will send out two offers, the first one is the increased oversubscribed
-// resources and the second one is the oversubscribed resources from the
-// rescind offered resources.
+// will send out new offers with increased revocable resources.
 TEST_F(OversubscriptionTest, RescindRevocableOfferWithIncreasedRevocable)
 {
   // Pause the clock because we want to manually drive the allocations.
@@ -484,39 +487,36 @@ TEST_F(OversubscriptionTest, RescindRevocableOfferWithIncreasedRevocable)
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
-  Future<vector<Offer>> offers1;
+  Queue<Offer> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers1));
+    .WillRepeatedly(EnqueueOffers(&offers));
 
   driver.start();
 
   // Initially the framework will get all regular resources.
   Clock::advance(agentFlags.registration_backoff_factor);
   Clock::advance(masterFlags.allocation_interval);
-  AWAIT_READY(offers1);
-  EXPECT_NE(0u, offers1->size());
-  EXPECT_TRUE(Resources(offers1.get()[0].resources()).revocable().empty());
+  Clock::settle();
 
-  Future<vector<Offer>> offers2;
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers2));
+  EXPECT_EQ(1u, offers.size());
+  EXPECT_TRUE(Resources(offers.get()->resources()).revocable().empty());
 
   // Inject an estimation of oversubscribable resources.
   Resources resources1 = createRevocableResources("cpus", "1");
   estimations.put(resources1);
 
   // Now the framework will get revocable resources.
-  AWAIT_READY(offers2);
-  EXPECT_NE(0u, offers2->size());
-  EXPECT_EQ(resources1, Resources(offers2.get()[0].resources()));
+  Clock::settle();
+
+  EXPECT_EQ(1u, offers.size());
+  Future<Offer> offer = offers.get();
+  AWAIT_READY(offer);
+  EXPECT_EQ(allocatedResources(resources1, framework.role()),
+            Resources(offer->resources()));
 
   Future<OfferID> offerId;
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&offerId));
-
-  Future<vector<Offer>> offers3;
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers3));
 
   // Inject another estimation of increased oversubscribable resources
   // while the previous revocable offer is outstanding.
@@ -528,27 +528,28 @@ TEST_F(OversubscriptionTest, RescindRevocableOfferWithIncreasedRevocable)
   Clock::settle();
 
   // The previous revocable offer should be rescinded.
-  AWAIT_EXPECT_EQ(offers2.get()[0].id(), offerId);
+  AWAIT_EXPECT_EQ(offer->id(), offerId);
 
-  // The new offer should be the increased oversubscribed resources.
-  AWAIT_READY(offers3);
-  EXPECT_NE(0u, offers3->size());
-  EXPECT_EQ(createRevocableResources("cpus", "2"),
-            Resources(offers3.get()[0].resources()));
-
-  Future<vector<Offer>> offers4;
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers4));
-
-  // Advance the clock to trigger a batch allocation, this will
-  // allocate the oversubscribed resources that were rescinded.
+  // The allocation run triggered by the agent resource update may or
+  // may not take into account the rescinded offer due to a race
+  // between the dispatched allocation and the recovery of the resources
+  // from the recinded offer. Therefore we advance the clock after these
+  // resources are recovered to trigger a batch allocation to make sure
+  // all resources are allocated.
+  Clock::settle();
   Clock::advance(masterFlags.allocation_interval);
   Clock::settle();
 
-  // The new offer should be the old oversubscribed resources.
-  AWAIT_READY(offers4);
-  EXPECT_NE(0u, offers4->size());
-  EXPECT_EQ(resources1, Resources(offers4.get()[0].resources()));
+  ASSERT_GT(offers.size(), 0);
+
+  // The total offered resources after the latest estimate.
+  Resources resources3;
+  for (size_t i = 0; i < offers.size(); i++) {
+    resources3 += offers.get()->resources();
+  }
+
+  // The offered resources should match the resource estimate.
+  EXPECT_EQ(allocatedResources(resources2, framework.role()), resources3);
 
   driver.stop();
   driver.join();
@@ -624,7 +625,8 @@ TEST_F(OversubscriptionTest, RescindRevocableOfferWithDecreasedRevocable)
   // Now the framework will get revocable resources.
   AWAIT_READY(offers2);
   EXPECT_NE(0u, offers2->size());
-  EXPECT_EQ(resources1, Resources(offers2.get()[0].resources()));
+  EXPECT_EQ(allocatedResources(resources1, framework.role()),
+            Resources(offers2.get()[0].resources()));
 
   Future<OfferID> offerId;
   EXPECT_CALL(sched, offerRescinded(&driver, _))
@@ -654,7 +656,8 @@ TEST_F(OversubscriptionTest, RescindRevocableOfferWithDecreasedRevocable)
   // The new offer should include the latest oversubscribed resources.
   AWAIT_READY(offers3);
   EXPECT_NE(0u, offers3->size());
-  EXPECT_EQ(resources2, Resources(offers3.get()[0].resources()));
+  EXPECT_EQ(allocatedResources(resources2, framework.role()),
+            Resources(offers3.get()[0].resources()));
 
   driver.stop();
   driver.join();
@@ -1279,13 +1282,12 @@ TEST_F(OversubscriptionTest, UpdateAllocatorOnSchedulerFailover)
   EXPECT_CALL(sched2, resourceOffers(&driver2, _))
     .WillOnce(FutureArg<1>(&offers2));
 
-  Resources taskResources = createRevocableResources("cpus", "1");
-  Resources executorResources = createRevocableResources("cpus", "1");
-  estimations.put(taskResources + executorResources);
+  Resources revocable = createRevocableResources("cpus", "2");
+  estimations.put(revocable);
 
   AWAIT_READY(offers2);
   EXPECT_NE(0u, offers2.get().size());
-  EXPECT_EQ(taskResources + executorResources,
+  EXPECT_EQ(allocatedResources(revocable, framework2.role()),
             Resources(offers2.get()[0].resources()));
 
   EXPECT_EQ(DRIVER_STOPPED, driver2.stop());
@@ -1352,16 +1354,14 @@ TEST_F(OversubscriptionTest, RemoveCapabilitiesOnSchedulerFailover)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   // Inject an estimation of oversubscribable cpu resources.
-  Resources taskResources = createRevocableResources("cpus", "1");
-  Resources executorResources = createRevocableResources("cpus", "1");
-  estimations.put(taskResources + executorResources);
+  Resources revocable = createRevocableResources("cpus", "2");
+  estimations.put(revocable);
 
   // Now the framework will get revocable resources.
   AWAIT_READY(offers2);
   EXPECT_NE(0u, offers2.get().size());
-  EXPECT_EQ(
-      taskResources + executorResources,
-      Resources(offers2.get()[0].resources()));
+  EXPECT_EQ(allocatedResources(revocable, framework1.role()),
+            Resources(offers2.get()[0].resources()));
 
   // Reregister the framework with removal of revocable resources capability.
   FrameworkInfo framework2 = DEFAULT_FRAMEWORK_INFO;

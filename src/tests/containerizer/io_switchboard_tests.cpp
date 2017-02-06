@@ -462,8 +462,7 @@ TEST_F(IOSwitchboardServerTest, SendHeartbeat)
 }
 
 
-// TODO(alexr): Enable this test once MESOS-6912 is resolved.
-TEST_F(IOSwitchboardServerTest, DISABLED_AttachInput)
+TEST_F(IOSwitchboardServerTest, AttachInput)
 {
   // We use a pipe in this test to prevent the switchboard from
   // reading EOF on its `stdoutFromFd` until we are ready for the
@@ -525,7 +524,8 @@ TEST_F(IOSwitchboardServerTest, DISABLED_AttachInput)
   request.url.path = "/";
   request.keepAlive = true;
   request.headers["Accept"] = APPLICATION_JSON;
-  request.headers["Content-Type"] = APPLICATION_JSON;
+  request.headers["Content-Type"] = APPLICATION_RECORDIO;
+  request.headers[MESSAGE_CONTENT_TYPE] = APPLICATION_JSON;
 
   Try<unix::Address> address = unix::Address::create(socketPath);
   ASSERT_SOME(address);

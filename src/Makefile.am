@@ -1124,6 +1124,7 @@ MESOS_LINUX_FILES =									\
   linux/cgroups.cpp									\
   linux/fs.cpp										\
   linux/ldcache.cpp									\
+  linux/ldd.cpp										\
   linux/perf.cpp									\
   linux/systemd.cpp									\
   slave/containerizer/mesos/linux_launcher.cpp						\
@@ -1164,6 +1165,7 @@ MESOS_LINUX_FILES +=									\
   linux/cgroups.hpp									\
   linux/fs.hpp										\
   linux/ldcache.hpp									\
+  linux/ldd.hpp										\
   linux/ns.hpp										\
   linux/perf.hpp									\
   linux/sched.hpp									\
@@ -2337,6 +2339,7 @@ mesos_tests_DEPENDENCIES =					\
 if OS_LINUX
 mesos_tests_SOURCES +=						\
   tests/ldcache_tests.cpp					\
+  tests/ldd_tests.cpp						\
   tests/containerizer/linux_capabilities_isolator_tests.cpp	\
   tests/containerizer/capabilities_tests.cpp			\
   tests/containerizer/capabilities_test_helper.cpp		\

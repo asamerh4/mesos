@@ -37,7 +37,9 @@
 #include "tests/mock_docker.hpp"
 #include "tests/utils.hpp"
 
+#ifdef __linux__
 #include "tests/containerizer/docker_archive.hpp"
+#endif // __linux__
 
 namespace http = process::http;
 
@@ -203,6 +205,26 @@ TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
     healthCheckProto.set_type(HealthCheck::COMMAND);
     healthCheckProto.mutable_command()->CopyFrom(CommandInfo());
     Option<Error> validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+  }
+
+  // Command health check must specify a command with a valid environment.
+  // Currently, `Environment.Variable.Value` must be set, but this constraint
+  // will be removed in a future version.
+  {
+    HealthCheck healthCheckProto;
+    healthCheckProto.set_type(HealthCheck::COMMAND);
+    healthCheckProto.mutable_command()->CopyFrom(createCommandInfo("exit 0"));
+
+    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    EXPECT_NONE(validate);
+
+    Environment::Variable* variable =
+      healthCheckProto.mutable_command()->mutable_environment()
+          ->mutable_variables()->Add();
+    variable->set_name("ENV_VAR_KEY");
+
+    validate = validation::healthCheck(healthCheckProto);
     EXPECT_SOME(validate);
   }
 

@@ -95,7 +95,8 @@ public:
       const Duration& allocationInterval,
       const lambda::function<
           void(const FrameworkID&,
-               const hashmap<SlaveID, Resources>&)>& offerCallback,
+               const hashmap<std::string, hashmap<SlaveID, Resources>>&)>&
+        offerCallback,
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<SlaveID, UnavailableResources>&)>&
@@ -186,9 +187,11 @@ public:
       const Resources& resources,
       const Option<Filters>& filters);
 
+  // TODO(bmahler): Update to take optional Suppress.role.
   void suppressOffers(
       const FrameworkID& frameworkId);
 
+  // TODO(bmahler): Update to take optional Revive.role.
   void reviveOffers(
       const FrameworkID& frameworkId);
 
@@ -214,21 +217,35 @@ protected:
   // Callback for doing batch allocations.
   void batch();
 
-  // Allocate any allocatable resources.
-  void allocate();
+  // Allocate any allocatable resources from all known agents.
+  process::Future<Nothing> allocate();
 
-  // Allocate resources just from the specified slave.
-  void allocate(const SlaveID& slaveId);
+  // Allocate resources from the specified agent.
+  process::Future<Nothing> allocate(const SlaveID& slaveId);
 
-  // Allocate resources from the specified slaves.
-  void allocate(const hashset<SlaveID>& slaveIds);
+  // Allocate resources from the specified agents. The allocation
+  // is deferred and batched with other allocation requests.
+  process::Future<Nothing> allocate(const hashset<SlaveID>& slaveIds);
 
-  // Send inverse offers from the specified slaves.
-  void deallocate(const hashset<SlaveID>& slaveIds);
+  // Method that performs allocation work.
+  Nothing _allocate();
 
-  // Remove an offer filter for the specified framework.
+  // Helper for `_allocate()` that allocates resources for offers.
+  void __allocate();
+
+  // Helper for `_allocate()` that deallocates resources for inverse offers.
+  void deallocate();
+
+  // Remove an offer filter for the specified role of the framework.
   void expire(
       const FrameworkID& frameworkId,
+      const std::string& role,
+      const SlaveID& slaveId,
+      OfferFilter* offerFilter);
+
+  void _expire(
+      const FrameworkID& frameworkId,
+      const std::string& role,
       const SlaveID& slaveId,
       OfferFilter* offerFilter);
 
@@ -239,23 +256,24 @@ protected:
       InverseOfferFilter* inverseOfferFilter);
 
   // Returns the weight of the specified role name.
-  double roleWeight(const std::string& name);
+  double roleWeight(const std::string& name) const;
 
   // Checks whether the slave is whitelisted.
-  bool isWhitelisted(const SlaveID& slaveId);
+  bool isWhitelisted(const SlaveID& slaveId) const;
 
-  // Returns true if there is a resource offer filter for this framework
-  // on this slave.
+  // Returns true if there is a resource offer filter for the
+  // specified role of this framework on this slave.
   bool isFiltered(
       const FrameworkID& frameworkId,
+      const std::string& role,
       const SlaveID& slaveId,
-      const Resources& resources);
+      const Resources& resources) const;
 
   // Returns true if there is an inverse offer filter for this framework
   // on this slave.
   bool isFiltered(
       const FrameworkID& frameworkID,
-      const SlaveID& slaveID);
+      const SlaveID& slaveID) const;
 
   static bool allocatable(const Resources& resources);
 
@@ -269,18 +287,22 @@ protected:
 
   lambda::function<
       void(const FrameworkID&,
-           const hashmap<SlaveID, Resources>&)> offerCallback;
+           const hashmap<std::string, hashmap<SlaveID, Resources>>&)>
+    offerCallback;
 
   lambda::function<
       void(const FrameworkID&,
-           const hashmap<SlaveID, UnavailableResources>&)> inverseOfferCallback;
+           const hashmap<SlaveID, UnavailableResources>&)>
+    inverseOfferCallback;
 
   friend Metrics;
   Metrics metrics;
 
   struct Framework
   {
-    std::string role;
+    explicit Framework(const FrameworkInfo& frameworkInfo);
+
+    std::set<std::string> roles;
 
     // Whether the framework suppresses offers.
     bool suppressed;
@@ -288,7 +310,9 @@ protected:
     protobuf::framework::Capabilities capabilities;
 
     // Active offer and inverse offer filters for the framework.
-    hashmap<SlaveID, hashset<OfferFilter*>> offerFilters;
+    // Offer filters are tied to the role the filtered resources
+    // were allocated to.
+    hashmap<std::string, hashmap<SlaveID, hashset<OfferFilter*>>> offerFilters;
     hashmap<SlaveID, hashset<InverseOfferFilter*>> inverseOfferFilters;
   };
 
@@ -339,7 +363,12 @@ protected:
     // In this case, allocated > total.
     Resources available() const
     {
-      return total - allocated;
+      // In order to subtract from the total,
+      // we strip the allocation information.
+      Resources allocated_ = allocated;
+      allocated_.unallocate();
+
+      return total - allocated_;
     }
 
     bool activated;  // Whether to offer resources.
@@ -384,6 +413,15 @@ protected:
   };
 
   hashmap<SlaveID, Slave> slaves;
+
+  // A set of agents that are kept as allocation candidates. Events
+  // may add or remove candidates to the set. When an allocation is
+  // processed, the set of candidates is cleared.
+  hashset<SlaveID> allocationCandidates;
+
+  // Future for the dispatched allocation that becomes
+  // ready after the allocation run is complete.
+  Option<process::Future<Nothing>> allocation;
 
   // Number of registered frameworks for each role. When a role's active
   // count drops to zero, it is removed from this map; the role is also
@@ -470,6 +508,12 @@ protected:
 
   // Factory function for framework sorters.
   const std::function<Sorter*()> frameworkSorterFactory;
+
+private:
+  // Helper to update the agent's total resources maintained in the allocator
+  // and the role and quota sorters (whose total resources match the agent's
+  // total resources).
+  void updateSlaveTotal(const SlaveID& slaveId, const Resources& total);
 };
 
 

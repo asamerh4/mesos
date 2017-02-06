@@ -744,6 +744,21 @@ Option<Error> validateResources(const ExecutorInfo& executor)
 }
 
 
+// Validates the `CommandInfo` contained within an `ExecutorInfo`.
+Option<Error> validateCommandInfo(const ExecutorInfo& executor)
+{
+  if (executor.has_command()) {
+    Option<Error> error =
+      common::validation::validateCommandInfo(executor.command());
+    if (error.isSome()) {
+      return Error("Executor's `CommandInfo` is invalid: " + error->message);
+    }
+  }
+
+  return None();
+}
+
+
 Option<Error> validate(
     const ExecutorInfo& executor,
     Framework* framework,
@@ -759,7 +774,8 @@ Option<Error> validate(
     lambda::bind(internal::validateShutdownGracePeriod, executor),
     lambda::bind(internal::validateResources, executor),
     lambda::bind(
-        internal::validateCompatibleExecutorInfo, executor, framework, slave)
+        internal::validateCompatibleExecutorInfo, executor, framework, slave),
+    lambda::bind(internal::validateCommandInfo, executor)
   };
 
   foreach (const lambda::function<Option<Error>()>& validator, validators) {
@@ -919,6 +935,21 @@ Option<Error> validateTaskAndExecutorResources(const TaskInfo& task)
 }
 
 
+// Validates the `CommandInfo` contained within a `TaskInfo`.
+Option<Error> validateCommandInfo(const TaskInfo& task)
+{
+  if (task.has_command()) {
+    Option<Error> error =
+      common::validation::validateCommandInfo(task.command());
+    if (error.isSome()) {
+      return Error("Task's `CommandInfo` is invalid: " + error->message);
+    }
+  }
+
+  return None();
+}
+
+
 // Validates task specific fields except its executor (if it exists).
 Option<Error> validateTask(
     const TaskInfo& task,
@@ -937,10 +968,9 @@ Option<Error> validateTask(
     lambda::bind(internal::validateKillPolicy, task),
     lambda::bind(internal::validateCheck, task),
     lambda::bind(internal::validateHealthCheck, task),
-    lambda::bind(internal::validateResources, task)
+    lambda::bind(internal::validateResources, task),
+    lambda::bind(internal::validateCommandInfo, task)
   };
-
-  // TODO(jieyu): Add a validateCommandInfo function.
 
   foreach (const lambda::function<Option<Error>()>& validator, validators) {
     Option<Error> error = validator();
@@ -1245,6 +1275,16 @@ Option<Error> validateExecutor(
     return Error(
         "Total resources " + stringify(total) + " required by task group and"
         " its executor are more than available " + stringify(offered));
+  }
+
+  if (executor.has_command()) {
+    Option<Error> error =
+      common::validation::validateCommandInfo(executor.command());
+    if (error.isSome()) {
+      return Error(
+          "Executor '" + stringify(executor.executor_id()) + "'" +
+          "contains an invalid command: " + error->message);
+    }
   }
 
   return None();
@@ -1674,17 +1714,35 @@ Option<Error> validate(
     const hashmap<FrameworkID, Resources>& usedResources,
     const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks)
 {
-  Option<Error> error = resource::validate(destroy.volumes());
+  // The operation can either contain allocated resources
+  // (in the case of a framework accepting offers), or
+  // unallocated resources (in the case of the operator
+  // endpoints). To ensure we can check for the presence
+  // of the volume in the resources in use by tasks and
+  // executors, we unallocate both the volume and the
+  // used resources before performing the contains check.
+  //
+  // TODO(bmahler): This lambda is copied in several places
+  // in the code, consider how best to pull this out.
+  auto unallocated = [](const Resources& resources) {
+    Resources result = resources;
+    result.unallocate();
+    return result;
+  };
+
+  Resources volumes = unallocated(destroy.volumes());
+
+  Option<Error> error = resource::validate(volumes);
   if (error.isSome()) {
     return Error("Invalid resources: " + error.get().message);
   }
 
-  error = resource::validatePersistentVolume(destroy.volumes());
+  error = resource::validatePersistentVolume(volumes);
   if (error.isSome()) {
     return Error("Not a persistent volume: " + error.get().message);
   }
 
-  if (!checkpointedResources.contains(destroy.volumes())) {
+  if (!checkpointedResources.contains(volumes)) {
     return Error("Persistent volumes not found");
   }
 
@@ -1693,8 +1751,8 @@ Option<Error> validate(
   // it is not possible for a non-shared resource to appear in an offer
   // if it is already in use.
   foreachvalue (const Resources& resources, usedResources) {
-    foreach (const Resource& volume, destroy.volumes()) {
-      if (resources.contains(volume)) {
+    foreach (const Resource& volume, volumes) {
+      if (unallocated(resources).contains(volume)) {
         return Error("Persistent volumes in use");
       }
     }
@@ -1714,7 +1772,7 @@ Option<Error> validate(
       }
 
       foreach (const Resource& volume, destroy.volumes()) {
-        if (resources.contains(volume)) {
+        if (unallocated(resources).contains(volume)) {
           return Error("Persistent volume in pending tasks");
         }
       }
