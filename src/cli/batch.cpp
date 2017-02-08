@@ -424,8 +424,10 @@ protected:
     // Loop all offers and place tasks...
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
-      Resources unreserved = offered.unreserved();
+      // Strip the allocation of all derived resources from offer (MESOS-7075)
+      offered.unallocate();
       Resources reserved = offered.reserved(role);
+      reserved.unallocate();
       // Resources needed for tasks.
       Resources requiredResources;
       // Container for runnable tasks within current offer
@@ -763,12 +765,19 @@ protected:
   {
     CHECK_EQ(SUBSCRIBED, state);
 
+    // Vector holding declined offers for checking terminal state (DIRTY)
+    // Use state machine approach in the future...
+    vector<Offer> declinedOffers;
+
     // loop all offers and place DESTROY and UNRESERVE Operation
     foreach (const Offer& offer, offers) {
       Resources offered = offer.resources();
-      Resources unreserved = offered.unreserved();
+      // Strip the allocation of all resources derived from `offer`(MESOS-7075)
+      offered.unallocate();
       Resources reserved = offered.reserved(role);
+      reserved.unallocate();
       Resources created = offered.persistentVolumes();
+      created.unallocate();
 
       cout << "Received offer from agent "
            << offer.hostname()
@@ -777,6 +786,19 @@ protected:
       if (!reserved.contains(Resources(plainResources))
            && !created.contains(Resources(disk))){
         cout << "Nothing to unreserve..." << endl;
+
+        // At the end of the offer cycle this vector must be
+        // of the same size as `offers`
+        declinedOffers.push_back(offer);
+        Call declineCall;
+        declineCall.set_type(Call::DECLINE);
+
+        CHECK(frameworkInfo.has_id());
+
+        declineCall.mutable_framework_id()->CopyFrom(frameworkInfo.id());
+        Call::Decline* decline = declineCall.mutable_decline();
+        decline->add_offer_ids()->CopyFrom(offer.id());
+        mesos->send(declineCall);
       }
       else {
         Call call;
@@ -808,6 +830,11 @@ protected:
         mesos->send(call);
       }
     }
+
+    // Check if we reached a terminal state
+    if(offers.size() == declinedOffers.size()){
+      terminate(self());
+    }
   }
 
   void received(queue<Event> events)
@@ -831,7 +858,6 @@ protected:
 
         case Event::OFFERS: {
           offers(google::protobuf::convert(event.offers().offers()));
-          terminate(self());
           break;
         }
 
@@ -1076,10 +1102,10 @@ commandline batch processing framework for mesos 1.1++ -> github.com/asamerh4/me
 
     // Report failed tasks if any.
     foreach (const mesos::v1::TaskID& failedTaskId, scheduler->failedTasks) {
-      cerr << "**failed task-->" << failedTaskId << " with command: '";
+      cout << "**failed task-->" << failedTaskId << " with command: '";
       foreach (const TaskInfo& task, scheduler->tasks){
         if(task.task_id() == failedTaskId && task.has_command()){
-          cerr << task.command().value() << "'" << endl;
+          cout << task.command().value() << "'" << endl;
         }
       }
     }
