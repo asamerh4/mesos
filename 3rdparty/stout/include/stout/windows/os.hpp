@@ -42,6 +42,7 @@
 #include <stout/os/read.hpp>
 
 #include <stout/os/raw/environment.hpp>
+#include <stout/os/windows/fd.hpp>
 
 namespace os {
 namespace internal {
@@ -746,62 +747,6 @@ inline Try<std::string> var()
   std::wstring wvar_folder(&var_folder[0]);
   std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
   return converter.to_bytes(wvar_folder);
-}
-
-
-// Create pipes for interprocess communication. Since the pipes cannot
-// be used directly by Posix `read/write' functions they are wrapped
-// in file descriptors, a process-local concept.
-inline Try<Nothing> pipe(int pipe[2])
-{
-  // Create inheritable pipe, as described in MSDN[1].
-  //
-  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa365782(v=vs.85).aspx
-  SECURITY_ATTRIBUTES securityAttr;
-  securityAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-  securityAttr.bInheritHandle = TRUE;
-  securityAttr.lpSecurityDescriptor = nullptr;
-
-  HANDLE read_handle;
-  HANDLE write_handle;
-
-  const BOOL result = ::CreatePipe(
-      &read_handle,
-      &write_handle,
-      &securityAttr,
-      0);
-
-  pipe[0] = _open_osfhandle(
-      reinterpret_cast<intptr_t>(read_handle),
-      _O_RDONLY | _O_TEXT);
-
-  if (pipe[0] == -1) {
-    return ErrnoError();
-  }
-
-  pipe[1] = _open_osfhandle(reinterpret_cast<intptr_t>(write_handle), _O_TEXT);
-  if (pipe[1] == -1) {
-    return ErrnoError();
-  }
-
-  return Nothing();
-}
-
-
-// Prepare the file descriptors to be shared with a different process.
-// Under Windows we have to obtain the underlying handles to be shared
-// with a different processs.
-inline intptr_t fd_to_handle(int in)
-{
-  return ::_get_osfhandle(in);
-}
-
-
-// Convert the global file handle into a file descriptor, which on
-// Windows is only valid within the current process.
-inline int handle_to_fd(intptr_t in, int flags)
-{
-  return ::_open_osfhandle(in, flags);
 }
 
 

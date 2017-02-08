@@ -629,6 +629,20 @@ Option<Error> validateType(const ExecutorInfo& executor)
         return Error(
             "'ExecutorInfo.command' must not be set for 'DEFAULT' executor");
       }
+
+      if (executor.has_container()) {
+        if (executor.container().type() != ContainerInfo::MESOS) {
+          return Error(
+              "'ExecutorInfo.container.type' must be 'MESOS' for "
+              "'DEFAULT' executor");
+        }
+
+        if (executor.container().mesos().has_image()) {
+          return Error(
+              "'ExecutorInfo.container.mesos.image' must not be set for "
+              "'DEFAULT' executor");
+        }
+      }
       break;
 
     case ExecutorInfo::CUSTOM:
@@ -1624,7 +1638,7 @@ Option<Error> validate(const Offer::Operation::Unreserve& unreserve)
   // NOTE: We don't check that 'FrameworkInfo.principal' matches
   // 'Resource.ReservationInfo.principal' here because the authorization
   // depends on the "unreserve" ACL which specifies which 'principal' can
-  // unreserve which 'principal's resources. In the absense of an ACL, we allow
+  // unreserve which 'principal's resources. In the absence of an ACL, we allow
   // any 'principal' to unreserve any other 'principal's resources.
 
   foreach (const Resource& resource, unreserve.resources()) {
