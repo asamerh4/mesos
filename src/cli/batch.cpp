@@ -906,16 +906,9 @@ private:
 
 int main(int argc, char** argv)
 {
-  cout << R"(
-    ___         ___
-   /  /|       |\  \
-  /  / /    ___\ \  \
- /  / /    |\__\\ \  \
-|\  \/  ___\|__| \/  /|
-\ \  \ |\__\     /  //
- \ \__\\|__|    /_ //
-  \|__|        |__|/
-commandline batch processing framework for mesos 1.1++ -> github.com/asamerh4/mesos-batch
+cout << R"( ___  ___  ___
+|\__\|\__\|\__\  commandline batch processing framework for mesos 1.1++
+\|__|\|__|\|__|  github.com/asamerh4/mesos-batch
 
 )";
 
