@@ -347,23 +347,28 @@ public:
   /**
    * Suppresses offers.
    *
-   * Informs the allocator to stop sending offers to the framework.
+   * Informs the allocator to stop sending offers to this framework for the
+   * specified role. If the role is not specified, we will stop sending offers
+   * to this framework for all of its roles.
    *
-   * TODO(bmahler): Take an optional role to allow frameworks with
-   * multiple roles to do fine-grained suppression.
+   * @param role The optional role parameter allows frameworks with multiple
+   *     roles to do fine-grained suppression.
    */
   virtual void suppressOffers(
-      const FrameworkID& frameworkId) = 0;
+      const FrameworkID& frameworkId,
+      const Option<std::string>& role) = 0;
 
   /**
-   * Revives offers for a framework. This is invoked by a framework when
-   * it wishes to receive filtered resources or offers immediately.
+   * Revives offers to this framework for the specified role. This is
+   * invoked by a framework when it wishes to receive filtered resources
+   * immediately or get itself out of a suppressed state.
    *
-   * TODO(bmahler): Take an optional role to allow frameworks with
-   * multiple roles to do fine-grained revival.
+   * @param role The optional role parameter allows frameworks with multiple
+   *     roles to do fine-grained revival.
    */
   virtual void reviveOffers(
-      const FrameworkID& frameworkId) = 0;
+      const FrameworkID& frameworkId,
+      const Option<std::string>& role) = 0;
 
   /**
    * Informs the allocator to set quota for the given role.

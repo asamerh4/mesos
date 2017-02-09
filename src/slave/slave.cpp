@@ -1561,13 +1561,55 @@ void Slave::runTask(
 
 void Slave::run(
     const FrameworkInfo& frameworkInfo,
-    const ExecutorInfo& executorInfo,
+    ExecutorInfo executorInfo,
     Option<TaskInfo> task,
     Option<TaskGroupInfo> taskGroup,
     const UPID& pid)
 {
   CHECK_NE(task.isSome(), taskGroup.isSome())
     << "Either task or task group should be set but not both";
+
+  auto injectAllocationInfo = [](
+      RepeatedPtrField<Resource>* resources,
+      const FrameworkInfo& frameworkInfo) {
+    set<string> roles = protobuf::framework::getRoles(frameworkInfo);
+
+    foreach (Resource& resource, *resources) {
+      if (!resource.has_allocation_info()) {
+        if (roles.size() != 1) {
+          LOG(FATAL) << "Missing 'Resource.AllocationInfo' for resources"
+                     << " allocated to MULTI_ROLE framework"
+                     << " '" << frameworkInfo.name() << "'";
+        }
+
+        resource.mutable_allocation_info()->set_role(*roles.begin());
+      }
+    }
+  };
+
+  injectAllocationInfo(executorInfo.mutable_resources(), frameworkInfo);
+
+  if (task.isSome()) {
+    injectAllocationInfo(task->mutable_resources(), frameworkInfo);
+
+    if (task->has_executor()) {
+      injectAllocationInfo(
+          task->mutable_executor()->mutable_resources(),
+          frameworkInfo);
+    }
+  }
+
+  if (taskGroup.isSome()) {
+    foreach (TaskInfo& task, *taskGroup->mutable_tasks()) {
+      injectAllocationInfo(task.mutable_resources(), frameworkInfo);
+
+      if (task.has_executor()) {
+        injectAllocationInfo(
+            task.mutable_executor()->mutable_resources(),
+            frameworkInfo);
+      }
+    }
+  }
 
   vector<TaskInfo> tasks;
   if (task.isSome()) {
@@ -4548,15 +4590,33 @@ ExecutorInfo Slave::getExecutorInfo(
 
   // Add an allowance for the command executor. This does lead to a
   // small overcommit of resources.
+  //
   // TODO(vinod): If a task is using revocable resources, mark the
   // corresponding executor resource (e.g., cpus) to be also
   // revocable. Currently, it is OK because the containerizer is
   // given task + executor resources on task launch resulting in
   // the container being correctly marked as revocable.
-  executor.mutable_resources()->MergeFrom(
-      Resources::parse(
-        "cpus:" + stringify(DEFAULT_EXECUTOR_CPUS) + ";" +
-        "mem:" + stringify(DEFAULT_EXECUTOR_MEM.megabytes())).get());
+  Resources executorOverhead = Resources::parse(
+      "cpus:" + stringify(DEFAULT_EXECUTOR_CPUS) + ";" +
+      "mem:" + stringify(DEFAULT_EXECUTOR_MEM.megabytes())).get();
+
+  // Inject the task's allocation role into the executor's resources.
+  Option<string> role = None();
+  foreach (const Resource& resource, task.resources()) {
+    CHECK(resource.has_allocation_info());
+
+    if (role.isNone()) {
+      role = resource.allocation_info().role();
+    }
+
+    CHECK_EQ(role.get(), resource.allocation_info().role());
+  }
+
+  CHECK_SOME(role);
+
+  executorOverhead.allocate(role.get());
+
+  executor.mutable_resources()->CopyFrom(executorOverhead);
 
   return executor;
 }
@@ -5230,24 +5290,20 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
   // also must do this for MULTI_ROLE frameworks since they
   // may have tasks that were present before the framework
   // upgraded into MULTI_ROLE.
-  //
-  // TODO(bmahler): When can the `info` fields be None?
   auto injectAllocationInfo = [](
       RepeatedPtrField<Resource>* resources,
       const FrameworkInfo& frameworkInfo) {
     set<string> roles = protobuf::framework::getRoles(frameworkInfo);
 
-    for (int i = 0; i < resources->size(); ++i) {
-      Resource* resource = resources->Mutable(i);
-
-      if (!resource->has_allocation_info()) {
+    foreach (Resource& resource, *resources) {
+      if (!resource.has_allocation_info()) {
         if (roles.size() != 1) {
           LOG(FATAL) << "Missing 'Resource.AllocationInfo' for resources"
                      << " allocated to MULTI_ROLE framework"
                      << " '" << frameworkInfo.name() << "'";
         }
 
-        resource->mutable_allocation_info()->set_role(*roles.begin());
+        resource.mutable_allocation_info()->set_role(*roles.begin());
       }
     }
   };
@@ -6358,6 +6414,13 @@ Executor* Framework::launchExecutor(
     const ExecutorInfo& executorInfo,
     const Option<TaskInfo>& taskInfo)
 {
+  // Verify that Resource.AllocationInfo is set, if coming
+  // from a MULTI_ROLE master this will be set, otherwise
+  // the agent will inject it when receiving the executor.
+  foreach (const Resource& resource, executorInfo.resources()) {
+    CHECK(resource.has_allocation_info());
+  }
+
   // Generate an ID for the executor's container.
   // TODO(idownes) This should be done by the containerizer but we
   // need the ContainerID to create the executor's directory. Fix
@@ -6603,6 +6666,12 @@ void Framework::recoverExecutor(const ExecutorState& state)
     return;
   }
 
+  // Verify that Resource.AllocationInfo is set, this should
+  // be injected by the agent when recovering.
+  foreach (const Resource& resource, state.info->resources()) {
+    CHECK(resource.has_allocation_info());
+  }
+
   // We are only interested in the latest run of the executor!
   // So, we GC all the old runs.
   // NOTE: We don't schedule the top level executor work and meta
@@ -6789,6 +6858,13 @@ Task* Executor::addTask(const TaskInfo& task)
   CHECK(!launchedTasks.contains(task.task_id()))
     << "Duplicate task " << task.task_id();
 
+  // Verify that Resource.AllocationInfo is set, if coming
+  // from a MULTI_ROLE master this will be set, otherwise
+  // the agent will inject it when receiving the task.
+  foreach (const Resource& resource, task.resources()) {
+    CHECK(resource.has_allocation_info());
+  }
+
   Task* t = new Task(protobuf::createTask(task, TASK_STAGING, frameworkId));
 
   launchedTasks[task.task_id()] = t;
@@ -6856,6 +6932,12 @@ void Executor::recoverTask(const TaskState& state)
     LOG(WARNING) << "Skipping recovery of task " << state.id
                  << " because its info cannot be recovered";
     return;
+  }
+
+  // Verify that Resource.AllocationInfo is set, the agent
+  // should inject it during recovery.
+  foreach (const Resource& resource, state.info->resources()) {
+    CHECK(resource.has_allocation_info());
   }
 
   launchedTasks[state.id] = new Task(state.info.get());

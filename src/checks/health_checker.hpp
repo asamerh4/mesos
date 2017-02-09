@@ -58,7 +58,7 @@ public:
    * @param taskId The TaskID of the target task.
    * @param taskPid The target task's pid used to enter the specified
    *     namespaces.
-   * @param namespaces The namespaces to enter prior performing a single health
+   * @param namespaces The namespaces to enter prior to performing the health
    *     check.
    * @return A `HealthChecker` object or an error if `create` fails.
    *
@@ -70,7 +70,7 @@ public:
       const std::string& launcherDir,
       const lambda::function<void(const TaskHealthStatus&)>& callback,
       const TaskID& taskId,
-      Option<pid_t> taskPid,
+      const Option<pid_t>& taskPid,
       const std::vector<std::string>& namespaces);
 
   ~HealthChecker();
@@ -95,7 +95,7 @@ public:
       const std::string& _launcherDir,
       const lambda::function<void(const TaskHealthStatus&)>& _callback,
       const TaskID& _taskId,
-      Option<pid_t> _taskPid,
+      const Option<pid_t>& _taskPid,
       const std::vector<std::string>& _namespaces);
 
   virtual ~HealthCheckerProcess() {}

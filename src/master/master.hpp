@@ -356,7 +356,8 @@ public:
 
   void reviveOffers(
       const process::UPID& from,
-      const FrameworkID& frameworkId);
+      const FrameworkID& frameworkId,
+      const std::string& role);
 
   void killTask(
       const process::UPID& from,
@@ -869,7 +870,9 @@ private:
       Framework* framework,
       const scheduler::Call::DeclineInverseOffers& decline);
 
-  void revive(Framework* framework);
+  void revive(
+      Framework* framework,
+      const scheduler::Call::Revive& revive);
 
   void kill(
       Framework* framework,
@@ -895,7 +898,9 @@ private:
       Framework* framework,
       const scheduler::Call::Request& request);
 
-  void suppress(Framework* framework);
+  void suppress(
+      Framework* framework,
+      const scheduler::Call::Suppress& suppress);
 
   bool elected() const
   {

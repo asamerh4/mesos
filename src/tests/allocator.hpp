@@ -174,13 +174,13 @@ ACTION_P2(InvokeRecoverResourcesWithFilters, allocator, timeout)
 
 ACTION_P(InvokeSuppressOffers, allocator)
 {
-  allocator->real->suppressOffers(arg0);
+  allocator->real->suppressOffers(arg0, arg1);
 }
 
 
 ACTION_P(InvokeReviveOffers, allocator)
 {
-  allocator->real->reviveOffers(arg0);
+  allocator->real->reviveOffers(arg0, arg1);
 }
 
 
@@ -329,14 +329,14 @@ public:
     EXPECT_CALL(*this, recoverResources(_, _, _, _))
       .WillRepeatedly(DoDefault());
 
-    ON_CALL(*this, suppressOffers(_))
+    ON_CALL(*this, suppressOffers(_, _))
       .WillByDefault(InvokeSuppressOffers(this));
-    EXPECT_CALL(*this, suppressOffers(_))
+    EXPECT_CALL(*this, suppressOffers(_, _))
       .WillRepeatedly(DoDefault());
 
-    ON_CALL(*this, reviveOffers(_))
+    ON_CALL(*this, reviveOffers(_, _))
       .WillByDefault(InvokeReviveOffers(this));
-    EXPECT_CALL(*this, reviveOffers(_))
+    EXPECT_CALL(*this, reviveOffers(_, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, setQuota(_, _))
@@ -450,11 +450,13 @@ public:
       const Resources&,
       const Option<Filters>& filters));
 
-  MOCK_METHOD1(suppressOffers, void(
-      const FrameworkID&));
+  MOCK_METHOD2(suppressOffers, void(
+      const FrameworkID&,
+      const Option<std::string>&));
 
-  MOCK_METHOD1(reviveOffers, void(
-      const FrameworkID&));
+  MOCK_METHOD2(reviveOffers, void(
+      const FrameworkID&,
+      const Option<std::string>&));
 
   MOCK_METHOD2(setQuota, void(
       const std::string&,

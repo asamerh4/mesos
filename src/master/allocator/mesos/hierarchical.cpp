@@ -1144,7 +1144,8 @@ void HierarchicalAllocatorProcess::recoverResources(
 
 
 void HierarchicalAllocatorProcess::suppressOffers(
-    const FrameworkID& frameworkId)
+    const FrameworkID& frameworkId,
+    const Option<string>& role)
 {
   CHECK(initialized);
   CHECK(frameworks.contains(frameworkId));
@@ -1155,18 +1156,22 @@ void HierarchicalAllocatorProcess::suppressOffers(
   // Deactivating the framework in the sorter is fine as long as
   // SUPPRESS is not parameterized. When parameterization is added,
   // we have to differentiate between the cases here.
-  foreach (const string& role, framework.roles) {
+  const set<string>& roles =
+    role.isSome() ? set<string>{role.get()} : framework.roles;
+
+  foreach (const string& role, roles) {
     CHECK(frameworkSorters.contains(role));
     frameworkSorters.at(role)->deactivate(frameworkId.value());
   }
 
-  LOG(INFO) << "Suppressed offers for roles " << stringify(framework.roles)
+  LOG(INFO) << "Suppressed offers for roles " << stringify(roles)
             << " of framework " << frameworkId;
 }
 
 
 void HierarchicalAllocatorProcess::reviveOffers(
-    const FrameworkID& frameworkId)
+    const FrameworkID& frameworkId,
+    const Option<string>& role)
 {
   CHECK(initialized);
   CHECK(frameworks.contains(frameworkId));
@@ -1175,13 +1180,16 @@ void HierarchicalAllocatorProcess::reviveOffers(
   framework.offerFilters.clear();
   framework.inverseOfferFilters.clear();
 
+  const set<string>& roles =
+    role.isSome() ? set<string>{role.get()} : framework.roles;
+
   if (framework.suppressed) {
     framework.suppressed = false;
 
     // Activating the framework in the sorter on REVIVE is fine as long as
     // SUPPRESS is not parameterized. When parameterization is added,
     // we may need to differentiate between the cases here.
-    foreach (const string& role, framework.roles) {
+    foreach (const string& role, roles) {
       CHECK(frameworkSorters.contains(role));
       frameworkSorters.at(role)->activate(frameworkId.value());
     }
@@ -1194,7 +1202,7 @@ void HierarchicalAllocatorProcess::reviveOffers(
   // would expire that filter too soon. Note that this only works
   // right now because ALL Filter types "expire".
 
-  LOG(INFO) << "Revived offers for roles " << stringify(framework.roles)
+  LOG(INFO) << "Revived offers for roles " << stringify(roles)
             << " of framework " << frameworkId;
 
   allocate();

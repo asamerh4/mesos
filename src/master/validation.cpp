@@ -16,6 +16,7 @@
 
 #include "master/validation.hpp"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,7 @@
 
 #include "master/master.hpp"
 
+using std::set;
 using std::string;
 using std::vector;
 
@@ -1376,7 +1378,7 @@ Try<SlaveID> getSlaveId(Master* master, const OfferID& offerId)
     return inverseOffer->slave_id();
   }
 
-  return Error("Offer id no longer valid");
+  return Error("Offer " + stringify(offerId) + " is no longer valid");
 }
 
 
@@ -1393,7 +1395,7 @@ Try<FrameworkID> getFrameworkId(Master* master, const OfferID& offerId)
     return inverseOffer->framework_id();
   }
 
-  return Error("Offer id no longer valid");
+  return Error("Offer " + stringify(offerId) + " is no longer valid");
 }
 
 
@@ -1469,6 +1471,39 @@ Option<Error> validateFramework(
 }
 
 
+// Validate that all offers in one operation must be
+// allocated to the same role.
+Option<Error> validateAllocationRole(
+    const RepeatedPtrField<OfferID>& offerIds,
+    Master* master)
+{
+  Option<string> role;
+  foreach (const OfferID& offerId, offerIds) {
+    Offer* offer = getOffer(master, offerId);
+    if (offer == nullptr) {
+      return Error("Offer " + stringify(offerId) + " is no longer valid");
+    }
+
+    CHECK(offer->has_allocation_info());
+
+    string _role = offer->allocation_info().role();
+    if (role.isNone()) {
+      role = _role;
+      continue;
+    }
+
+    if (_role != role.get()) {
+      return Error(
+          "Aggregated offers must be allocated to the same role. Offer " +
+          stringify(offerId) + " uses role '" + _role + " but another"
+          " is using role '" + role.get());
+    }
+  }
+
+  return None();
+}
+
+
 // Validates that all offers belong to the same valid slave.
 Option<Error> validateSlave(
     const RepeatedPtrField<OfferID>& offerIds,
@@ -1524,6 +1559,7 @@ Option<Error> validate(
     lambda::bind(validateUniqueOfferID, offerIds),
     lambda::bind(validateOfferIds, offerIds, master),
     lambda::bind(validateFramework, offerIds, master, framework),
+    lambda::bind(validateAllocationRole, offerIds, master),
     lambda::bind(validateSlave, offerIds, master)
   };
 
@@ -1571,14 +1607,8 @@ namespace operation {
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
     const Option<string>& principal,
-    const Option<string>& frameworkRole)
+    const Option<FrameworkInfo>& frameworkInfo)
 {
-  if (frameworkRole.isSome() && frameworkRole.get() == "*") {
-    return Error(
-        "A reserve operation was attempted by a framework with role"
-        " '*', but frameworks with that role cannot reserve resources");
-  }
-
   Option<Error> error = resource::validate(reserve.resources());
   if (error.isSome()) {
     return Error("Invalid resources: " + error.get().message);
@@ -1607,11 +1637,16 @@ Option<Error> validate(
       }
     }
 
-    if (frameworkRole.isSome() && resource.role() != frameworkRole.get()) {
-      return Error(
-          "A reserve operation was attempted for a resource with role"
-          " '" + resource.role() + "', but the framework can only reserve"
-          " resources with role '" + frameworkRole.get() + "'");
+    if (frameworkInfo.isSome()) {
+      set<string> frameworkRoles =
+        protobuf::framework::getRoles(frameworkInfo.get());
+
+      if (frameworkRoles.count(resource.role()) == 0) {
+        return Error(
+            "A reserve operation was attempted for a resource with role"
+            " '" + resource.role() + "', but the framework can only reserve"
+            " resources with roles '" + stringify(frameworkRoles) + "'");
+      }
     }
 
     // NOTE: This check would be covered by 'contains' since there
