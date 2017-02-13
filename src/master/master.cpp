@@ -2210,9 +2210,9 @@ void Master::drop(
 {
   // TODO(bmahler): Increment a metric.
 
-  LOG(ERROR) << "Dropping " << call.type() << " call"
-             << " from framework " << call.framework_id()
-             << " at " << from << ": " << message;
+  LOG(WARNING) << "Dropping " << call.type() << " call"
+               << " from framework " << call.framework_id()
+               << " at " << from << ": " << message;
 }
 
 
@@ -2229,9 +2229,49 @@ void Master::drop(
   // operation is dropped. The framework will find out that the
   // operation was dropped through subsequent offers.
 
-  LOG(ERROR) << "Dropping " << Offer::Operation::Type_Name(operation.type())
-             << " offer operation from framework " << *framework
-             << ": " << message;
+  LOG(WARNING) << "Dropping " << Offer::Operation::Type_Name(operation.type())
+               << " offer operation from framework " << *framework
+               << ": " << message;
+}
+
+void Master::drop(
+    Framework* framework,
+    const scheduler::Call& call,
+    const std::string& message)
+{
+    CHECK_NOTNULL(framework);
+
+    // TODO(gyliu513): Increment a metric.
+
+    LOG(WARNING) << "Dropping " << call.type() << " call"
+                 << " from framework " << *framework
+                 << ": " << message;
+}
+
+
+void Master::drop(
+    Framework* framework,
+    const scheduler::Call::Suppress& suppress,
+    const string& message)
+{
+  scheduler::Call call;
+  call.set_type(scheduler::Call::SUPPRESS);
+  call.mutable_suppress()->CopyFrom(suppress);
+
+  drop(framework, call, message);
+}
+
+
+void Master::drop(
+    Framework* framework,
+    const scheduler::Call::Revive& revive,
+    const string& message)
+{
+  scheduler::Call call;
+  call.set_type(scheduler::Call::REVIVE);
+  call.mutable_revive()->CopyFrom(revive);
+
+  drop(framework, call, message);
 }
 
 
@@ -3232,22 +3272,18 @@ void Master::suppress(
     // when constructing `scheduler::Call::Suppress`.
     Option<Error> roleError = roles::validate(role.get());
     if (roleError.isSome()) {
-      LOG(WARNING) << "SUPPRESS call message with invalid role: "
-                   <<  roleError.get().message;
+      drop(framework,
+           suppress,
+           "suppression role is invalid: " + roleError->message);
 
       return;
     }
 
-    // TODO(gyliu513): Store the roles set within the Framework struct, so
-    // that we don't have to keep re-computing it.
-    const set<string> roles = protobuf::framework::getRoles(framework->info);
-    if (roles.count(role.get()) == 0) {
-      // TODO(gyliu513): Consider adding a `drop` overload to avoid
-      // custom logging here.
-      LOG(WARNING)
-        << "Ignoring SUPPRESS call message for framework " << *framework
-        << " with role " << role.get() << " because it is not one of the"
-        << " framework's subscribed roles";
+    if (framework->roles.count(role.get()) == 0) {
+      drop(framework,
+           suppress,
+           "suppression role " + role.get() + " is not one"
+           " of the frameworks's subscribed roles");
 
       return;
     }
@@ -3877,7 +3913,7 @@ void Master::accept(
 
       case Offer::Operation::UNKNOWN: {
         // TODO(vinod): Send an error event to the scheduler?
-        LOG(ERROR) << "Ignoring unknown offer operation";
+        LOG(WARNING) << "Ignoring unknown offer operation";
         break;
       }
     }
@@ -4638,7 +4674,7 @@ void Master::_accept(
       }
 
       case Offer::Operation::UNKNOWN: {
-        LOG(ERROR) << "Ignoring unknown offer operation";
+        LOG(WARNING) << "Ignoring unknown offer operation";
         break;
       }
     }
@@ -4855,22 +4891,18 @@ void Master::revive(
   if (role.isSome()) {
     Option<Error> roleError = roles::validate(role.get());
     if (roleError.isSome()) {
-      LOG(WARNING) << "REVIVE call message with invalid role: "
-                   <<  roleError.get().message;
+      drop(framework,
+           revive,
+           "revive role is invalid: " + roleError->message);
 
       return;
     }
 
-    // TODO(gyliu513): Store the roles set within the Framework struct, so
-    // that we don't have to keep re-computing it.
-    const set<string> roles = protobuf::framework::getRoles(framework->info);
-    if (roles.count(role.get()) == 0) {
-      // TODO(gyliu513): Consider adding a `drop` overload to avoid
-      // custom logging here.
-      LOG(WARNING)
-        << "Ignoring REVIVE call message for framework " << *framework
-        << " with role " << role.get() << " because it does not exist in"
-        << " framework roles";
+    if (framework->roles.count(role.get()) == 0) {
+      drop(framework,
+           revive,
+           "revive role " + role.get() + " is not one"
+           " of the frameworks's subscribed roles");
 
       return;
     }
@@ -5118,7 +5150,7 @@ void Master::acknowledge(
       // Dropping the acknowledgement is safe because the slave will
       // retry the update, at which point the master will set the
       // status update state.
-      LOG(ERROR)
+      LOG(WARNING)
         << "Ignoring status update acknowledgement " << uuid
         << " for task " << taskId << " of framework " << *framework
         << " to agent " << *slave << " because the update was not"
@@ -5424,10 +5456,10 @@ void Master::_registerSlave(
     // master ID, which is a randomly generated UUID. In this situation,
     // we ignore the registration attempt. The slave will eventually try
     // to register again and be assigned a new slave ID.
-    LOG(ERROR) << "Agent " << slaveInfo.id() << " at " << pid
-               << " (" << slaveInfo.hostname() << ") was assigned"
-               << " an agent ID that already appears in the registry;"
-               << " ignoring registration attempt";
+    LOG(WARNING) << "Agent " << slaveInfo.id() << " at " << pid
+                 << " (" << slaveInfo.hostname() << ") was assigned"
+                 << " an agent ID that already appears in the registry;"
+                 << " ignoring registration attempt";
     return;
   }
 

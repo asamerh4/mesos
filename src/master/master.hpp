@@ -817,6 +817,21 @@ private:
       const Offer::Operation& operation,
       const std::string& message);
 
+  void drop(
+      Framework* framework,
+      const scheduler::Call& call,
+      const std::string& message);
+
+  void drop(
+      Framework* framework,
+      const scheduler::Call::Suppress& suppress,
+      const std::string& message);
+
+  void drop(
+      Framework* framework,
+      const scheduler::Call::Revive& revive,
+      const std::string& message);
+
   // Call handlers.
   void receive(
       const process::UPID& from,
@@ -2164,6 +2179,7 @@ struct Framework
             const process::Time& time = process::Clock::now())
     : master(_master),
       info(_info),
+      roles(protobuf::framework::getRoles(_info)),
       capabilities(_info.capabilities()),
       pid(_pid),
       state(ACTIVE),
@@ -2179,6 +2195,7 @@ struct Framework
             const process::Time& time = process::Clock::now())
     : master(_master),
       info(_info),
+      roles(protobuf::framework::getRoles(_info)),
       capabilities(_info.capabilities()),
       http(_http),
       state(ACTIVE),
@@ -2192,6 +2209,7 @@ struct Framework
             const FrameworkInfo& _info)
     : master(_master),
       info(_info),
+      roles(protobuf::framework::getRoles(_info)),
       capabilities(_info.capabilities()),
       state(RECOVERED),
       completedTasks(masterFlags.max_completed_tasks_per_framework),
@@ -2422,15 +2440,13 @@ struct Framework
       // framework upgrading to `MULTI_ROLE` capability or dropping
       // it, we need to examine either `role` or `roles` in order to
       // determine the roles a framework is subscribed to.
-      const std::set<std::string> oldRoles =
-        protobuf::framework::getRoles(info);
       const std::set<std::string> newRoles =
         protobuf::framework::getRoles(source);
 
-      if (oldRoles != newRoles) {
+      if (roles != newRoles) {
         return Error(
             "Frameworks cannot change their roles: expected '" +
-            stringify(oldRoles) + "', but got '" + stringify(newRoles) + "'");
+            stringify(roles) + "', but got '" + stringify(newRoles) + "'");
       }
 
       info.clear_role();
@@ -2576,6 +2592,8 @@ struct Framework
   Master* const master;
 
   FrameworkInfo info;
+
+  std::set<std::string> roles;
 
   protobuf::framework::Capabilities capabilities;
 
