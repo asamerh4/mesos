@@ -225,7 +225,8 @@ public:
         "        }\n"
         "     }\n"
         "  ]\n"
-        "}");
+        "}",
+        {});
 
     add(&Flags::framework_name,
         "framework_name",
@@ -348,22 +349,24 @@ protected:
     }
 
     // Prepare vectors plainResource & disk
-    foreach (Resource _resource, persistentVolumeResource->resources()){
-      if(_resource.name() == "disk"){
-        Resource plain;
-        plain.set_name(_resource.name());
-        plain.set_type(_resource.type());
-        plain.mutable_scalar()->CopyFrom(_resource.scalar());
-        plain.set_role(_resource.role());
-        plain.mutable_reservation()->CopyFrom(_resource.reservation());
-        // Push to plainResources
-        plainResources.push_back(plain);
-        // Push to disk
-        disk.push_back(_resource);
-      }
-      else {
-        plainResources.push_back(_resource);
-      }
+    if (persistentVolume) {
+        foreach (Resource _resource, persistentVolumeResource->resources()){
+          if(_resource.name() == "disk"){
+            Resource plain;
+            plain.set_name(_resource.name());
+            plain.set_type(_resource.type());
+            plain.mutable_scalar()->CopyFrom(_resource.scalar());
+            plain.set_role(_resource.role());
+            plain.mutable_reservation()->CopyFrom(_resource.reservation());
+            // Push to plainResources
+            plainResources.push_back(plain);
+            // Push to disk
+            disk.push_back(_resource);
+          }
+          else {
+            plainResources.push_back(_resource);
+          }
+        }
     }
   }
 
