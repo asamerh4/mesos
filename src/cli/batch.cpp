@@ -225,8 +225,7 @@ public:
         "        }\n"
         "     }\n"
         "  ]\n"
-        "}",
-        {});
+        "}");
 
     add(&Flags::framework_name,
         "framework_name",
