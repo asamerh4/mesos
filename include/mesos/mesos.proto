@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+syntax = "proto2";
+
 package mesos;
 
 option java_package = "org.apache.mesos";
@@ -1896,15 +1898,29 @@ message Filters {
 /**
 * Describes a collection of environment variables. This is used with
 * CommandInfo in order to set environment variables before running a
-* command.
+* command. The contents of each variable may be specified as a string
+* or a Secret; only one of `value` and `secret` must be set.
 */
 message Environment {
   message Variable {
     required string name = 1;
-    // NOTE: The `value` field was made optional in Mesos 1.2 but it
-    // is currently enforced to be set. This constraint will be
-    // removed in a future version.
+
+    enum Type {
+      UNKNOWN = 0;
+      VALUE = 1;
+      SECRET = 2;
+    }
+
+    // In Mesos 1.2, the `Environment.variables.value` message was made
+    // optional. The default type for `Environment.variables.type` is now VALUE,
+    // which requires `value` to be set, maintaining backward compatibility.
+    //
+    // TODO(greggomann): The default can be removed in Mesos 2.1 (MESOS-7134).
+    optional Type type = 3 [default = VALUE];
+
+    // Only one of `value` and `secret` must be set.
     optional string value = 2;
+    optional Secret secret = 4;
   }
 
   repeated Variable variables = 1;
@@ -1950,6 +1966,53 @@ message Credential {
  */
 message Credentials {
   repeated Credential credentials = 1;
+}
+
+
+/**
+ * Secret used to pass privileged information. It is designed to provide
+ * pass-by-value or pass-by-reference semantics, where the REFERENCE type can be
+ * used by custom modules which interact with a secure back-end.
+ */
+message Secret
+{
+  enum Type {
+    UNKNOWN = 0;
+    REFERENCE = 1;
+    VALUE = 2;
+  }
+
+  // Can be used by modules to refer to a secret stored in a secure back-end.
+  // The `key` field is provided to permit reference to a single value within a
+  // secret containing arbitrary key-value pairs.
+  //
+  // For example, given a back-end secret store with a secret named
+  // "my-secret" containing the following key-value pairs:
+  //
+  //   {
+  //     "username": "my-user",
+  //     "password": "my-password
+  //   }
+  //
+  // the username could be referred to in a `Secret` by specifying
+  // "my-secret" for the `name` and "username" for the `key`.
+  message Reference
+  {
+    required string name = 1;
+    optional string key = 2;
+  }
+
+  // Used to pass the value of a secret.
+  message Value
+  {
+    required bytes data = 1;
+  }
+
+  optional Type type = 1;
+
+  // Only one of `reference` and `value` must be set.
+  optional Reference reference = 2;
+  optional Value value = 3;
 }
 
 

@@ -37,6 +37,7 @@
 #include <stout/hashset.hpp>
 #include <stout/jsonify.hpp>
 #include <stout/os.hpp>
+#include <stout/path.hpp>
 #include <stout/uuid.hpp>
 
 #include <stout/os/killtree.hpp>
@@ -91,7 +92,7 @@ const string DOCKER_NAME_SEPERATOR = ".";
 
 
 // Declared in header, see explanation there.
-const string DOCKER_SYMLINK_DIRECTORY = "docker/links";
+const string DOCKER_SYMLINK_DIRECTORY = path::join("docker", "links");
 
 
 #ifdef __WINDOWS__
@@ -251,6 +252,10 @@ docker::Flags dockerFlags(
   if (taskEnvironment.isSome()) {
     dockerFlags.task_environment = string(jsonify(taskEnvironment.get()));
   }
+
+#ifdef __linux__
+  dockerFlags.cgroups_enable_cfs = flags.cgroups_enable_cfs,
+#endif
 
   // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).
   dockerFlags.stop_timeout = flags.docker_stop_timeout;
@@ -1321,18 +1326,31 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
         self(),
         [=](const ContainerLogger::SubprocessInfo& subprocessInfo)
           -> Future<Docker::Container> {
-    // Start the executor in a Docker container.
-    // This executor could either be a custom executor specified by an
-    // ExecutorInfo, or the docker executor.
-    Future<Option<int>> run = docker->run(
+    Try<Docker::RunOptions> runOptions = Docker::RunOptions::create(
         container->container,
         container->command,
         containerName,
         container->directory,
         flags.sandbox_directory,
         container->resources,
+#ifdef __linux__
+        flags.cgroups_enable_cfs,
+#else
+        false,
+#endif
         container->environment,
-        None(), // No extra devices.
+        None() // No extra devices.
+    );
+
+    if (runOptions.isError()) {
+      return Failure(runOptions.error());
+    }
+
+    // Start the executor in a Docker container.
+    // This executor could either be a custom executor specified by an
+    // ExecutorInfo, or the docker executor.
+    Future<Option<int>> run = docker->run(
+        runOptions.get(),
         subprocessInfo.out,
         subprocessInfo.err);
 
@@ -1403,6 +1421,19 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
   if (environment.count("PATH") == 0) {
     environment["PATH"] = os::host_default_path();
   }
+
+#ifdef __WINDOWS__
+  // TODO(dpravat): (MESOS-6816) We should allow system environment variables to
+  // be overwritten if they are specified by the framework.  This might cause
+  // applications to not work, but upon overriding system defaults, it becomes
+  // the overidder's problem.
+  Option<std::map<string, string>> systemEnvironment =
+    process::internal::getSystemEnvironment();
+  foreachpair(const string& key, const string& value,
+    systemEnvironment.get()) {
+    environment[key] = value;
+  }
+#endif // __WINDOWS__
 
   vector<string> argv;
   argv.push_back(MESOS_DOCKER_EXECUTOR);

@@ -86,7 +86,8 @@ public:
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
       const string& launcherDir,
-      const map<string, string>& taskEnvironment)
+      const map<string, string>& taskEnvironment,
+      bool cgroupsEnableCfs)
     : ProcessBase(ID::generate("docker-executor")),
       killed(false),
       killedByHealthCheck(false),
@@ -98,6 +99,7 @@ public:
       mappedDirectory(mappedDirectory),
       shutdownGracePeriod(shutdownGracePeriod),
       taskEnvironment(taskEnvironment),
+      cgroupsEnableCfs(cgroupsEnableCfs),
       stop(Nothing()),
       inspect(Nothing()) {}
 
@@ -154,6 +156,31 @@ public:
 
     CHECK(task.container().type() == ContainerInfo::DOCKER);
 
+    Try<Docker::RunOptions> runOptions = Docker::RunOptions::create(
+        task.container(),
+        task.command(),
+        containerName,
+        sandboxDirectory,
+        mappedDirectory,
+        task.resources() + task.executor().resources(),
+        cgroupsEnableCfs,
+        taskEnvironment,
+        None() // No extra devices.
+    );
+
+    if (runOptions.isError()) {
+      TaskStatus status;
+      status.mutable_task_id()->CopyFrom(task.task_id());
+      status.set_state(TASK_FAILED);
+      status.set_message(
+        "Failed to create docker run options: " + runOptions.error());
+
+      driver->sendStatusUpdate(status);
+
+      _stop();
+      return;
+    }
+
     // We're adding task and executor resources to launch docker since
     // the DockerContainerizer updates the container cgroup limits
     // directly and it expects it to be the sum of both task and
@@ -161,14 +188,7 @@ public:
     // resources for running this executor, but we are assuming
     // this is just a very small amount of overcommit.
     run = docker->run(
-        task.container(),
-        task.command(),
-        containerName,
-        sandboxDirectory,
-        mappedDirectory,
-        task.resources() + task.executor().resources(),
-        taskEnvironment,
-        None(), // No extra devices.
+        runOptions.get(),
         Subprocess::FD(STDOUT_FILENO),
         Subprocess::FD(STDERR_FILENO));
 
@@ -454,6 +474,11 @@ private:
     CHECK_SOME(driver);
     driver.get()->sendStatusUpdate(taskStatus);
 
+    _stop();
+  }
+
+  void _stop()
+  {
     // A hack for now ... but we need to wait until the status update
     // is sent to the slave before we shut ourselves down.
     // TODO(tnachen): Remove this hack and also the same hack in the
@@ -557,6 +582,7 @@ private:
   string mappedDirectory;
   Duration shutdownGracePeriod;
   map<string, string> taskEnvironment;
+  bool cgroupsEnableCfs;
 
   Option<KillPolicy> killPolicy;
   Option<Future<Option<int>>> run;
@@ -581,7 +607,8 @@ public:
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
       const string& launcherDir,
-      const map<string, string>& taskEnvironment)
+      const map<string, string>& taskEnvironment,
+      bool cgroupsEnableCfs)
   {
     process = Owned<DockerExecutorProcess>(new DockerExecutorProcess(
         docker,
@@ -590,7 +617,8 @@ public:
         mappedDirectory,
         shutdownGracePeriod,
         launcherDir,
-        taskEnvironment));
+        taskEnvironment,
+        cgroupsEnableCfs));
 
     spawn(process.get());
   }
@@ -804,7 +832,8 @@ int main(int argc, char** argv)
           flags.mapped_directory.get(),
           shutdownGracePeriod,
           flags.launcher_dir.get(),
-          taskEnvironment));
+          taskEnvironment,
+          flags.cgroups_enable_cfs));
 
   Owned<mesos::MesosExecutorDriver> driver(
       new mesos::MesosExecutorDriver(executor.get()));

@@ -121,7 +121,10 @@ TEST_F(ResourceValidationTest, RevocableDynamicReservation)
 
   Option<Error> error = resource::validate(CreateResources(resource));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message, "cannot be created from revocable resources"));
 }
 
 
@@ -132,7 +135,9 @@ TEST_F(ResourceValidationTest, InvalidRoleReservationPair)
 
   Option<Error> error = resource::validate(CreateResources(resource));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(error->message, "cannot be dynamically reserved"));
 }
 
 
@@ -154,7 +159,11 @@ TEST_F(ResourceValidationTest, UnreservedDiskInfo)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Persistent volumes cannot be created from unreserved resources"));
 }
 
 
@@ -165,7 +174,12 @@ TEST_F(ResourceValidationTest, InvalidPersistenceID)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Invalid persistence ID for persistent volume: 'id1/' contains "
+          "invalid characters"));
 }
 
 
@@ -176,7 +190,11 @@ TEST_F(ResourceValidationTest, PersistentVolumeWithoutVolumeInfo)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Expecting 'volume' to be set for persistent volume"));
 }
 
 
@@ -188,7 +206,11 @@ TEST_F(ResourceValidationTest, PersistentVolumeWithHostPath)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Expecting 'host_path' to be unset for persistent volume"));
 }
 
 
@@ -199,7 +221,9 @@ TEST_F(ResourceValidationTest, NonPersistentVolume)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(error->message, "Non-persistent volume not supported"));
 }
 
 
@@ -211,7 +235,11 @@ TEST_F(ResourceValidationTest, RevocablePersistentVolume)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Persistent volumes cannot be created from revocable resources"));
 }
 
 
@@ -222,7 +250,10 @@ TEST_F(ResourceValidationTest, UnshareableResource)
 
   Option<Error> error = resource::validate(CreateResources(volume));
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message, "Only persistent volumes can be shared"));
 }
 
 
@@ -258,13 +289,37 @@ TEST_F(ReserveOperationValidationTest, MatchingRole)
   Option<Error> error =
     operation::validate(reserve, "principal", frameworkInfo);
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "A reserve operation was attempted for a resource allocated "
+          "to role 'resourceRole', but the framework only has roles "
+          "'{ frameworkRole }'"));
+
+  // Now verify with a MULTI_ROLE framework.
+  frameworkInfo.clear_role();
+  frameworkInfo.add_roles("role1");
+  frameworkInfo.add_roles("role2");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  error = operation::validate(reserve, "principal", frameworkInfo);
+
+  // We expect an error due to the framework not having the role of the reserved
+  // resource. We only check part of the error message here as internally the
+  // list of the framework's roles does not have a particular order.
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "A reserve operation was attempted for a resource allocated to "
+          "role 'resourceRole', but the framework only has roles "));
 }
 
 
-// This test verifies that validation fails if the framework role is
-// "*" even if the resource role matches.
-TEST_F(ReserveOperationValidationTest, DisallowStarRoleFrameworks)
+// This test verifies that validation fails if reserving to the "*" role.
+TEST_F(ReserveOperationValidationTest, DisallowReservingToStar)
 {
   // The role "*" matches, but is invalid since frameworks with
   // "*" role cannot reserve resources.
@@ -280,29 +335,29 @@ TEST_F(ReserveOperationValidationTest, DisallowStarRoleFrameworks)
   Option<Error> error =
     operation::validate(reserve, "principal", frameworkInfo);
 
-  EXPECT_SOME(error);
-}
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Invalid resources: Invalid resources: Resource 'cpus(*, "
+          "principal):8' is invalid: Invalid reservation: role \"*\" cannot be "
+          "dynamically reserved"));
 
+  // Now verify with a MULTI_ROLE framework.
+  frameworkInfo.clear_role();
+  frameworkInfo.add_roles("role");
+  frameworkInfo.add_roles("*");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
 
-// This test verifies that validation fails if the framework attempts
-// to reserve a resource with the role "*".
-TEST_F(ReserveOperationValidationTest, DisallowReserveForStarRole)
-{
-  // Principal "principal" reserving for "*".
-  Resource resource = Resources::parse("cpus", "8", "*").get();
-  resource.mutable_reservation()->CopyFrom(
-      createReservationInfo("principal"));
+  error = operation::validate(reserve, "principal", frameworkInfo);
 
-  Offer::Operation::Reserve reserve;
-  reserve.add_resources()->CopyFrom(resource);
-
-  FrameworkInfo frameworkInfo;
-  frameworkInfo.set_role("frameworkRole");
-
-  Option<Error> error =
-    operation::validate(reserve, "principal", frameworkInfo);
-
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Resource 'cpus(*, principal):8' is invalid: Invalid reservation: "
+          "role \"*\" cannot be dynamically reserved"));
 }
 
 
@@ -344,7 +399,13 @@ TEST_F(ReserveOperationValidationTest, NonMatchingPrincipal)
   Option<Error> error =
     operation::validate(reserve, "principal1", frameworkInfo);
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "A reserve operation was attempted by principal 'principal1', but "
+          "there is a reserved resource in the request with principal "
+          "'principal2' set in `ReservationInfo`"));
 }
 
 
@@ -366,7 +427,13 @@ TEST_F(ReserveOperationValidationTest, ReservationInfoMissingPrincipal)
   Option<Error> error =
     operation::validate(reserve, "principal", frameworkInfo);
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "A reserve operation was attempted by principal 'principal', but "
+          "there is a reserved resource in the request with no principal set "
+          "in `ReservationInfo`"));
 }
 
 
@@ -385,7 +452,8 @@ TEST_F(ReserveOperationValidationTest, StaticReservation)
   Option<Error> error =
     operation::validate(reserve, "principal", frameworkInfo);
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(error->message, "is not dynamically reserved"));
 }
 
 
@@ -413,7 +481,60 @@ TEST_F(ReserveOperationValidationTest, NoPersistentVolumes)
   Option<Error> error =
     operation::validate(reserve, "principal", frameworkInfo);
 
-  EXPECT_SOME(error);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(error->message, "is not dynamically reserved"));
+}
+
+
+// This test verifies that validation fails if a resource is reserved
+// for a role different from the one it was allocated to.
+TEST_F(ReserveOperationValidationTest, MismatchedAllocation)
+{
+  Resource resource = Resources::parse("cpus", "8", "role1").get();
+  resource.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+
+  Offer::Operation::Reserve reserve;
+  reserve.mutable_resources()->CopyFrom(
+      allocatedResources(resource, "role2"));
+
+  FrameworkInfo frameworkInfo;
+  frameworkInfo.add_roles("role1");
+  frameworkInfo.add_roles("role2");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  Option<Error> error =
+    operation::validate(reserve, "principal", frameworkInfo);
+
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "A reserve operation was attempted for a resource with role "
+          "'role1', but the resource was allocated to role 'role2'"));
+}
+
+
+// This test verifies that validation fails if an allocated resource
+// is used in the operator HTTP API.
+TEST_F(ReserveOperationValidationTest, UnexpectedAllocatedResource)
+{
+  Resource resource = Resources::parse("cpus", "8", "role").get();
+  resource.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+
+  Offer::Operation::Reserve reserve;
+  reserve.mutable_resources()->CopyFrom(allocatedResources(resource, "role"));
+
+  // HTTP-API style invocations do not pass a `FrameworkInfo`.
+  Option<Error> error = operation::validate(reserve, "principal", None());
+
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "A reserve operation was attempted with an allocated resource,"
+          " but the operator API only allows reservations to be made"
+          " to unallocated resources"));
 }
 
 
@@ -897,10 +1018,11 @@ TEST_F(TaskValidationTest, ExecutorUsesInvalidFrameworkID)
 }
 
 
-// Verifies that an environment variable in `ExecutorInfo.command.environment`
-// without a value will be correctly rejected. This constraint will be removed
-// in a future version.
-TEST_F(TaskValidationTest, ExecutorEnvironmentVariableWithoutValue)
+// Verifies that an invalid `ExecutorInfo.command.environment` will be rejected.
+// This test ensures that the common validation code is being executed;
+// comprehensive tests for the `Environment` message can be found in the agent
+// validation tests.
+TEST_F(TaskValidationTest, ExecutorEnvironmentInvalid)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -915,7 +1037,6 @@ TEST_F(TaskValidationTest, ExecutorEnvironmentVariableWithoutValue)
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
-  // Create an executor.
   ExecutorInfo executor;
   executor = DEFAULT_EXECUTOR_INFO;
   Environment::Variable* variable =
@@ -936,8 +1057,8 @@ TEST_F(TaskValidationTest, ExecutorEnvironmentVariableWithoutValue)
   AWAIT_READY(status);
   EXPECT_EQ(TASK_ERROR, status.get().state());
   EXPECT_EQ(
-      "Executor's `CommandInfo` is invalid: "
-      "Environment variable 'ENV_VAR_KEY' must have a value set",
+      "Executor's `CommandInfo` is invalid: Environment variable 'ENV_VAR_KEY' "
+      "of type 'VALUE' must have a value set",
       status->message());
 
   // Make sure the task is not known to master anymore.
@@ -986,8 +1107,7 @@ TEST_F(TaskValidationTest, ExecutorMissingFrameworkID)
     .WillOnce(LaunchTasks(executor, 1, 1, 16, "*"))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(exec, registered(_, _, _, _));
 
   EXPECT_CALL(exec, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
@@ -1154,8 +1274,7 @@ TEST_F(TaskValidationTest, TaskUsesNoResources)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -1204,8 +1323,7 @@ TEST_F(TaskValidationTest, TaskUsesMoreResourcesThanOffered)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -1350,8 +1468,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnSameSlave)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -1389,8 +1506,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnSameSlave)
   tasks.push_back(task1);
   tasks.push_back(task2);
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(exec, registered(_, _, _, _));
 
   // Grab the "good" task but don't send a status update.
   Future<TaskInfo> task;
@@ -1466,8 +1582,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
   TaskInfo task1 = createTask(
       offers1.get()[0], executor1.command().value(), executor1.executor_id());
 
-  EXPECT_CALL(exec1, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(exec1, registered(_, _, _, _));
 
   EXPECT_CALL(exec1, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
@@ -1506,8 +1621,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
   TaskInfo task2 = createTask(
       offers2.get()[0], executor2.command().value(), executor2.executor_id());
 
-  EXPECT_CALL(exec2, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(exec2, registered(_, _, _, _));
 
   EXPECT_CALL(exec2, launchTask(_, _))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
@@ -1800,8 +1914,7 @@ TEST_F(TaskValidationTest, ExecutorShutdownGracePeriodIsNonNegative)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -1859,8 +1972,7 @@ TEST_F(TaskValidationTest, KillPolicyGracePeriodIsNonNegative)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -1901,10 +2013,11 @@ TEST_F(TaskValidationTest, KillPolicyGracePeriodIsNonNegative)
 }
 
 
-// This test verifies that a task containing an environment variable
-// with no value will be rejected correctly. Note that this constraint
-// will be removed in a future version.
-TEST_F(TaskValidationTest, TaskEnvironmentVariableWithoutValue)
+// Verifies that an invalid `TaskInfo.command.environment` will be rejected.
+// This test ensures that the common validation code is being executed;
+// comprehensive tests for the `Environment` message can be found in the agent
+// validation tests.
+TEST_F(TaskValidationTest, TaskEnvironmentInvalid)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -1945,8 +2058,8 @@ TEST_F(TaskValidationTest, TaskEnvironmentVariableWithoutValue)
   AWAIT_READY(status);
   EXPECT_EQ(TASK_ERROR, status.get().state());
   EXPECT_EQ(
-      "Task's `CommandInfo` is invalid: "
-      "Environment variable 'ENV_VAR_KEY' must have a value set",
+      "Task's `CommandInfo` is invalid: Environment variable 'ENV_VAR_KEY' "
+      "of type 'VALUE' must have a value set",
       status->message());
 
   driver.stop();
@@ -2274,8 +2387,7 @@ TEST_F(TaskGroupValidationTest, ExecutorUsesDockerContainerInfo)
   MesosSchedulerDriver driver(
       &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2374,8 +2486,7 @@ TEST_F(TaskGroupValidationTest, ExecutorWithoutFrameworkId)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2464,8 +2575,7 @@ TEST_F(TaskGroupValidationTest, TaskUsesDockerContainerInfo)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2554,8 +2664,7 @@ TEST_F(TaskGroupValidationTest, TaskUsesNetworkInfo)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2646,8 +2755,7 @@ TEST_F(TaskGroupValidationTest, TaskUsesDifferentExecutor)
   MesosSchedulerDriver driver(
       &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .Times(1);
+  EXPECT_CALL(sched, registered(&driver, _, _));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2722,11 +2830,11 @@ TEST_F(TaskGroupValidationTest, TaskUsesDifferentExecutor)
 }
 
 
-// Ensures that a task group which specifies an invalid environment in
-// `ExecutorInfo` will be correctly rejected. Currently,
-// `Environment.Variable.Value` must be set, but this constraint will be removed
-// in a future version.
-TEST_F(TaskGroupValidationTest, ExecutorEnvironmentVariableWithoutValue)
+// Verifies that a task group which specifies an invalid environment in
+// `ExecutorInfo` will be rejected. This test ensures that the common validation
+// code is being executed; comprehensive tests for the `Environment` message can
+// be found in the agent validation tests.
+TEST_F(TaskGroupValidationTest, ExecutorEnvironmentInvalid)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -2798,16 +2906,16 @@ TEST_F(TaskGroupValidationTest, ExecutorEnvironmentVariableWithoutValue)
   EXPECT_EQ(TASK_ERROR, task1Status->state());
   EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, task1Status->reason());
   EXPECT_EQ(
-      "Executor's `CommandInfo` is invalid: "
-      "Environment variable 'ENV_VAR_KEY' must have a value set",
+      "Executor's `CommandInfo` is invalid: Environment variable 'ENV_VAR_KEY' "
+      "of type 'VALUE' must have a value set",
       task1Status->message());
 
   AWAIT_READY(task2Status);
   EXPECT_EQ(TASK_ERROR, task2Status->state());
   EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, task2Status->reason());
   EXPECT_EQ(
-      "Executor's `CommandInfo` is invalid: "
-      "Environment variable 'ENV_VAR_KEY' must have a value set",
+      "Executor's `CommandInfo` is invalid: Environment variable 'ENV_VAR_KEY' "
+      "of type 'VALUE' must have a value set",
       task2Status->message());
 
   // Make sure the tasks are not known to master anymore.
@@ -2826,11 +2934,11 @@ TEST_F(TaskGroupValidationTest, ExecutorEnvironmentVariableWithoutValue)
 }
 
 
-// Ensures that a task group which specifies an invalid environment in
-// `TaskGroupInfo` will be correctly rejected. Currently,
-// `Environment.Variable.Value` must be set, but this constraint will be removed
-// in a future version.
-TEST_F(TaskGroupValidationTest, TaskEnvironmentVariableWithoutValue)
+// Verifies that a task group which specifies an invalid environment in
+// `TaskGroupInfo` will be rejected. This test ensures that the common
+// validation code is being executed; comprehensive tests for the `Environment`
+// message can be found in the agent validation tests.
+TEST_F(TaskGroupValidationTest, TaskEnvironmentInvalid)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -2904,7 +3012,7 @@ TEST_F(TaskGroupValidationTest, TaskEnvironmentVariableWithoutValue)
   EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, task1Status->reason());
   EXPECT_EQ(
       "Task '1' is invalid: Task's `CommandInfo` is invalid: Environment "
-      "variable 'ENV_VAR_KEY' must have a value set",
+      "variable 'ENV_VAR_KEY' of type 'VALUE' must have a value set",
       task1Status->message());
 
   AWAIT_READY(task2Status);
@@ -2912,7 +3020,7 @@ TEST_F(TaskGroupValidationTest, TaskEnvironmentVariableWithoutValue)
   EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, task2Status->reason());
   EXPECT_EQ(
       "Task '1' is invalid: Task's `CommandInfo` is invalid: Environment "
-      "variable 'ENV_VAR_KEY' must have a value set",
+      "variable 'ENV_VAR_KEY' of type 'VALUE' must have a value set",
       task2Status->message());
 
   // Allow status updates to arrive.
@@ -3398,6 +3506,11 @@ TEST_F(FrameworkInfoValidationTest, RejectRoleChangeWithMultiRoleMasterFailover)
     AWAIT_READY(runningStatus);
     EXPECT_EQ(TASK_RUNNING, runningStatus.get().state());
     EXPECT_EQ(task.task_id(), runningStatus.get().task_id());
+
+    // Since we launched a task, stopping the driver will cause the
+    // task and its executor to be shutdown.
+    EXPECT_CALL(exec, shutdown(_))
+      .Times(AtMost(1));
 
     driver.stop();
     driver.join();

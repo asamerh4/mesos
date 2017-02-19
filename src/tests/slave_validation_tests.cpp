@@ -25,12 +25,17 @@
 #include <stout/option.hpp>
 #include <stout/uuid.hpp>
 
+#include "common/validation.hpp"
+
 #include "slave/slave.hpp"
 #include "slave/validation.hpp"
 
 #include "tests/mesos.hpp"
 
 namespace validation = mesos::internal::slave::validation;
+
+using mesos::internal::common::validation::validateEnvironment;
+using mesos::internal::common::validation::validateSecret;
 
 using mesos::internal::slave::Slave;
 
@@ -86,6 +91,167 @@ TEST(AgentValidationTest, ContainerID)
 }
 
 
+// Tests that the common validation code for the
+// `Secret` message works as expected.
+TEST(AgentValidationTest, Secret)
+{
+  // Test a secret of VALUE type.
+  {
+    Secret secret;
+    secret.set_type(Secret::VALUE);
+
+    Option<Error> error = validateSecret(secret);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Secret of type VALUE must have the 'value' field set",
+        error->message);
+
+    secret.mutable_value()->set_data("SECRET_VALUE");
+    secret.mutable_reference()->set_name("SECRET_NAME");
+
+    error = validateSecret(secret);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Secret of type VALUE must not have the 'reference' field set",
+        error->message);
+
+    // Test the valid case.
+    secret.clear_reference();
+    error = validateSecret(secret);
+    EXPECT_NONE(error);
+  }
+
+  // Test a secret of REFERENCE type.
+  {
+    Secret secret;
+    secret.set_type(Secret::REFERENCE);
+
+    Option<Error> error = validateSecret(secret);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Secret of type REFERENCE must have the 'reference' field set",
+        error->message);
+
+    secret.mutable_reference()->set_name("SECRET_NAME");
+    secret.mutable_value()->set_data("SECRET_VALUE");
+
+    error = validateSecret(secret);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Secret 'SECRET_NAME' of type REFERENCE "
+        "must not have the 'value' field set",
+        error->message);
+
+    // Test the valid case.
+    secret.clear_value();
+    error = validateSecret(secret);
+    EXPECT_NONE(error);
+  }
+}
+
+
+// Tests that the common validation code for the
+// `Environment` message works as expected.
+TEST(AgentValidationTest, Environment)
+{
+  // Validate a variable of SECRET type.
+  {
+    Environment environment;
+    Environment::Variable* variable = environment.mutable_variables()->Add();
+    variable->set_type(mesos::Environment::Variable::SECRET);
+    variable->set_name("ENV_VAR_KEY");
+
+    Option<Error> error = validateEnvironment(environment);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Environment variable 'ENV_VAR_KEY' of type "
+        "'SECRET' must have a secret set",
+        error->message);
+
+    Secret secret;
+    secret.set_type(Secret::VALUE);
+    secret.mutable_value()->set_data("SECRET_VALUE");
+    variable->mutable_secret()->CopyFrom(secret);
+
+    variable->set_value("ENV_VAR_VALUE");
+
+    error = validateEnvironment(environment);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Environment variable 'ENV_VAR_KEY' of type 'SECRET' "
+        "must not have a value set",
+        error->message);
+
+    variable->clear_value();
+    char invalid_secret[5] = {'a', 'b', '\0', 'c', 'd'};
+    variable->mutable_secret()->mutable_value()->set_data(
+        std::string(invalid_secret, 5));
+
+    error = validateEnvironment(environment);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Environment variable 'ENV_VAR_KEY' specifies a secret containing "
+        "null bytes, which is not allowed in the environment",
+        error->message);
+
+    // Test the valid case.
+    variable->mutable_secret()->mutable_value()->set_data("SECRET_VALUE");
+    error = validateEnvironment(environment);
+    EXPECT_NONE(error);
+  }
+
+  // Validate a variable of VALUE type.
+  {
+    // The default type for an environment variable
+    // should be VALUE, so we do not set the type here.
+    Environment environment;
+    Environment::Variable* variable = environment.mutable_variables()->Add();
+    variable->set_name("ENV_VAR_KEY");
+
+    Option<Error> error = validateEnvironment(environment);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Environment variable 'ENV_VAR_KEY' of type 'VALUE' "
+        "must have a value set",
+        error->message);
+
+    variable->set_value("ENV_VAR_VALUE");
+
+    Secret secret;
+    secret.set_type(Secret::VALUE);
+    secret.mutable_value()->set_data("SECRET_VALUE");
+    variable->mutable_secret()->CopyFrom(secret);
+
+    error = validateEnvironment(environment);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Environment variable 'ENV_VAR_KEY' of type 'VALUE' "
+        "must not have a secret set",
+        error->message);
+
+    // Test the valid case.
+    variable->clear_secret();
+    error = validateEnvironment(environment);
+    EXPECT_NONE(error);
+  }
+
+  // Validate a variable of UNKNOWN type.
+  {
+    Environment environment;
+    Environment::Variable* variable = environment.mutable_variables()->Add();
+    variable->set_type(mesos::Environment::Variable::UNKNOWN);
+    variable->set_name("ENV_VAR_KEY");
+    variable->set_value("ENV_VAR_VALUE");
+
+    Option<Error> error = validateEnvironment(environment);
+    EXPECT_SOME(error);
+    EXPECT_EQ(
+        "Environment variable of type 'UNKNOWN' is not allowed",
+        error->message);
+  }
+}
+
+
 TEST(AgentCallValidationTest, LaunchNestedContainer)
 {
   // Missing `launch_nested_container`.
@@ -116,9 +282,9 @@ TEST(AgentCallValidationTest, LaunchNestedContainer)
   error = validation::agent::call::validate(call);
   EXPECT_SOME(error);
 
-  // Valid `container_id.parent` but invalid `command.environment`. Currently,
-  // `Environment.Variable.Value` must be set, but this constraint will be
-  // removed in a future version.
+  // Valid `container_id.parent` but invalid `command.environment`. Set
+  // an invalid environment variable to check that the common validation
+  // code for the command's environment is being executed.
   ContainerID parentContainerId;
   parentContainerId.set_value(UUID::random().toString());
 
@@ -131,12 +297,13 @@ TEST(AgentCallValidationTest, LaunchNestedContainer)
     ->mutable_variables()
     ->Add();
   variable->set_name("ENV_VAR_KEY");
+  variable->set_type(mesos::Environment::Variable::VALUE);
 
   error = validation::agent::call::validate(call);
   EXPECT_SOME(error);
   EXPECT_EQ(
       "'launch_nested_container.command' is invalid: Environment variable "
-      "'ENV_VAR_KEY' must have a value set",
+      "'ENV_VAR_KEY' of type 'VALUE' must have a value set",
       error->message);
 
   // Test the valid case.
@@ -250,9 +417,9 @@ TEST(AgentCallValidationTest, LaunchNestedContainerSession)
   error = validation::agent::call::validate(call);
   EXPECT_SOME(error);
 
-  // Valid `container_id.parent` but invalid `command.environment`. Currently,
-  // `Environment.Variable.Value` must be set, but this constraint will be
-  // removed in a future version.
+  // Valid `container_id.parent` but invalid `command.environment`. Set
+  // an invalid environment variable to check that the common validation
+  // code for the command's environment is being executed.
   ContainerID parentContainerId;
   parentContainerId.set_value(UUID::random().toString());
 
@@ -265,12 +432,13 @@ TEST(AgentCallValidationTest, LaunchNestedContainerSession)
     ->mutable_variables()
     ->Add();
   variable->set_name("ENV_VAR_KEY");
+  variable->set_type(mesos::Environment::Variable::VALUE);
 
   error = validation::agent::call::validate(call);
   EXPECT_SOME(error);
   EXPECT_EQ(
       "'launch_nested_container_session.command' is invalid: Environment "
-      "variable 'ENV_VAR_KEY' must have a value set",
+      "variable 'ENV_VAR_KEY' of type 'VALUE' must have a value set",
       error->message);
 
   // Test the valid case.
