@@ -127,6 +127,10 @@ static void json(JSON::ObjectWriter* writer, const TaskInfo& task)
   writer->field("slave_id", task.slave_id().value());
   writer->field("resources", Resources(task.resources()));
 
+  // Tasks are not allowed to mix resources allocated to
+  // different roles, see MESOS-6636.
+  writer->field("role", task.resources().begin()->allocation_info().role());
+
   if (task.has_command()) {
     writer->field("command", task.command());
   }
@@ -140,9 +144,9 @@ static void json(JSON::ObjectWriter* writer, const TaskInfo& task)
 
 static void json(
     JSON::StringWriter* writer,
-    const SlaveInfo::Capability::Type& capability)
+    const SlaveInfo::Capability& capability)
 {
-  writer->append(SlaveInfo::Capability::Type_Name(capability));
+  writer->append(SlaveInfo::Capability::Type_Name(capability.type()));
 }
 
 namespace internal {
@@ -173,6 +177,15 @@ struct ExecutorWriter
     writer->field("container", executor_->containerId.value());
     writer->field("directory", executor_->directory);
     writer->field("resources", executor_->resources);
+
+    // Resources may be empty for command executors.
+    if (!executor_->info.resources().empty()) {
+      // Executors are not allowed to mix resources allocated to
+      // different roles, see MESOS-6636.
+      writer->field(
+          "role",
+          executor_->info.resources().begin()->allocation_info().role());
+    }
 
     if (executor_->info.has_labels()) {
       writer->field("labels", executor_->info.labels());
@@ -1229,7 +1242,7 @@ Future<Response> Slave::Http::state(
         writer->field("id", slave->info.id().value());
         writer->field("pid", string(slave->self()));
         writer->field("hostname", slave->info.hostname());
-        writer->field("capabilities", MESOS_AGENT_CAPABILITIES);
+        writer->field("capabilities", AGENT_CAPABILITIES());
 
         const Resources& totalResources = slave->totalResources;
 
