@@ -584,6 +584,36 @@ Option<Error> validatePersistentVolume(
 }
 
 
+// Validates that all the given resources are allocated to same role.
+Option<Error> validateAllocatedToSingleRole(const Resources& resources)
+{
+  Option<string> role;
+
+  foreach (const Resource& resource, resources) {
+    // Note that the master normalizes `Offer::Operation` resources
+    // to have allocation info set, so we can validate it here.
+    if (!resource.allocation_info().has_role()) {
+      return Error("The resources are not allocated to a role");
+    }
+
+    string _role = resource.allocation_info().role();
+
+    if (role.isNone()) {
+      role = _role;
+      continue;
+    }
+
+    if (_role != role.get()) {
+      return Error("The resources have multiple allocation roles"
+                   " ('" + _role + "' and '" + role.get() + "')"
+                   " but only one allocation role is allowed");
+    }
+  }
+
+  return None();
+}
+
+
 Option<Error> validate(const RepeatedPtrField<Resource>& resources)
 {
   Option<Error> error = Resources::validate(resources);
@@ -750,6 +780,11 @@ Option<Error> validateResources(const ExecutorInfo& executor)
         "Executor uses duplicate persistence ID: " + error->message);
   }
 
+  error = resource::validateAllocatedToSingleRole(resources);
+  if (error.isSome()) {
+    return Error("Invalid executor resources: " + error->message);
+  }
+
   error = resource::validateRevocableAndNonRevocableResources(resources);
   if (error.isSome()) {
     return Error("Executor mixes revocable and non-revocable resources: " +
@@ -910,6 +945,11 @@ Option<Error> validateResources(const TaskInfo& task)
   error = resource::validateUniquePersistenceID(resources);
   if (error.isSome()) {
     return Error("Task uses duplicate persistence ID: " + error->message);
+  }
+
+  error = resource::validateAllocatedToSingleRole(resources);
+  if (error.isSome()) {
+    return Error("Invalid task resources: " + error->message);
   }
 
   error = resource::validateRevocableAndNonRevocableResources(resources);
@@ -1701,6 +1741,16 @@ Option<Error> validate(
     }
   }
 
+  if (frameworkInfo.isSome()) {
+    // If the operation is being applied by a framework, we also
+    // ensure that across all the resources, they are allocated
+    // to a single role.
+    error = resource::validateAllocatedToSingleRole(reserve.resources());
+    if (error.isSome()) {
+      return Error("Invalid reservation resources: " + error->message);
+    }
+  }
+
   return None();
 }
 
@@ -1792,6 +1842,16 @@ Option<Error> validate(
             "principal '" + volume.disk().persistence().principal() +
             "' set in 'DiskInfo.Persistence'");
       }
+    }
+  }
+
+  if (frameworkInfo.isSome()) {
+    // If the operation is being applied by a framework, we also
+    // ensure that across all the resources, they are allocated
+    // to a single role.
+    error = resource::validateAllocatedToSingleRole(create.volumes());
+    if (error.isSome()) {
+      return Error("Invalid volume resources: " + error->message);
     }
   }
 

@@ -538,6 +538,37 @@ TEST_F(ReserveOperationValidationTest, UnexpectedAllocatedResource)
 }
 
 
+TEST_F(ReserveOperationValidationTest, MixedAllocationRoles)
+{
+  Resource resource1 = Resources::parse("cpus", "8", "role1").get();
+  resource1.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+  Resource resource2 = Resources::parse("mem", "8", "role2").get();
+  resource2.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+
+  Offer::Operation::Reserve reserve;
+  reserve.mutable_resources()->CopyFrom(
+      allocatedResources(resource1, "role1") +
+      allocatedResources(resource2, "role2"));
+
+  FrameworkInfo frameworkInfo;
+  frameworkInfo.add_roles("role1");
+  frameworkInfo.add_roles("role2");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  Option<Error> error =
+    operation::validate(reserve, "principal", frameworkInfo);
+
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Invalid reservation resources: The resources have multiple"
+          " allocation roles ('role2' and 'role1') but only one allocation"
+          " role is allowed"));
+}
+
+
 class UnreserveOperationValidationTest : public MesosTest {};
 
 
@@ -715,6 +746,7 @@ TEST_F(CreateOperationValidationTest, SharedVolumeBasedOnCapability)
 {
   Resource volume = createDiskResource(
       "128", "role1", "1", "path1", None(), true); // Shared.
+  volume.mutable_allocation_info()->set_role("role1");
 
   Offer::Operation::Create create;
   create.add_volumes()->CopyFrom(volume);
@@ -828,6 +860,37 @@ TEST_F(CreateOperationValidationTest, InsufficientDiskResource)
 
   driver.stop();
   driver.join();
+}
+
+
+TEST_F(CreateOperationValidationTest, MixedAllocationRole)
+{
+  Resource volume1 = Resources::parse("disk", "128", "role1").get();
+  volume1.mutable_disk()->CopyFrom(createDiskInfo("id1", "path1"));
+  Resource volume2 = Resources::parse("disk", "256", "role2").get();
+  volume2.mutable_disk()->CopyFrom(createDiskInfo("id2", "path2"));
+
+  Offer::Operation::Create create;
+  create.mutable_volumes()->CopyFrom(
+      allocatedResources(volume1, "role1") +
+      allocatedResources(volume2, "role2"));
+
+  FrameworkInfo frameworkInfo;
+  frameworkInfo.add_roles("role1");
+  frameworkInfo.add_roles("role2");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  Option<Error> error = operation::validate(
+      create, Resources(), None(), frameworkInfo);
+
+  ASSERT_SOME(error);
+  EXPECT_TRUE(
+      strings::contains(
+          error->message,
+          "Invalid volume resources: The resources have multiple allocation"
+          " roles ('role2' and 'role1') but only one allocation role is"
+          " allowed"));
 }
 
 
@@ -1801,6 +1864,7 @@ TEST_F(TaskValidationTest, TaskUsesRevocableResources)
   cpus.set_name("cpus");
   cpus.set_type(Value::SCALAR);
   cpus.mutable_scalar()->set_value(2);
+  cpus.mutable_allocation_info()->set_role("role");
 
   // A task with only non-revocable cpus is valid.
   task.add_resources()->CopyFrom(cpus);
@@ -1829,6 +1893,43 @@ TEST_F(TaskValidationTest, TaskUsesRevocableResources)
   error = task::internal::validateResources(task);
 
   EXPECT_SOME(error);
+}
+
+
+TEST_F(TaskValidationTest, TaskInfoAllocatedResources)
+{
+  // Validation should pass if the task has resources
+  // allocated to a single role.
+  {
+    TaskInfo task;
+    Resources resources = Resources::parse("cpus:1;mem:1").get();
+    task.mutable_resources()->CopyFrom(allocatedResources(resources, "role"));
+
+    EXPECT_NONE(::task::internal::validateResources(task));
+  }
+
+  // Validation should fail if the task has unallocated resources.
+  {
+    TaskInfo task;
+    Resources resources = Resources::parse("cpus:1;mem:1").get();
+    task.mutable_resources()->CopyFrom(resources);
+
+    EXPECT_SOME(::task::internal::validateResources(task));
+  }
+
+  // Validation should fail if the task has resources
+  // allocated to multiple roles.
+  {
+    TaskInfo task;
+    Resources resources1 = Resources::parse("cpus:1").get();
+    Resources resources2 = Resources::parse("mem:1").get();
+
+    task.mutable_resources()->CopyFrom(
+        allocatedResources(resources1, "role1") +
+        allocatedResources(resources2, "role2"));
+
+    EXPECT_SOME(::task::internal::validateResources(task));
+  }
 }
 
 
@@ -2223,6 +2324,56 @@ TEST_F(ExecutorValidationTest, ExecutorID)
     executorInfo.mutable_executor_id()->set_value("..");
 
     EXPECT_SOME(::executor::internal::validateExecutorID(executorInfo));
+  }
+}
+
+
+TEST_F(ExecutorValidationTest, ExecutorInfoAllocatedResources)
+{
+  // Validation should pass if the executor has no resources.
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+
+    EXPECT_NONE(::executor::internal::validateResources(executorInfo));
+  }
+
+  // Validation should pass if the executor has resources
+  // allocated to a single role.
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+
+    EXPECT_NONE(::executor::internal::validateResources(executorInfo));
+
+    Resources resources = Resources::parse("cpus:1;mem:128").get();
+    executorInfo.mutable_resources()->CopyFrom(
+        allocatedResources(resources, "role"));
+
+    EXPECT_NONE(::executor::internal::validateResources(executorInfo));
+  }
+
+  // Validation should fail if the executor has unallocated resources.
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+
+    Resources resources = Resources::parse("cpus:1;mem:128").get();
+    executorInfo.mutable_resources()->CopyFrom(resources);
+
+    EXPECT_SOME(::executor::internal::validateResources(executorInfo));
+  }
+
+  // Validation should fail if the executor has resources
+  // allocated to multiple role.
+  {
+    ExecutorInfo executorInfo = DEFAULT_EXECUTOR_INFO;
+
+    Resources resources1 = Resources::parse("cpus:1").get();
+    Resources resources2 = Resources::parse("mem:1").get();
+
+    executorInfo.mutable_resources()->CopyFrom(
+        allocatedResources(resources1, "role1") +
+        allocatedResources(resources2, "role2"));
+
+    EXPECT_SOME(::executor::internal::validateResources(executorInfo));
   }
 }
 
