@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <mesos/slave/container_logger.hpp>
+#include <mesos/slave/containerizer.hpp>
 
 #include <process/check.hpp>
 #include <process/collect.hpp>
@@ -72,6 +73,7 @@ using std::string;
 using std::vector;
 
 using mesos::slave::ContainerLogger;
+using mesos::slave::ContainerIO;
 using mesos::slave::ContainerTermination;
 
 using mesos::internal::slave::state::SlaveState;
@@ -1324,7 +1326,7 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
       container->user)
     .then(defer(
         self(),
-        [=](const ContainerLogger::SubprocessInfo& subprocessInfo)
+        [=](const ContainerIO& containerIO)
           -> Future<Docker::Container> {
     Try<Docker::RunOptions> runOptions = Docker::RunOptions::create(
         container->container,
@@ -1351,8 +1353,8 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
     // ExecutorInfo, or the docker executor.
     Future<Option<int>> run = docker->run(
         runOptions.get(),
-        subprocessInfo.out,
-        subprocessInfo.err);
+        containerIO.out,
+        containerIO.err);
 
     // It's possible that 'run' terminates before we're able to
     // obtain an 'inspect' result. It's also possible that 'run'
@@ -1427,7 +1429,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
   // be overwritten if they are specified by the framework.  This might cause
   // applications to not work, but upon overriding system defaults, it becomes
   // the overidder's problem.
-  Option<std::map<string, string>> systemEnvironment =
+  Option<map<string, string>> systemEnvironment =
     process::internal::getSystemEnvironment();
   foreachpair(const string& key, const string& value,
     systemEnvironment.get()) {
@@ -1463,7 +1465,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
     }))
     .then(defer(
         self(),
-        [=](const ContainerLogger::SubprocessInfo& subprocessInfo)
+        [=](const ContainerIO& containerIO)
           -> Future<pid_t> {
     // NOTE: The child process will be blocked until all hooks have been
     // executed.
@@ -1513,8 +1515,8 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
         path::join(flags.launcher_dir, MESOS_DOCKER_EXECUTOR),
         argv,
         Subprocess::PIPE(),
-        subprocessInfo.out,
-        subprocessInfo.err,
+        containerIO.out,
+        containerIO.err,
         &launchFlags,
         environment,
         None(),

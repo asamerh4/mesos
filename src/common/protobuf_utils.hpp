@@ -18,6 +18,7 @@
 #define __PROTOBUF_UTILS_HPP__
 
 #include <initializer_list>
+#include <ostream>
 #include <set>
 #include <string>
 
@@ -139,6 +140,8 @@ ContainerID getRootContainerId(const ContainerID& containerId);
 
 namespace slave {
 
+// TODO(bmahler): Store the repeated field within this so that we
+// don't drop unknown capabilities.
 struct Capabilities
 {
   Capabilities() = default;
@@ -153,6 +156,8 @@ struct Capabilities
         case SlaveInfo::Capability::MULTI_ROLE:
           multiRole = true;
           break;
+        // If adding another case here be sure to update the
+        // equality operator.
       }
     }
   }
@@ -171,6 +176,11 @@ struct Capabilities
     return result;
   }
 };
+
+
+bool operator==(const Capabilities& left, const Capabilities& right);
+bool operator!=(const Capabilities& left, const Capabilities& right);
+std::ostream& operator<<(std::ostream& stream, const Capabilities& c);
 
 
 mesos::slave::ContainerLimitation createContainerLimitation(
@@ -256,6 +266,8 @@ mesos::master::Event createAgentRemoved(const SlaveID& slaveId);
 
 namespace framework {
 
+// TODO(bmahler): Store the repeated field within this so that we
+// don't drop unknown capabilities.
 struct Capabilities
 {
   Capabilities() = default;

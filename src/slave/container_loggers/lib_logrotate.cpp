@@ -24,6 +24,7 @@
 #include <mesos/module/container_logger.hpp>
 
 #include <mesos/slave/container_logger.hpp>
+#include <mesos/slave/containerizer.hpp>
 
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
@@ -54,13 +55,11 @@ using namespace mesos;
 using namespace process;
 
 using mesos::slave::ContainerLogger;
+using mesos::slave::ContainerIO;
 
 namespace mesos {
 namespace internal {
 namespace logger {
-
-using SubprocessInfo = ContainerLogger::SubprocessInfo;
-
 
 class LogrotateContainerLoggerProcess :
   public Process<LogrotateContainerLoggerProcess>
@@ -71,7 +70,7 @@ public:
   // Spawns two subprocesses that read from their stdin and write to
   // "stdout" and "stderr" files in the sandbox.  The subprocesses will rotate
   // the files according to the configured maximum size and number of files.
-  Future<SubprocessInfo> prepare(
+  Future<ContainerIO> prepare(
       const ExecutorInfo& executorInfo,
       const std::string& sandboxDirectory,
       const Option<std::string>& user)
@@ -252,10 +251,10 @@ public:
     }
 
     // NOTE: The ownership of these FDs is given to the caller of this function.
-    ContainerLogger::SubprocessInfo info;
-    info.out = SubprocessInfo::IO::FD(outfds.write.get());
-    info.err = SubprocessInfo::IO::FD(errfds.write.get());
-    return info;
+    ContainerIO io;
+    io.out = ContainerIO::IO::FD(outfds.write.get());
+    io.err = ContainerIO::IO::FD(errfds.write.get());
+    return io;
   }
 
 protected:
@@ -285,7 +284,7 @@ Try<Nothing> LogrotateContainerLogger::initialize()
 }
 
 
-Future<SubprocessInfo> LogrotateContainerLogger::prepare(
+Future<ContainerIO> LogrotateContainerLogger::prepare(
     const ExecutorInfo& executorInfo,
     const std::string& sandboxDirectory,
     const Option<std::string>& user)

@@ -187,7 +187,8 @@ public:
 
   void updateFramework(
       const FrameworkID& frameworkId,
-      const process::UPID& pid);
+      const process::UPID& pid,
+      const FrameworkInfo& frameworkInfo);
 
   void checkpointResources(const std::vector<Resource>& checkpointedResources);
 
@@ -361,11 +362,11 @@ public:
   void authenticate();
 
   // Helper routines to lookup a framework/executor.
-  Framework* getFramework(const FrameworkID& frameworkId);
+  Framework* getFramework(const FrameworkID& frameworkId) const;
 
   Executor* getExecutor(
       const FrameworkID& frameworkId,
-      const ExecutorID& executorId);
+      const ExecutorID& executorId) const;
 
   Executor* getExecutor(const ContainerID& containerId) const;
 
@@ -373,7 +374,7 @@ public:
   // constructing one if the task has a CommandInfo).
   ExecutorInfo getExecutorInfo(
       const FrameworkInfo& frameworkInfo,
-      const TaskInfo& task);
+      const TaskInfo& task) const;
 
   // Shuts down the executor if it did not register yet.
   void registerExecutorTimeout(
@@ -410,7 +411,10 @@ public:
   virtual void __recover(const process::Future<Nothing>& future);
 
   // Helper to recover a framework from the specified state.
-  void recoverFramework(const state::FrameworkState& state);
+  void recoverFramework(
+      const state::FrameworkState& state,
+      const hashset<ExecutorID>& executorsToRecheckpoint,
+      const hashmap<ExecutorID, hashset<TaskID>>& tasksToRecheckpoint);
 
   // Removes and garbage collects the executor.
   void removeExecutor(Framework* framework, Executor* executor);
@@ -889,7 +893,10 @@ struct Executor
   void completeTask(const TaskID& taskId);
   void checkpointExecutor();
   void checkpointTask(const TaskInfo& task);
-  void recoverTask(const state::TaskState& state);
+  void checkpointTask(const Task& task);
+
+  void recoverTask(const state::TaskState& state, bool recheckpointTask);
+
   Try<Nothing> updateTaskState(const TaskStatus& status);
 
   // Returns true if there are any queued/launched/terminated tasks.
@@ -1047,9 +1054,14 @@ struct Framework
       const ExecutorInfo& executorInfo,
       const Option<TaskInfo>& taskInfo);
   void destroyExecutor(const ExecutorID& executorId);
-  Executor* getExecutor(const ExecutorID& executorId);
-  Executor* getExecutor(const TaskID& taskId);
-  void recoverExecutor(const state::ExecutorState& state);
+  Executor* getExecutor(const ExecutorID& executorId) const;
+  Executor* getExecutor(const TaskID& taskId) const;
+
+  void recoverExecutor(
+      const state::ExecutorState& state,
+      bool recheckpointExecutor,
+      const hashset<TaskID>& tasksToRecheckpoint);
+
   void checkpointFramework() const;
 
   const FrameworkID id() const { return info.id(); }
@@ -1065,7 +1077,7 @@ struct Framework
   // the 'Slave' class.
   Slave* slave;
 
-  const FrameworkInfo info;
+  FrameworkInfo info;
 
   protobuf::framework::Capabilities capabilities;
 

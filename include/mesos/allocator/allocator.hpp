@@ -176,6 +176,7 @@ public:
    * @param slaveId ID of the agent to be added or re-added.
    * @param slaveInfo Detailed info of the agent. The slaveInfo resources
    *     correspond directly to the static --resources flag value on the agent.
+   * @param capabilities Capabilities of the agent.
    * @param total The `total` resources are passed explicitly because it
    *     includes resources that are dynamically "checkpointed" on the agent
    *     (e.g. persistent volumes, dynamic reservations, etc).
@@ -186,6 +187,7 @@ public:
   virtual void addSlave(
       const SlaveID& slaveId,
       const SlaveInfo& slaveInfo,
+      const std::vector<SlaveInfo::Capability>& capabilities,
       const Option<Unavailability>& unavailability,
       const Resources& total,
       const hashmap<FrameworkID, Resources>& used) = 0;
@@ -200,7 +202,7 @@ public:
   /**
    * Updates an agent.
    *
-   * Updates the latest oversubscribed resources for an agent.
+   * Updates the latest oversubscribed resources or capabilities for an agent.
    * TODO(vinod): Instead of just oversubscribed resources have this
    * method take total resources. We can then reuse this method to
    * update Agent's total resources in the future.
@@ -208,10 +210,13 @@ public:
    * @param oversubscribed The new oversubscribed resources estimate from
    *     the agent. The oversubscribed resources include the total amount
    *     of oversubscribed resources that are allocated and available.
+   * @param capabilities The new capabilities of the agent.
    */
   virtual void updateSlave(
       const SlaveID& slave,
-      const Resources& oversubscribed) = 0;
+      const Option<Resources>& oversubscribed = None(),
+      const Option<std::vector<SlaveInfo::Capability>>&
+          capabilities = None()) = 0;
 
   /**
    * Activates an agent. This is invoked when an agent reregisters. Offers

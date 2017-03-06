@@ -2172,7 +2172,7 @@ Future<bool> Master::authorizeFramework(
   // via the request's `value` field. This is purely for backwards
   // compatibility as the `value` field is deprecated. Note that this
   // means that authorizers relying on the deprecated field will see
-  // an empty string in `value` for for `MULTI_ROLE` frameworks.
+  // an empty string in `value` for `MULTI_ROLE` frameworks.
   //
   // TODO(bbannier): Remove this at the end of `value`'s deprecation
   // cycle, see MESOS-7073.
@@ -2248,7 +2248,7 @@ void Master::drop(
 void Master::drop(
     Framework* framework,
     const scheduler::Call& call,
-    const std::string& message)
+    const string& message)
 {
     CHECK_NOTNULL(framework);
 
@@ -2676,12 +2676,13 @@ void Master::_subscribe(
   // it currently isn't running any tasks.
   foreachvalue (Slave* slave, slaves.registered) {
     UpdateFrameworkMessage message;
-    message.mutable_framework_id()->MergeFrom(frameworkInfo.id());
+    message.mutable_framework_id()->CopyFrom(frameworkInfo.id());
 
     // TODO(anand): We set 'pid' to UPID() for http frameworks
     // as 'pid' was made optional in 0.24.0. In 0.25.0, we
     // no longer have to set pid here for http frameworks.
     message.set_pid(UPID());
+    message.mutable_framework_info()->CopyFrom(frameworkInfo);
     send(slave->pid, message);
   }
 }
@@ -3038,8 +3039,9 @@ void Master::_subscribe(
   // it currently isn't running any tasks.
   foreachvalue (Slave* slave, slaves.registered) {
     UpdateFrameworkMessage message;
-    message.mutable_framework_id()->MergeFrom(frameworkInfo.id());
+    message.mutable_framework_id()->CopyFrom(frameworkInfo.id());
     message.set_pid(from);
+    message.mutable_framework_info()->CopyFrom(frameworkInfo);
     send(slave->pid, message);
   }
 }
@@ -3306,7 +3308,7 @@ void Master::suppress(
 }
 
 
-bool Master::isWhitelistedRole(const string& name)
+bool Master::isWhitelistedRole(const string& name) const
 {
   if (roleWhitelist.isNone()) {
     return true;
@@ -5166,7 +5168,7 @@ void Master::acknowledge(
     if (protobuf::isTerminalState(task->status_update_state()) &&
         UUID::fromBytes(task->status_update_uuid()).get() == uuid) {
       removeTask(task);
-     }
+    }
   }
 
   StatusUpdateAcknowledgementMessage message;
@@ -5610,6 +5612,8 @@ void Master::reregisterSlave(
     slave->reregisteredTime = Clock::now();
     slave->capabilities = agentCapabilities;
 
+    allocator->updateSlave(slave->id, None(), agentCapabilities);
+
     // Reconcile tasks between master and slave, and send the
     // `SlaveReregisteredMessage`.
     reconcileKnownSlave(slave, executorInfos, tasks);
@@ -5954,12 +5958,10 @@ void Master::__reregisterSlave(
 
   foreach (const FrameworkID& frameworkId, ids) {
     Framework* framework = getFramework(frameworkId);
-
-    // We don't need to send the PIDs of disconnected frameworks to
-    // re-registering slaves.
-    if (framework != nullptr && framework->connected()) {
+    if (framework != nullptr) {
       UpdateFrameworkMessage message;
-      message.mutable_framework_id()->MergeFrom(framework->id());
+      message.mutable_framework_id()->CopyFrom(framework->id());
+      message.mutable_framework_info()->CopyFrom(framework->info);
 
       // TODO(anand): We set 'pid' to UPID() for http frameworks
       // as 'pid' was made optional in 0.24.0. In 0.25.0, we
@@ -8094,6 +8096,7 @@ void Master::addSlave(
   allocator->addSlave(
       slave->id,
       slave->info,
+      google::protobuf::convert(slave->capabilities.toRepeatedPtrField()),
       unavailability,
       slave->totalResources,
       slave->usedResources);
@@ -8621,26 +8624,27 @@ bool Master::isCompletedFramework(const FrameworkID& frameworkId)
 
 
 // TODO(bmahler): Consider killing this.
-Framework* Master::getFramework(const FrameworkID& frameworkId)
+Framework* Master::getFramework(const FrameworkID& frameworkId) const
 {
   return frameworks.registered.contains(frameworkId)
-    ? frameworks.registered[frameworkId]
-    : nullptr;
+           ? frameworks.registered.at(frameworkId)
+           : nullptr;
 }
 
 
 // TODO(bmahler): Consider killing this.
-Offer* Master::getOffer(const OfferID& offerId)
+Offer* Master::getOffer(const OfferID& offerId) const
 {
-  return offers.contains(offerId) ? offers[offerId] : nullptr;
+  return offers.contains(offerId) ? offers.at(offerId) : nullptr;
 }
 
 
 // TODO(bmahler): Consider killing this.
-InverseOffer* Master::getInverseOffer(const OfferID& inverseOfferId)
+InverseOffer* Master::getInverseOffer(const OfferID& inverseOfferId) const
 {
-  return inverseOffers.contains(inverseOfferId) ?
-    inverseOffers[inverseOfferId] : nullptr;
+  return inverseOffers.contains(inverseOfferId)
+           ? inverseOffers.at(inverseOfferId)
+           : nullptr;
 }
 
 

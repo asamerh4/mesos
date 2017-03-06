@@ -3231,3 +3231,346 @@ Content-Type: application/json
 }
 
 ```
+
+### LAUNCH_NESTED_CONTAINER
+
+This call launches a nested container. Any authorized entity,
+including the executor itself, its tasks, or the operator can use this
+API to launch a nested container.
+
+```
+LAUNCH_NESTED_CONTAINER HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "LAUNCH_NESTED_CONTAINER",
+  "launch_nested_container": {
+    "container_id": {
+      "parent": {
+        "parent": {
+          "value": "27d44d12-ce9e-455f-9282-f580d8b56cad"
+        },
+        "value": "f5015d94-8093-477d-9551-9452acfad495"
+      },
+      "value": "3192b9d1-db71-4699-ae25-e28dfbf42de1"
+    },
+    "command": {
+      "environment": {
+        "variables": [
+          {
+            "name": "ENV_VAR_KEY",
+            "type": "VALUE",
+            "value": "env_var_value"
+          }
+        ]
+      },
+      "shell": true,
+      "value": "exit 0"
+    }
+  }
+}
+
+LAUNCH_NESTED_CONTAINER HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+```
+
+### WAIT_NESTED_CONTAINER
+
+This call waits for a nested container to terminate or exit. Any
+authorized entity, including the executor itself, its tasks, or the
+operator can use this API to wait on a nested container.
+
+```
+WAIT_NESTED_CONTAINER HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "WAIT_NESTED_CONTAINER",
+  "wait_nested_container": {
+    "container_id": {
+      "parent": {
+        "value": "6643b4be-583a-4dc3-bf23-a1ffb26dd452"
+      },
+      "value": "3192b9d1-db71-4699-ae25-e28dfbf42de1"
+    }
+  }
+}
+
+WAIT_NESTED_CONTAINER HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+Content-Type: application/json
+
+{
+  "type": "WAIT_NESTED_CONTAINER",
+  "wait_nested_container": {
+    "exit_status": 0
+  }
+}
+
+```
+
+### KILL_NESTED_CONTAINER
+
+This call initiates the destruction of a nested container. Any
+authorized entity, including the executor itself, its tasks, or the
+operator can use this API to kill a nested container.
+
+```
+KILL_NESTED_CONTAINER HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "KILL_NESTED_CONTAINER",
+  "kill_nested_container": {
+    "container_id": {
+      "parent": {
+        "value": "62d15977-acd4-4167-ae08-2e3738dc3ad6"
+      },
+      "value": "3192b9d1-db71-4699-ae25-e28dfbf42de1"
+    }
+  }
+}
+
+KILL_NESTED_CONTAINER HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+```
+
+### LAUNCH_NESTED_CONTAINER_SESSION
+
+This call launches a nested container whose lifetime is tied to the
+lifetime of the HTTP call establishing this connection. The STDOUT and
+STDERR of the nested container is streamed back to the client so long
+as the connection is active.
+
+```
+LAUNCH_NESTED_CONTAINER_SESSION HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/recordio
+Message-Accept: application/json
+
+{
+  "type": "LAUNCH_NESTED_CONTAINER_SESSION",
+  "launch_nested_container_session": {
+    "container_id": {
+      "parent": {
+        "parent": {
+          "value": "bde04877-cb26-4277-976e-3ecf0c02e76b"
+        },
+        "value": "134bae93-cf5c-4938-87bf-f779bfcd0092"
+      },
+      "value": "e193a755-8528-4673-a05b-2cc2a01a8b94"
+    },
+    "command": {
+      "environment": {
+        "variables": [
+          {
+            "name": "ENV_VAR_KEY",
+            "type": "VALUE",
+            "value": "env_var_value"
+          }
+        ]
+      },
+      "shell": true,
+      "value": "while [ true ]; do echo $(date); sleep 1; done"
+    }
+  }
+}
+
+LAUNCH_NESTED_CONTAINER_SESSION HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+Content-Type: application/recordio
+Message-Content-Type: application/json
+
+90
+{
+  "type":"DATA",
+  "data": {
+    "type":"STDOUT",
+    "data": "TW9uIEZlYiAyNyAwNzozOTozOCBVVEMgMjAxNwo="
+  }
+}90
+{
+  "type":"DATA",
+  "data": {
+    "type":"STDOUT",
+    "data": "TW9uIEZlYiAyNyAwNzozOTozOSBVVEMgMjAxNwo="
+  }
+}90
+{
+  "type":"DATA",
+  "data": {
+    "type":"STDERR",
+    "data": "TW9uIEZlYiAyNyAwNzozOTo0MCBVVEMgMjAxNwo="
+  }
+}
+...
+
+```
+
+### ATTACH_CONTAINER_INPUT
+
+This call attaches to the STDIN of the primary process of a container
+and streams input to it. This call can only be made against containers
+that have been launched with an associated IOSwitchboard (i.e. nested
+containers launched via a LAUNCH_NESTED_CONTAINER_SESSION call or
+normal containers launched with a TTYInfo in their ContainerInfo).
+Only one ATTACH_CONTAINER_INPUT call can be active for a given
+container at a time. Subsequent attempts to attach will fail.
+
+The first message sent over an ATTACH_CONTAINER_INPUT stream must be
+of type CONTAINER_ID and contain the ContainerID of the container
+being attached to. Subsequent messages must be of type PROCESS_IO, but
+they may contain subtypes of either DATA or CONTROL. DATA messages
+must be of type STDIN and contain the actual data to stream to the
+STDIN of the container beinga attached to. Currently, the only valid
+CONTROL message sends a heartbeat to keep the connection alive. We may
+add more CONTROL messages in the future.
+
+```
+ATTACH_CONTAINER_INPUT HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/recordio
+Message-Content-Type: application/json
+Accept: application/json
+
+214
+{
+  "type": "ATTACH_CONTAINER_INPUT",
+  "attach_container_input": {
+    "type": "CONTAINER_ID",
+    "container_id": {
+      "value": "da737efb-a9d4-4622-84ef-f55eb07b861a"
+    }
+  }
+}163
+{
+  "type": "ATTACH_CONTAINER_INPUT",
+  "attach_container_input": {
+    "type": "PROCESS_IO",
+    "process_io": {
+      "type": "DATA",
+      "data": {
+        "type": "STDIN",
+        "data": "dGVzdAo="
+      }
+    }
+  }
+}210
+{
+  "type":
+  "ATTACH_CONTAINER_INPUT",
+  "attach_container_input": {
+    "type": "PROCESS_IO",
+    "process_io": {
+      "type": "CONTROL",
+      "control": {
+        "type": "HEARTBEAT",
+        "heartbeat": {
+          "interval": {
+            "nanoseconds": 30000000000
+          }
+        }
+      }
+    }
+  }
+}
+...
+
+ATTACH_CONTAINER_INPUT HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+```
+
+### ATTACH_CONTAINER_OUTPUT
+
+This call attaches to the STDOUT and STDERR of the primary process of
+a container and streams its output back to the client. This call can
+only be made against containers that have been launched with an
+associated IOSwitchboard (i.e. nested containers launched via a
+LAUNCH_NESTED_CONTAINER_SESSION call or normal containers launched
+with a TTYInfo in their ContainerInfo field).  Multiple
+ATTACH_CONTAINER_OUTPUT calls can be active for a given container at
+once.
+
+```
+ATTACH_CONTAINER_OUTPUT HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/recordio
+Message-Accept: application/json
+
+{
+  "type": "ATTACH_CONTAINER_OUTPUT",
+  "attach_container_output": {
+    "container_id": {
+      "value": "e193a755-8528-4673-a05b-2cc2a01a8b94"
+    }
+  }
+}
+
+ATTACH_CONTAINER_OUTPUT HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+
+Content-Type: application/recordio
+Message-Content-Type: application/json
+
+90
+{
+  "type":"DATA",
+  "data": {
+    "type":"STDOUT",
+    "data": "TW9uIEZlYiAyNyAwNzozOTozOCBVVEMgMjAxNwo="
+  }
+}90
+{
+  "type":"DATA",
+  "data": {
+    "type":"STDOUT",
+    "data": "TW9uIEZlYiAyNyAwNzozOTozOSBVVEMgMjAxNwo="
+  }
+}90
+{
+  "type":"DATA",
+  "data": {
+    "type":"STDERR",
+    "data": "TW9uIEZlYiAyNyAwNzozOTo0MCBVVEMgMjAxNwo="
+  }
+}
+...
+
+```
