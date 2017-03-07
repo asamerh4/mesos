@@ -112,7 +112,7 @@ using process::http::TemporaryRedirect;
 using process::http::UnsupportedMediaType;
 using process::http::URL;
 
-using process::metrics::internal::MetricsProcess;
+using process::http::authentication::Principal;
 
 using std::copy_if;
 using std::list;
@@ -125,6 +125,8 @@ using std::vector;
 
 
 namespace mesos {
+
+using mesos::authorization::createSubject;
 
 static void json(
     JSON::StringWriter* writer,
@@ -471,8 +473,17 @@ string Master::Http::API_HELP()
 
 Future<Response> Master::Http::api(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // TODO(vinod): Add metrics for rejected requests.
 
   // TODO(vinod): Add support for rate limiting.
@@ -654,7 +665,7 @@ Future<Response> Master::Http::api(
 
 Future<Response> Master::Http::subscribe(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::SUBSCRIBE, call.type());
@@ -664,10 +675,7 @@ Future<Response> Master::Http::subscribe(
   Future<Owned<ObjectApprover>> tasksApprover;
   Future<Owned<ObjectApprover>> executorsApprover;
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -742,8 +750,17 @@ string Master::Http::SCHEDULER_HELP()
 
 Future<Response> Master::Http::scheduler(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // TODO(vinod): Add metrics for rejected requests.
 
   // TODO(vinod): Add support for rate limiting.
@@ -834,20 +851,24 @@ Future<Response> Master::Http::scheduler(
 
     const FrameworkInfo& frameworkInfo = call.subscribe().framework_info();
 
+    // We allow an authenticated framework to not specify a principal in
+    // `FrameworkInfo`, but in that case we log a WARNING here. We also set
+    // `FrameworkInfo.principal` to the value of the authenticated principal
+    // and use it for authorization later.
+    //
+    // NOTE: Common validation code, called previously, verifies that the
+    // authenticated principal is the same as `FrameworkInfo.principal`,
+    // if present.
     if (principal.isSome() && !frameworkInfo.has_principal()) {
-      // We allow an authenticated framework to not specify a principal
-      // in `FrameworkInfo` but we'd prefer to log a WARNING here. We also
-      // set `FrameworkInfo.principal` to the value of authenticated principal
-      // and use it for authorization later when it happens.
-      if (!frameworkInfo.has_principal()) {
-        LOG(WARNING)
-          << "Setting 'principal' in FrameworkInfo to '" << principal.get()
-          << "' because the framework authenticated with that principal but "
-          << "did not set it in FrameworkInfo";
+      CHECK_SOME(principal->value);
 
-        call.mutable_subscribe()->mutable_framework_info()->set_principal(
-            principal.get());
-      }
+      LOG(WARNING)
+        << "Setting 'principal' in FrameworkInfo to '" << principal->value.get()
+        << "' because the framework authenticated with that principal but "
+        << "did not set it in FrameworkInfo";
+
+      call.mutable_subscribe()->mutable_framework_info()->set_principal(
+          principal->value.get());
     }
 
     Pipe pipe;
@@ -877,7 +898,7 @@ Future<Response> Master::Http::scheduler(
 
   if (principal.isSome() && principal != framework->info.principal()) {
     return BadRequest(
-        "Authenticated principal '" + principal.get() + "' does not "
+        "Authenticated principal '" + stringify(principal.get()) + "' does not "
         "match principal '" + framework->info.principal() + "' set in "
         "`FrameworkInfo`");
   }
@@ -1013,8 +1034,17 @@ string Master::Http::CREATE_VOLUMES_HELP()
 
 Future<Response> Master::Http::createVolumes(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -1084,7 +1114,7 @@ Future<Response> Master::Http::createVolumes(
 Future<Response> Master::Http::_createVolumes(
     const SlaveID& slaveId,
     const RepeatedPtrField<Resource>& volumes,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
   Slave* slave = master->slaves.registered.get(slaveId);
   if (slave == nullptr) {
@@ -1119,9 +1149,18 @@ Future<Response> Master::Http::_createVolumes(
 
 Future<Response> Master::Http::createVolumes(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType /*contentType*/) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   CHECK_EQ(mesos::master::Call::CREATE_VOLUMES, call.type());
   CHECK(call.has_create_volumes());
 
@@ -1162,8 +1201,17 @@ string Master::Http::DESTROY_VOLUMES_HELP()
 
 Future<Response> Master::Http::destroyVolumes(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -1233,7 +1281,7 @@ Future<Response> Master::Http::destroyVolumes(
 Future<Response> Master::Http::_destroyVolumes(
     const SlaveID& slaveId,
     const RepeatedPtrField<Resource>& volumes,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
   Slave* slave = master->slaves.registered.get(slaveId);
   if (slave == nullptr) {
@@ -1268,9 +1316,18 @@ Future<Response> Master::Http::_destroyVolumes(
 
 Future<Response> Master::Http::destroyVolumes(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType /*contentType*/) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   CHECK_EQ(mesos::master::Call::DESTROY_VOLUMES, call.type());
   CHECK(call.has_destroy_volumes());
 
@@ -1300,8 +1357,17 @@ string Master::Http::FRAMEWORKS_HELP()
 
 Future<Response> Master::Http::frameworks(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -1314,10 +1380,7 @@ Future<Response> Master::Http::frameworks(
   Future<Owned<ObjectApprover>> executorsApprover;
 
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -1469,7 +1532,7 @@ mesos::master::Response::GetFrameworks::Framework model(
 
 Future<Response> Master::Http::getFrameworks(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_FRAMEWORKS, call.type());
@@ -1478,14 +1541,10 @@ Future<Response> Master::Http::getFrameworks(
   Future<Owned<ObjectApprover>> frameworksApprover;
 
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
-
   } else {
     frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
   }
@@ -1535,7 +1594,7 @@ mesos::master::Response::GetFrameworks Master::Http::_getFrameworks(
 
 Future<Response> Master::Http::getExecutors(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_EXECUTORS, call.type());
@@ -1544,10 +1603,7 @@ Future<Response> Master::Http::getExecutors(
   Future<Owned<ObjectApprover>> frameworksApprover;
   Future<Owned<ObjectApprover>> executorsApprover;
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -1665,7 +1721,7 @@ mesos::master::Response::GetExecutors Master::Http::_getExecutors(
 
 Future<Response> Master::Http::getState(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_STATE, call.type());
@@ -1675,10 +1731,7 @@ Future<Response> Master::Http::getState(
   Future<Owned<ObjectApprover>> tasksApprover;
   Future<Owned<ObjectApprover>> executorsApprover;
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -1781,8 +1834,17 @@ string Master::Http::FLAGS_HELP()
 
 Future<Response> Master::Http::flags(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // TODO(nfnt): Remove check for enabled
   // authorization as part of MESOS-5346.
   if (request.method != "GET" && master->authorizer.isSome()) {
@@ -1809,7 +1871,7 @@ Future<Response> Master::Http::flags(
 
 
 Future<Try<JSON::Object, Master::Http::FlagsError>> Master::Http::_flags(
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
   if (master->authorizer.isNone()) {
     return __flags();
@@ -1818,8 +1880,9 @@ Future<Try<JSON::Object, Master::Http::FlagsError>> Master::Http::_flags(
   authorization::Request authRequest;
   authRequest.set_action(authorization::VIEW_FLAGS);
 
-  if (principal.isSome()) {
-    authRequest.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    authRequest.mutable_subject()->CopyFrom(subject.get());
   }
 
   return master->authorizer.get()->authorized(authRequest)
@@ -1856,7 +1919,7 @@ JSON::Object Master::Http::__flags() const
 
 Future<Response> Master::Http::getFlags(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_FLAGS, call.type());
@@ -1901,7 +1964,7 @@ Future<Response> Master::Http::health(const Request& request) const
 
 Future<Response> Master::Http::getHealth(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_HEALTH, call.type());
@@ -1917,7 +1980,7 @@ Future<Response> Master::Http::getHealth(
 
 Future<Response> Master::Http::getVersion(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_VERSION, call.type());
@@ -1930,7 +1993,7 @@ Future<Response> Master::Http::getVersion(
 
 Future<Response> Master::Http::getMetrics(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_METRICS, call.type());
@@ -1962,7 +2025,7 @@ Future<Response> Master::Http::getMetrics(
 
 Future<Response> Master::Http::getLoggingLevel(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_LOGGING_LEVEL, call.type());
@@ -1978,7 +2041,7 @@ Future<Response> Master::Http::getLoggingLevel(
 
 Future<Response> Master::Http::setLoggingLevel(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType /*contentType*/) const
 {
   CHECK_EQ(mesos::master::Call::SET_LOGGING_LEVEL, call.type());
@@ -1997,7 +2060,7 @@ Future<Response> Master::Http::setLoggingLevel(
 
 Future<Response> Master::Http::getMaster(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_MASTER, call.type());
@@ -2122,8 +2185,17 @@ string Master::Http::RESERVE_HELP()
 
 Future<Response> Master::Http::reserve(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -2194,7 +2266,7 @@ Future<Response> Master::Http::reserve(
 Future<Response> Master::Http::_reserve(
     const SlaveID& slaveId,
     const Resources& resources,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
   Slave* slave = master->slaves.registered.get(slaveId);
   if (slave == nullptr) {
@@ -2207,7 +2279,7 @@ Future<Response> Master::Http::_reserve(
   operation.mutable_reserve()->mutable_resources()->CopyFrom(resources);
 
   Option<Error> error = validation::operation::validate(
-      operation.reserve(), principal, None());
+      operation.reserve(), principal);
 
   if (error.isSome()) {
     return BadRequest("Invalid RESERVE operation: " + error.get().message);
@@ -2230,7 +2302,7 @@ Future<Response> Master::Http::_reserve(
 
 Future<Response> Master::Http::reserveResources(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::RESERVE_RESOURCES, call.type());
@@ -2262,7 +2334,7 @@ string Master::Http::SLAVES_HELP()
 
 Future<Response> Master::Http::slaves(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<Principal>&) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -2338,7 +2410,7 @@ Future<Response> Master::Http::slaves(
 
 Future<process::http::Response> Master::Http::getAgents(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_AGENTS, call.type());
@@ -2401,8 +2473,17 @@ string Master::Http::QUOTA_HELP()
 
 Future<Response> Master::Http::quota(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -2452,8 +2533,17 @@ string Master::Http::WEIGHTS_HELP()
 
 Future<Response> Master::Http::weights(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -2568,8 +2658,17 @@ string Master::Http::STATE_HELP()
 
 Future<Response> Master::Http::state(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -2582,10 +2681,7 @@ Future<Response> Master::Http::state(
   Future<Owned<ObjectApprover>> flagsApprover;
 
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -2811,7 +2907,7 @@ Future<Response> Master::Http::state(
 
 Future<Response> Master::Http::readFile(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::READ_FILE, call.type());
@@ -3061,8 +3157,17 @@ string Master::Http::STATESUMMARY_HELP()
 
 Future<Response> Master::Http::stateSummary(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -3071,10 +3176,7 @@ Future<Response> Master::Http::stateSummary(
   Future<Owned<ObjectApprover>> frameworksApprover;
 
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -3274,20 +3376,16 @@ string Master::Http::ROLES_HELP()
 
 
 Future<vector<string>> Master::Http::_roles(
-        const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
   // Retrieve `ObjectApprover`s for authorizing roles.
   Future<Owned<ObjectApprover>> rolesApprover;
 
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     rolesApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_ROLE);
-
   } else {
     rolesApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
   }
@@ -3313,15 +3411,14 @@ Future<vector<string>> Master::Http::_roles(
         const hashset<string>& whitelist = master->roleWhitelist.get();
         roleList.insert(whitelist.begin(), whitelist.end());
       } else {
-        roleList.insert(
-            master->activeRoles.keys().begin(),
-            master->activeRoles.keys().end());
-        roleList.insert(
-            master->weights.keys().begin(),
-            master->weights.keys().end());
-        roleList.insert(
-            master->quotas.keys().begin(),
-            master->quotas.keys().end());
+        hashset<string> roles = master->roles.keys();
+        roleList.insert(roles.begin(), roles.end());
+
+        hashset<string> weights = master->weights.keys();
+        roleList.insert(weights.begin(), weights.end());
+
+        hashset<string> quotas = master->quotas.keys();
+        roleList.insert(quotas.begin(), quotas.end());
       }
 
       vector<string> filteredRoleList;
@@ -3340,8 +3437,17 @@ Future<vector<string>> Master::Http::_roles(
 
 Future<Response> Master::Http::roles(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -3363,8 +3469,8 @@ Future<Response> Master::Http::roles(
           }
 
           Option<Role*> role = None();
-          if (master->activeRoles.contains(name)) {
-            role = master->activeRoles[name];
+          if (master->roles.contains(name)) {
+            role = master->roles.at(name);
           }
 
           array.values.push_back(model(name, weight, role));
@@ -3380,7 +3486,7 @@ Future<Response> Master::Http::roles(
 
 Future<Response> Master::Http::listFiles(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::LIST_FILES, call.type());
@@ -3432,7 +3538,7 @@ Future<Response> Master::Http::listFiles(
 // convert back into a `Resource` object.
 Future<Response> Master::Http::getRoles(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_ROLES, call.type());
@@ -3456,8 +3562,8 @@ Future<Response> Master::Http::getRoles(
           role.set_weight(1.0);
         }
 
-        if (master->activeRoles.contains(name)) {
-          Role* role_ = master->activeRoles[name];
+        if (master->roles.contains(name)) {
+          Role* role_ = master->roles.at(name);
 
           role.mutable_resources()->CopyFrom(role_->resources());
 
@@ -3502,8 +3608,17 @@ string Master::Http::TEARDOWN_HELP()
 
 Future<Response> Master::Http::teardown(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -3547,8 +3662,9 @@ Future<Response> Master::Http::teardown(
   authorization::Request teardown;
   teardown.set_action(authorization::TEARDOWN_FRAMEWORK);
 
-  if (principal.isSome()) {
-    teardown.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    teardown.mutable_subject()->CopyFrom(subject.get());
   }
 
   if (framework->info.has_principal()) {
@@ -3660,8 +3776,17 @@ string Master::Http::TASKS_HELP()
 
 Future<Response> Master::Http::tasks(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -3681,10 +3806,7 @@ Future<Response> Master::Http::tasks(
   Future<Owned<ObjectApprover>> frameworksApprover;
   Future<Owned<ObjectApprover>> tasksApprover;
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -3786,7 +3908,7 @@ Future<Response> Master::Http::tasks(
 
 Future<Response> Master::Http::getTasks(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_TASKS, call.type());
@@ -3795,10 +3917,7 @@ Future<Response> Master::Http::getTasks(
   Future<Owned<ObjectApprover>> frameworksApprover;
   Future<Owned<ObjectApprover>> tasksApprover;
   if (master->authorizer.isSome()) {
-    authorization::Subject subject;
-    if (principal.isSome()) {
-      subject.set_value(principal.get());
-    }
+    Option<authorization::Subject> subject = createSubject(principal);
 
     frameworksApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_FRAMEWORK);
@@ -3961,7 +4080,7 @@ string Master::Http::MAINTENANCE_SCHEDULE_HELP()
 // /master/maintenance/schedule endpoint handler.
 Future<Response> Master::Http::maintenanceSchedule(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<Principal>&) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4100,7 +4219,7 @@ Future<Response> Master::Http::_updateMaintenanceSchedule(
 
 Future<Response> Master::Http::getMaintenanceSchedule(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_MAINTENANCE_SCHEDULE, call.type());
@@ -4117,7 +4236,7 @@ Future<Response> Master::Http::getMaintenanceSchedule(
 
 Future<Response> Master::Http::updateMaintenanceSchedule(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType /*contentType*/) const
 {
   CHECK_EQ(mesos::master::Call::UPDATE_MAINTENANCE_SCHEDULE, call.type());
@@ -4152,7 +4271,7 @@ string Master::Http::MACHINE_DOWN_HELP()
 // /master/machine/down endpoint handler.
 Future<Response> Master::Http::machineDown(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<Principal>&) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4254,7 +4373,7 @@ Future<Response> Master::Http::_startMaintenance(
 
 Future<Response> Master::Http::startMaintenance(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType /*contentType*/) const
 {
   CHECK_EQ(mesos::master::Call::START_MAINTENANCE, call.type());
@@ -4288,7 +4407,7 @@ string Master::Http::MACHINE_UP_HELP()
 // /master/machine/up endpoint handler.
 Future<Response> Master::Http::machineUp(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<Principal>&) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4389,7 +4508,7 @@ Future<Response> Master::Http::_stopMaintenance(
 
 Future<Response> Master::Http::stopMaintenance(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType /*contentType*/) const
 {
   CHECK_EQ(mesos::master::Call::STOP_MAINTENANCE, call.type());
@@ -4426,7 +4545,7 @@ string Master::Http::MAINTENANCE_STATUS_HELP()
 // /master/maintenance/status endpoint handler.
 Future<Response> Master::Http::maintenanceStatus(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<Principal>&) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4503,7 +4622,7 @@ Future<mesos::maintenance::ClusterStatus>
 
 Future<Response> Master::Http::getMaintenanceStatus(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::GET_MAINTENANCE_STATUS, call.type());
@@ -4552,8 +4671,17 @@ string Master::Http::UNRESERVE_HELP()
 
 Future<Response> Master::Http::unreserve(
     const Request& request,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
+  // TODO(greggomann): Remove this check once the `Principal` type is used in
+  // `ReservationInfo`, `DiskInfo`, and within the master's `principals` map.
+  // See MESOS-7202.
+  if (principal.isSome() && principal->value.isNone()) {
+    return Forbidden(
+        "The request's authenticated principal contains claims, but no value "
+        "string. The master currently requires that principals have a value");
+  }
+
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
@@ -4624,7 +4752,7 @@ Future<Response> Master::Http::unreserve(
 Future<Response> Master::Http::_unreserve(
     const SlaveID& slaveId,
     const Resources& resources,
-    const Option<string>& principal) const
+    const Option<Principal>& principal) const
 {
   Slave* slave = master->slaves.registered.get(slaveId);
   if (slave == nullptr) {
@@ -4716,7 +4844,7 @@ Future<Response> Master::Http::_operation(
 
 Future<Response> Master::Http::unreserveResources(
     const mesos::master::Call& call,
-    const Option<string>& principal,
+    const Option<Principal>& principal,
     ContentType contentType) const
 {
   CHECK_EQ(mesos::master::Call::UNRESERVE_RESOURCES, call.type());

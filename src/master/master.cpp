@@ -118,6 +118,8 @@ using process::UPID;
 
 using process::http::Pipe;
 
+using process::http::authentication::Principal;
+
 using process::metrics::Counter;
 
 namespace mesos {
@@ -125,6 +127,8 @@ namespace internal {
 namespace master {
 
 using mesos::allocator::Allocator;
+
+using mesos::authorization::createSubject;
 
 using mesos::master::contender::MasterContender;
 
@@ -376,6 +380,56 @@ struct BoundedRateLimiter
   // the capacity here.
   uint64_t messages;
 };
+
+
+bool Framework::isTrackedUnderRole(const std::string& role) const
+{
+  CHECK(master->isWhitelistedRole(role))
+    << "Unknown role '" << role << "'" << " of framework " << *this;
+
+  return master->roles.contains(role) &&
+         master->roles.at(role)->frameworks.contains(id());
+}
+
+void Framework::trackUnderRole(const std::string& role)
+{
+  CHECK(master->isWhitelistedRole(role))
+    << "Unknown role '" << role << "'" << " of framework " << *this;
+
+  CHECK(!isTrackedUnderRole(role));
+
+  CHECK(roles.count(role) > 0);
+
+  if (!master->roles.contains(role)) {
+    master->roles[role] = new Role(role);
+  }
+  master->roles.at(role)->addFramework(this);
+}
+
+void Framework::untrackUnderRole(const std::string& role)
+{
+  CHECK(master->isWhitelistedRole(role))
+    << "Unknown role '" << role << "'" << " of framework " << *this;
+
+  CHECK(isTrackedUnderRole(role));
+
+  // NOTE: Ideally we would also `CHECK` that we're not currently subscribed
+  // to the role. We don't do this currently because this function is used in
+  // `Master::removeFramework` where we're still subscribed to `roles`.
+
+  auto allocatedToRole = [&role](const Resource& resource) {
+    return resource.allocation_info().role() == role;
+  };
+
+  CHECK(totalUsedResources.filter(allocatedToRole).empty());
+  CHECK(totalOfferedResources.filter(allocatedToRole).empty());
+
+  master->roles.at(role)->removeFramework(this);
+  if (master->roles.at(role)->frameworks.empty()) {
+    delete master->roles.at(role);
+    master->roles.erase(role);
+  }
+}
 
 
 void Master::initialize()
@@ -856,7 +910,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::API_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.api(request, principal);
         });
@@ -864,7 +918,7 @@ void Master::initialize()
         DEFAULT_HTTP_FRAMEWORK_AUTHENTICATION_REALM,
         Http::SCHEDULER_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.scheduler(request, principal);
         });
@@ -872,7 +926,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::CREATE_VOLUMES_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.createVolumes(request, principal);
         });
@@ -880,7 +934,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::DESTROY_VOLUMES_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.destroyVolumes(request, principal);
         });
@@ -888,7 +942,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::FRAMEWORKS_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.frameworks(request, principal);
         });
@@ -896,7 +950,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::FLAGS_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.flags(request, principal);
         });
@@ -914,7 +968,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::RESERVE_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.reserve(request, principal);
         });
@@ -924,7 +978,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.roles(request, principal);
         });
@@ -932,7 +986,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.roles(request, principal);
         });
@@ -940,7 +994,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::TEARDOWN_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.teardown(request, principal);
         });
@@ -948,7 +1002,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::SLAVES_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.slaves(request, principal);
         });
@@ -958,7 +1012,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.state(request, principal);
         });
@@ -966,7 +1020,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.state(request, principal);
         });
@@ -974,7 +1028,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATESUMMARY_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.stateSummary(request, principal);
         });
@@ -984,7 +1038,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::TASKS_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.tasks(request, principal);
         });
@@ -992,7 +1046,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::TASKS_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.tasks(request, principal);
         });
@@ -1000,7 +1054,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::MAINTENANCE_SCHEDULE_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.maintenanceSchedule(request, principal);
         });
@@ -1008,7 +1062,7 @@ void Master::initialize()
         READONLY_HTTP_AUTHENTICATION_REALM,
         Http::MAINTENANCE_STATUS_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.maintenanceStatus(request, principal);
         });
@@ -1016,7 +1070,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::MACHINE_DOWN_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.machineDown(request, principal);
         });
@@ -1024,7 +1078,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::MACHINE_UP_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.machineUp(request, principal);
         });
@@ -1032,7 +1086,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::UNRESERVE_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.unreserve(request, principal);
         });
@@ -1040,7 +1094,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::QUOTA_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.quota(request, principal);
         });
@@ -1048,7 +1102,7 @@ void Master::initialize()
         READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::WEIGHTS_HELP(),
         [this](const process::http::Request& request,
-               const Option<string>& principal) {
+               const Option<Principal>& principal) {
           Http::log(request);
           return http.weights(request, principal);
         });
@@ -1063,7 +1117,7 @@ void Master::initialize()
 
   const PID<Master> masterPid = self();
 
-  auto authorize = [masterPid](const Option<string>& principal) {
+  auto authorize = [masterPid](const Option<Principal>& principal) {
     return dispatch(masterPid, &Master::authorizeLogAccess, principal);
   };
 
@@ -1192,10 +1246,10 @@ void Master::finalize()
     future.discard();
   }
 
-  foreachvalue (Role* role, activeRoles) {
+  foreachvalue (Role* role, roles) {
     delete role;
   }
-  activeRoles.clear();
+  roles.clear();
 
   // NOTE: This is necessary during tests because we don't want the
   // timer to fire in a different test and invoke the callback.
@@ -1405,7 +1459,7 @@ void Master::_exited(Framework* framework)
 }
 
 
-Future<bool> Master::authorizeLogAccess(const Option<string>& principal)
+Future<bool> Master::authorizeLogAccess(const Option<Principal>& principal)
 {
   if (authorizer.isNone()) {
     return true;
@@ -1414,8 +1468,9 @@ Future<bool> Master::authorizeLogAccess(const Option<string>& principal)
   authorization::Request request;
   request.set_action(authorization::ACCESS_MESOS_LOG);
 
-  if (principal.isSome()) {
-    request.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
   }
 
   return authorizer.get()->authorized(request);
@@ -1558,6 +1613,8 @@ void Master::visit(const ExitedEvent& event)
 }
 
 
+// TODO(greggomann): Change this to accept an `Option<Principal>`
+// when MESOS-7202 is resolved.
 void Master::throttled(
     const MessageEvent& event,
     const Option<string>& principal)
@@ -1600,6 +1657,8 @@ void Master::_visit(const MessageEvent& event)
 }
 
 
+// TODO(greggomann): Change this to accept an `Option<Principal>`
+// when MESOS-7202 is resolved.
 void Master::exceededCapacity(
     const MessageEvent& event,
     const Option<string>& principal,
@@ -2632,24 +2691,8 @@ void Master::_subscribe(
   if (!framework->recovered()) {
     // The framework has previously been registered with this master;
     // it may or may not currently be connected.
-    LOG(INFO) << "Updating info for framework " << framework->id();
 
-    Try<Nothing> updateFrameworkInfo =
-      framework->updateFrameworkInfo(frameworkInfo);
-
-    if (updateFrameworkInfo.isError()) {
-      LOG(INFO) << "Could not update FrameworkInfo of framework '"
-                << frameworkInfo.name() << "': " << updateFrameworkInfo.error();
-
-      FrameworkErrorMessage message;
-      message.set_message(updateFrameworkInfo.error());
-      http.send(message);
-      http.close();
-      return;
-    }
-
-    allocator->updateFramework(framework->id(), framework->info);
-
+    updateFramework(framework, frameworkInfo);
     framework->reregisteredTime = Clock::now();
 
     // Always failover the old framework connection. See MESOS-4712 for details.
@@ -2942,22 +2985,7 @@ void Master::_subscribe(
     // It is now safe to update the framework fields since the request is now
     // guaranteed to be successful. We use the fields passed in during
     // re-registration.
-    LOG(INFO) << "Updating info for framework " << framework->id();
-
-    Try<Nothing> updateFrameworkInfo =
-      framework->updateFrameworkInfo(frameworkInfo);
-
-    if (updateFrameworkInfo.isError()) {
-      LOG(INFO) << "Could not update frameworkInfo of framework '" << *framework
-                << "': " << updateFrameworkInfo.error();
-
-      FrameworkErrorMessage message;
-      message.set_message(updateFrameworkInfo.error());
-      send(from, message);
-      return;
-    }
-
-    allocator->updateFramework(framework->id(), framework->info);
+    updateFramework(framework, frameworkInfo);
 
     framework->reregisteredTime = Clock::now();
 
@@ -3411,7 +3439,7 @@ Future<bool> Master::authorizeTask(
 
 Future<bool> Master::authorizeReserveResources(
     const Offer::Operation::Reserve& reserve,
-    const Option<string>& principal)
+    const Option<Principal>& principal)
 {
   if (authorizer.isNone()) {
     return true; // Authorization is disabled.
@@ -3420,11 +3448,12 @@ Future<bool> Master::authorizeReserveResources(
   authorization::Request request;
   request.set_action(authorization::RESERVE_RESOURCES);
 
-  if (principal.isSome()) {
-    request.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
   }
 
-  // The operation will be authorized if the principal is allowed to make
+  // The operation will be authorized if the entity is allowed to make
   // reservations for all roles included in `reserve.resources`.
   // Add an element to `request.roles` for each unique role in the resources.
   hashset<string> roles;
@@ -3440,7 +3469,7 @@ Future<bool> Master::authorizeReserveResources(
   }
 
   LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? principal.get() : "ANY")
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
             << "' to reserve resources '" << reserve.resources() << "'";
 
   // NOTE: Empty authorizations are not valid and are checked by a validator.
@@ -3468,7 +3497,7 @@ Future<bool> Master::authorizeReserveResources(
 
 Future<bool> Master::authorizeUnreserveResources(
     const Offer::Operation::Unreserve& unreserve,
-    const Option<string>& principal)
+    const Option<Principal>& principal)
 {
   if (authorizer.isNone()) {
     return true; // Authorization is disabled.
@@ -3477,8 +3506,9 @@ Future<bool> Master::authorizeUnreserveResources(
   authorization::Request request;
   request.set_action(authorization::UNRESERVE_RESOURCES);
 
-  if (principal.isSome()) {
-    request.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
   }
 
   list<Future<bool>> authorizations;
@@ -3498,10 +3528,9 @@ Future<bool> Master::authorizeUnreserveResources(
     }
   }
 
-  LOG(INFO)
-    << "Authorizing principal '"
-    << (principal.isSome() ? principal.get() : "ANY")
-    << "' to unreserve resources '" << unreserve.resources() << "'";
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
+            << "' to unreserve resources '" << unreserve.resources() << "'";
 
   if (authorizations.empty()) {
     return authorizer.get()->authorized(request);
@@ -3523,7 +3552,7 @@ Future<bool> Master::authorizeUnreserveResources(
 
 Future<bool> Master::authorizeCreateVolume(
     const Offer::Operation::Create& create,
-    const Option<string>& principal)
+    const Option<Principal>& principal)
 {
   if (authorizer.isNone()) {
     return true; // Authorization is disabled.
@@ -3532,11 +3561,12 @@ Future<bool> Master::authorizeCreateVolume(
   authorization::Request request;
   request.set_action(authorization::CREATE_VOLUME);
 
-  if (principal.isSome()) {
-    request.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
   }
 
-  // The operation will be authorized if the principal is allowed to create
+  // The operation will be authorized if the entity is allowed to create
   // volumes for all roles included in `create.volumes`.
   // Add an element to `request.roles` for each unique role in the volumes.
   hashset<string> roles;
@@ -3551,10 +3581,9 @@ Future<bool> Master::authorizeCreateVolume(
     }
   }
 
-  LOG(INFO)
-    << "Authorizing principal '"
-    << (principal.isSome() ? principal.get() : "ANY")
-    << "' to create volumes";
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
+            << "' to create volumes '" << create.volumes() << "'";
 
   if (authorizations.empty()) {
     return authorizer.get()->authorized(request);
@@ -3576,7 +3605,7 @@ Future<bool> Master::authorizeCreateVolume(
 
 Future<bool> Master::authorizeDestroyVolume(
     const Offer::Operation::Destroy& destroy,
-    const Option<string>& principal)
+    const Option<Principal>& principal)
 {
   if (authorizer.isNone()) {
     return true; // Authorization is disabled.
@@ -3585,8 +3614,9 @@ Future<bool> Master::authorizeDestroyVolume(
   authorization::Request request;
   request.set_action(authorization::DESTROY_VOLUME);
 
-  if (principal.isSome()) {
-    request.mutable_subject()->set_value(principal.get());
+  Option<authorization::Subject> subject = createSubject(principal);
+  if (subject.isSome()) {
+    request.mutable_subject()->CopyFrom(subject.get());
   }
 
   list<Future<bool>> authorizations;
@@ -3603,11 +3633,9 @@ Future<bool> Master::authorizeDestroyVolume(
     }
   }
 
-  LOG(INFO)
-    << "Authorizing principal '"
-    << (principal.isSome() ? principal.get() : "ANY")
-    << "' to destroy volumes '"
-    << stringify(destroy.volumes()) << "'";
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? stringify(principal.get()) : "ANY")
+            << "' to destroy volumes '" << destroy.volumes() << "'";
 
   if (authorizations.empty()) {
     return authorizer.get()->authorized(request);
@@ -3876,9 +3904,9 @@ void Master::accept(
 
       // The RESERVE operation allows a principal to reserve resources.
       case Offer::Operation::RESERVE: {
-        Option<string> principal = framework->info.has_principal()
-          ? framework->info.principal()
-          : Option<string>::none();
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
 
         futures.push_back(
             authorizeReserveResources(
@@ -3889,9 +3917,9 @@ void Master::accept(
 
       // The UNRESERVE operation allows a principal to unreserve resources.
       case Offer::Operation::UNRESERVE: {
-        Option<string> principal = framework->info.has_principal()
-          ? framework->info.principal()
-          : Option<string>::none();
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
 
         futures.push_back(
             authorizeUnreserveResources(
@@ -3902,9 +3930,9 @@ void Master::accept(
 
       // The CREATE operation allows the creation of a persistent volume.
       case Offer::Operation::CREATE: {
-        Option<string> principal = framework->info.has_principal()
-          ? framework->info.principal()
-          : Option<string>::none();
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
 
         futures.push_back(
             authorizeCreateVolume(
@@ -3915,9 +3943,9 @@ void Master::accept(
 
       // The DESTROY operation allows the destruction of a persistent volume.
       case Offer::Operation::DESTROY: {
-        Option<string> principal = framework->info.has_principal()
-          ? framework->info.principal()
-          : Option<string>::none();
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
 
         futures.push_back(
             authorizeDestroyVolume(
@@ -4100,9 +4128,9 @@ void Master::_accept(
           continue;
         }
 
-        Option<string> principal = framework->info.has_principal()
-          ? framework->info.principal()
-          : Option<string>::none();
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
 
         // Make sure this reserve operation is valid.
         Option<Error> error = validation::operation::validate(
@@ -4213,9 +4241,9 @@ void Master::_accept(
           continue;
         }
 
-        Option<string> principal = framework->info.has_principal() ?
-          framework->info.principal() :
-          Option<string>::none();
+        Option<Principal> principal = framework->info.has_principal()
+          ? Principal(framework->info.principal())
+          : Option<Principal>::none();
 
         // Make sure this create operation is valid.
         Option<Error> error = validation::operation::validate(
@@ -6027,6 +6055,36 @@ void Master::unregisterSlave(const UPID& from, const SlaveID& slaveId)
 }
 
 
+void Master::updateFramework(
+    Framework* framework,
+    const FrameworkInfo& frameworkInfo)
+{
+  LOG(INFO) << "Updating info for framework " << framework->id();
+
+  // NOTE: The allocator takes care of activating/deactivating
+  // the frameworks from the added/removed roles, respectively.
+  allocator->updateFramework(framework->id(), frameworkInfo);
+
+  // First, remove the offers allocated to roles being removed.
+  foreach (Offer* offer, utils::copy(framework->offers)) {
+    set<string> newRoles = protobuf::framework::getRoles(frameworkInfo);
+    if (newRoles.count(offer->allocation_info().role()) > 0) {
+      continue;
+    }
+
+    allocator->recoverResources(
+        offer->framework_id(),
+        offer->slave_id(),
+        offer->resources(),
+        None());
+
+    removeOffer(offer, true); // Rescind!
+  }
+
+  framework->update(frameworkInfo);
+}
+
+
 void Master::updateSlave(
     const SlaveID& slaveId,
     const Resources& oversubscribedResources)
@@ -7449,25 +7507,6 @@ void Master::addFramework(Framework* framework)
     }
   }
 
-  auto addFrameworkRole = [this](Framework* framework, const string& role) {
-    CHECK(isWhitelistedRole(role))
-      << "Unknown role '" << role << "'"
-      << " of framework " << *framework;
-
-    if (!activeRoles.contains(role)) {
-      activeRoles[role] = new Role(role);
-    }
-    activeRoles.at(role)->addFramework(framework);
-  };
-
-  if (framework->capabilities.multiRole) {
-    foreach (const string& role, framework->info.roles()) {
-      addFrameworkRole(framework, role);
-    }
-  } else {
-    addFrameworkRole(framework, framework->info.role());
-  }
-
   // There should be no offered resources yet!
   CHECK_EQ(Resources(), framework->totalOfferedResources);
 
@@ -7543,17 +7582,7 @@ Try<Nothing> Master::activateRecoveredFramework(
   CHECK(framework->pid.isNone());
   CHECK(framework->http.isNone());
 
-  // The `FrameworkInfo` might have changed.
-  LOG(INFO) << "Updating info for framework " << framework->id();
-
-  Try<Nothing> updateFrameworkInfo =
-    framework->updateFrameworkInfo(frameworkInfo);
-
-  if (updateFrameworkInfo.isError()) {
-    return updateFrameworkInfo;
-  }
-
-  allocator->updateFramework(framework->id(), framework->info);
+  updateFramework(framework, frameworkInfo);
 
   // Updating `registeredTime` here is debatable: ideally,
   // `registeredTime` would be the time at which the framework first
@@ -7888,26 +7917,8 @@ void Master::removeFramework(Framework* framework)
 
   framework->unregisteredTime = Clock::now();
 
-  auto removeFrameworkRole = [this](Framework* framework, const string& role) {
-    CHECK(isWhitelistedRole(role))
-      << "Unknown role '" << role << "'"
-      << " of framework " << *framework;
-
-    CHECK(activeRoles.contains(role));
-
-    activeRoles[role]->removeFramework(framework);
-    if (activeRoles[role]->frameworks.empty()) {
-      delete activeRoles[role];
-      activeRoles.erase(role);
-    }
-  };
-
-  if (framework->capabilities.multiRole) {
-    foreach (const string& role, framework->info.roles()) {
-      removeFrameworkRole(framework, role);
-    }
-  } else {
-    removeFrameworkRole(framework, framework->info.role());
+  foreach (const string& role, framework->roles) {
+    framework->untrackUnderRole(role);
   }
 
   // TODO(anand): This only works for pid based frameworks. We would

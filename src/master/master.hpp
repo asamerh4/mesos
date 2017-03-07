@@ -602,6 +602,10 @@ protected:
   // executors and recover the resources.
   void removeFramework(Slave* slave, Framework* framework);
 
+  void updateFramework(
+      Framework* framework,
+      const FrameworkInfo& frameworkInfo);
+
   void disconnect(Framework* framework);
   void deactivate(Framework* framework, bool rescind);
 
@@ -680,7 +684,7 @@ protected:
    */
   process::Future<bool> authorizeReserveResources(
       const Offer::Operation::Reserve& reserve,
-      const Option<std::string>& principal);
+      const Option<process::http::authentication::Principal>& principal);
 
   /**
    * Authorizes an `UNRESERVE` offer operation.
@@ -701,7 +705,7 @@ protected:
    */
   process::Future<bool> authorizeUnreserveResources(
       const Offer::Operation::Unreserve& unreserve,
-      const Option<std::string>& principal);
+      const Option<process::http::authentication::Principal>& principal);
 
   /**
    * Authorizes a `CREATE` offer operation.
@@ -722,7 +726,7 @@ protected:
    */
   process::Future<bool> authorizeCreateVolume(
       const Offer::Operation::Create& create,
-      const Option<std::string>& principal);
+      const Option<process::http::authentication::Principal>& principal);
 
   /**
    * Authorizes a `DESTROY` offer operation.
@@ -743,7 +747,7 @@ protected:
    */
   process::Future<bool> authorizeDestroyVolume(
       const Offer::Operation::Destroy& destroy,
-      const Option<std::string>& principal);
+      const Option<process::http::authentication::Principal>& principal);
 
   // Add the task and its executor (if not already running) to the
   // framework and slave. Returns the resources consumed as a result,
@@ -931,7 +935,7 @@ private:
       const process::Future<bool>& registrarResult);
 
   process::Future<bool> authorizeLogAccess(
-      const Option<std::string>& principal);
+      const Option<process::http::authentication::Principal>& principal);
 
   /**
    * Returns whether the given role is on the whitelist.
@@ -976,28 +980,33 @@ private:
     // Returns a list of set quotas.
     process::Future<process::http::Response> status(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> status(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> set(
         const mesos::master::Call& call,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> set(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> remove(
         const mesos::master::Call& call,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> remove(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
   private:
     // Heuristically tries to determine whether a quota request could
@@ -1045,7 +1054,7 @@ private:
     void rescindOffers(const mesos::quota::QuotaInfo& request) const;
 
     process::Future<bool> authorizeGetQuota(
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         const mesos::quota::QuotaInfo& quotaInfo) const;
 
     // TODO(mpark): The following functions `authorizeSetQuota` and
@@ -1053,19 +1062,21 @@ private:
     // the end of deprecation cycle which started with 1.0.
 
     process::Future<bool> authorizeSetQuota(
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         const mesos::quota::QuotaInfo& quotaInfo) const;
 
     process::Future<bool> authorizeRemoveQuota(
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         const mesos::quota::QuotaInfo& quotaInfo) const;
 
     process::Future<mesos::quota::QuotaStatus> _status(
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> _set(
         const mesos::quota::QuotaRequest& quotaRequest,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> __set(
         const mesos::quota::QuotaInfo& quotaInfo,
@@ -1073,7 +1084,8 @@ private:
 
     process::Future<process::http::Response> _remove(
         const std::string& role,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> __remove(
         const std::string& role) const;
@@ -1101,29 +1113,31 @@ private:
 
     process::Future<process::http::Response> get(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> get(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> update(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> update(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
   private:
     process::Future<bool> authorizeGetWeight(
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         const WeightInfo& weight) const;
 
     process::Future<bool> authorizeUpdateWeights(
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         const std::vector<std::string>& roles) const;
 
     process::Future<std::vector<WeightInfo>> _filterWeights(
@@ -1131,10 +1145,11 @@ private:
         const std::list<bool>& roleAuthorizations) const;
 
     process::Future<std::vector<WeightInfo>> _getWeights(
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response>_updateWeights(
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         const google::protobuf::RepeatedPtrField<WeightInfo>& weightInfos)
             const;
 
@@ -1164,32 +1179,38 @@ private:
     // /api/v1
     process::Future<process::http::Response> api(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /api/v1/scheduler
     process::Future<process::http::Response> scheduler(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/create-volumes
     process::Future<process::http::Response> createVolumes(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/destroy-volumes
     process::Future<process::http::Response> destroyVolumes(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/flags
     process::Future<process::http::Response> flags(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/frameworks
     process::Future<process::http::Response> frameworks(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/health
     process::Future<process::http::Response> health(
@@ -1202,72 +1223,86 @@ private:
     // /master/reserve
     process::Future<process::http::Response> reserve(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/roles
     process::Future<process::http::Response> roles(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/teardown
     process::Future<process::http::Response> teardown(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/slaves
     process::Future<process::http::Response> slaves(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/state
     process::Future<process::http::Response> state(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/state-summary
     process::Future<process::http::Response> stateSummary(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/tasks
     process::Future<process::http::Response> tasks(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/maintenance/schedule
     process::Future<process::http::Response> maintenanceSchedule(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/maintenance/status
     process::Future<process::http::Response> maintenanceStatus(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/machine/down
     process::Future<process::http::Response> machineDown(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/machine/up
     process::Future<process::http::Response> machineUp(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/unreserve
     process::Future<process::http::Response> unreserve(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/quota
     process::Future<process::http::Response> quota(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // /master/weights
     process::Future<process::http::Response> weights(
         const process::http::Request& request,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     static std::string API_HELP();
     static std::string SCHEDULER_HELP();
@@ -1298,13 +1333,15 @@ private:
     class FlagsError; // Forward declaration.
 
     process::Future<Try<JSON::Object, FlagsError>> _flags(
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<std::vector<const Task*>> _tasks(
         const size_t limit,
         const size_t offset,
         const std::string& order,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> _teardown(
         const FrameworkID& id) const;
@@ -1326,22 +1363,26 @@ private:
     process::Future<process::http::Response> _reserve(
         const SlaveID& slaveId,
         const Resources& resources,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> _unreserve(
         const SlaveID& slaveId,
         const Resources& resources,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> _createVolumes(
         const SlaveID& slaveId,
         const google::protobuf::RepeatedPtrField<Resource>& volumes,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     process::Future<process::http::Response> _destroyVolumes(
         const SlaveID& slaveId,
         const google::protobuf::RepeatedPtrField<Resource>& volumes,
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     /**
      * Continuation for operations: /reserve, /unreserve,
@@ -1368,90 +1409,91 @@ private:
         const Offer::Operation& operation) const;
 
     process::Future<std::vector<std::string>> _roles(
-        const Option<std::string>& principal) const;
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
     // Master API handlers.
 
     process::Future<process::http::Response> getAgents(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     mesos::master::Response::GetAgents _getAgents() const;
 
     process::Future<process::http::Response> getFlags(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getHealth(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getVersion(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getRoles(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getMetrics(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getLoggingLevel(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> setLoggingLevel(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> listFiles(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getMaster(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> updateMaintenanceSchedule(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getMaintenanceSchedule(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getMaintenanceStatus(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> startMaintenance(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> stopMaintenance(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getTasks(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     mesos::master::Response::GetTasks _getTasks(
@@ -1460,27 +1502,27 @@ private:
 
     process::Future<process::http::Response> createVolumes(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> destroyVolumes(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> reserveResources(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> unreserveResources(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> getFrameworks(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     mesos::master::Response::GetFrameworks _getFrameworks(
@@ -1488,7 +1530,7 @@ private:
 
     process::Future<process::http::Response> getExecutors(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     mesos::master::Response::GetExecutors _getExecutors(
@@ -1497,7 +1539,7 @@ private:
 
     process::Future<process::http::Response> getState(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     mesos::master::Response::GetState _getState(
@@ -1507,12 +1549,12 @@ private:
 
     process::Future<process::http::Response> subscribe(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     process::Future<process::http::Response> readFile(
         const mesos::master::Call& call,
-        const Option<std::string>& principal,
+        const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
     Master* master;
@@ -1782,8 +1824,11 @@ private:
   hashmap<OfferID, InverseOffer*> inverseOffers;
   hashmap<OfferID, process::Timer> inverseOfferTimers;
 
-  // Roles with > 0 frameworks currently registered.
-  hashmap<std::string, Role*> activeRoles;
+  // We track information about roles that we're aware of in the system.
+  // Specifically, we keep track of the roles when a framework subscribes to
+  // the role, and/or when there are resources allocated to the role
+  // (e.g. some tasks and/or executors are consuming resources under the role).
+  hashmap<std::string, Role*> roles;
 
   // Configured role whitelist if using the (deprecated) "explicit
   // roles" feature. If this is `None`, any role is allowed.
@@ -2172,48 +2217,30 @@ struct Framework
     ACTIVE
   };
 
-  Framework(Master* const _master,
+  Framework(Master* const master,
             const Flags& masterFlags,
-            const FrameworkInfo& _info,
+            const FrameworkInfo& info,
             const process::UPID& _pid,
             const process::Time& time = process::Clock::now())
-    : master(_master),
-      info(_info),
-      roles(protobuf::framework::getRoles(_info)),
-      capabilities(_info.capabilities()),
-      pid(_pid),
-      state(ACTIVE),
-      registeredTime(time),
-      reregisteredTime(time),
-      completedTasks(masterFlags.max_completed_tasks_per_framework),
-      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework) {}
+    : Framework(master, masterFlags, info, ACTIVE, time)
+  {
+    pid = _pid;
+  }
 
-  Framework(Master* const _master,
+  Framework(Master* const master,
             const Flags& masterFlags,
-            const FrameworkInfo& _info,
+            const FrameworkInfo& info,
             const HttpConnection& _http,
             const process::Time& time = process::Clock::now())
-    : master(_master),
-      info(_info),
-      roles(protobuf::framework::getRoles(_info)),
-      capabilities(_info.capabilities()),
-      http(_http),
-      state(ACTIVE),
-      registeredTime(time),
-      reregisteredTime(time),
-      completedTasks(masterFlags.max_completed_tasks_per_framework),
-      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework) {}
+    : Framework(master, masterFlags, info, ACTIVE, time)
+  {
+    http = _http;
+  }
 
-  Framework(Master* const _master,
+  Framework(Master* const master,
             const Flags& masterFlags,
-            const FrameworkInfo& _info)
-    : master(_master),
-      info(_info),
-      roles(protobuf::framework::getRoles(_info)),
-      capabilities(_info.capabilities()),
-      state(RECOVERED),
-      completedTasks(masterFlags.max_completed_tasks_per_framework),
-      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework) {}
+            const FrameworkInfo& info)
+    : Framework(master, masterFlags, info, RECOVERED, process::Time()) {}
 
   ~Framework()
   {
@@ -2248,6 +2275,18 @@ struct Framework
     if (!Master::isRemovable(task->state())) {
       totalUsedResources += task->resources();
       usedResources[task->slave_id()] += task->resources();
+
+      // It's possible that we're not tracking the task's role for
+      // this framework if the role is absent from the framework's
+      // set of roles. In this case, we track the role's allocation
+      // for this framework.
+      CHECK(!task->resources().empty());
+      const std::string& role =
+        task->resources().begin()->allocation_info().role();
+
+      if (!isTrackedUnderRole(role)) {
+        trackUnderRole(role);
+      }
     }
   }
 
@@ -2259,7 +2298,6 @@ struct Framework
   // functionally for all tasks is expensive, for now.
   void recoverResources(Task* task)
   {
-    CHECK(Master::isRemovable(task->state()));
     CHECK(tasks.contains(task->task_id()))
       << "Unknown task " << task->task_id()
       << " of framework " << task->framework_id();
@@ -2268,6 +2306,23 @@ struct Framework
     usedResources[task->slave_id()] -= task->resources();
     if (usedResources[task->slave_id()].empty()) {
       usedResources.erase(task->slave_id());
+    }
+
+    // If we are no longer subscribed to the role to which these resources are
+    // being returned to, and we have no more resources allocated to us for that
+    // role, stop tracking the framework under the role.
+    CHECK(!task->resources().empty());
+    const std::string& role =
+      task->resources().begin()->allocation_info().role();
+
+    auto allocatedToRole = [&role](const Resource& resource) {
+      return resource.allocation_info().role() == role;
+    };
+
+    if (roles.count(role) == 0 &&
+        totalUsedResources.filter(allocatedToRole).empty()) {
+      CHECK(totalOfferedResources.filter(allocatedToRole).empty());
+      untrackUnderRole(role);
     }
   }
 
@@ -2317,11 +2372,7 @@ struct Framework
       << " of framework " << task->framework_id();
 
     if (!Master::isRemovable(task->state())) {
-      totalUsedResources -= task->resources();
-      usedResources[task->slave_id()] -= task->resources();
-      if (usedResources[task->slave_id()].empty()) {
-        usedResources.erase(task->slave_id());
-      }
+      recoverResources(task);
     }
 
     if (task->state() == TASK_UNREACHABLE) {
@@ -2393,6 +2444,19 @@ struct Framework
     executors[slaveId][executorInfo.executor_id()] = executorInfo;
     totalUsedResources += executorInfo.resources();
     usedResources[slaveId] += executorInfo.resources();
+
+    // It's possible that we're not tracking the task's role for
+    // this framework if the role is absent from the framework's
+    // set of roles. In this case, we track the role's allocation
+    // for this framework.
+    if (!executorInfo.resources().empty()) {
+      const std::string& role =
+        executorInfo.resources().begin()->allocation_info().role();
+
+      if (!isTrackedUnderRole(role)) {
+        trackUnderRole(role);
+      }
+    }
   }
 
   void removeExecutor(const SlaveID& slaveId,
@@ -2403,10 +2467,30 @@ struct Framework
       << "' of framework " << id()
       << " of agent " << slaveId;
 
-    totalUsedResources -= executors[slaveId][executorId].resources();
-    usedResources[slaveId] -= executors[slaveId][executorId].resources();
+    const ExecutorInfo& executorInfo = executors[slaveId][executorId];
+
+    totalUsedResources -= executorInfo.resources();
+    usedResources[slaveId] -= executorInfo.resources();
     if (usedResources[slaveId].empty()) {
       usedResources.erase(slaveId);
+    }
+
+    // If we are no longer subscribed to the role to which these resources are
+    // being returned to, and we have no more resources allocated to us for that
+    // role, stop tracking the framework under the role.
+    if (!executorInfo.resources().empty()) {
+      const std::string& role =
+        executorInfo.resources().begin()->allocation_info().role();
+
+      auto allocatedToRole = [&role](const Resource& resource) {
+        return resource.allocation_info().role() == role;
+      };
+
+      if (roles.count(role) == 0 &&
+          totalUsedResources.filter(allocatedToRole).empty()) {
+        CHECK(totalOfferedResources.filter(allocatedToRole).empty());
+        untrackUnderRole(role);
+      }
     }
 
     executors[slaveId].erase(executorId);
@@ -2417,106 +2501,122 @@ struct Framework
 
   const FrameworkID id() const { return info.id(); }
 
-  // Update fields in 'info' using those in 'source'. Currently this
-  // only updates 'name', 'failover_timeout', 'hostname', 'webui_url',
-  // 'capabilities', and 'labels'.
-  Try<Nothing> updateFrameworkInfo(const FrameworkInfo& source)
+  // Update fields in 'info' using those in 'newInfo'. Currently this
+  // only updates `role`/`roles`, 'name', 'failover_timeout', 'hostname',
+  // 'webui_url', 'capabilities', and 'labels'.
+  void update(const FrameworkInfo& newInfo)
   {
     // We only merge 'info' from the same framework 'id'.
-    CHECK_EQ(info.id(), source.id());
+    CHECK_EQ(info.id(), newInfo.id());
+
+    // Save the old list of roles for later.
+    std::set<std::string> oldRoles = roles;
 
     // TODO(jmlvanre): Merge other fields as per design doc in
     // MESOS-703.
 
-    // We currently do not allow frameworks to add or remove roles. We
-    // do however allow frameworks to opt in and out of `MULTI_ROLE`
-    // capability, given that the `role` and `roles` field contain the
-    // same number of roles.
-    if (capabilities.multiRole || protobuf::frameworkHasCapability(
-            source, FrameworkInfo::Capability::MULTI_ROLE)) {
-      // Two `roles` sets are equivalent if they contain the same
-      // elements. A `role` `*` is not equivalent to an empty `roles`
-      // set, but to the set `{*}`. Since we might be dealing with a
-      // framework upgrading to `MULTI_ROLE` capability or dropping
-      // it, we need to examine either `role` or `roles` in order to
-      // determine the roles a framework is subscribed to.
-      const std::set<std::string> newRoles =
-        protobuf::framework::getRoles(source);
+    info.clear_role();
+    info.clear_roles();
 
-      if (roles != newRoles) {
-        return Error(
-            "Frameworks cannot change their roles: expected '" +
-            stringify(roles) + "', but got '" + stringify(newRoles) + "'");
-      }
-
-      info.clear_role();
-      info.clear_roles();
-
-      if (source.has_role()) {
-        info.set_role(source.role());
-      }
-
-      if (source.roles_size() > 0) {
-        info.mutable_roles()->CopyFrom(source.roles());
-      }
-    } else {
-      if (source.role() != info.role()) {
-        LOG(WARNING) << "Cannot update FrameworkInfo.role to '" << source.role()
-                     << "' for framework " << id() << ". Check MESOS-703";
-      }
+    if (newInfo.has_role()) {
+      info.set_role(newInfo.role());
     }
 
-    if (source.user() != info.user()) {
-      LOG(WARNING) << "Cannot update FrameworkInfo.user to '" << source.user()
+    if (newInfo.roles_size() > 0) {
+      info.mutable_roles()->CopyFrom(newInfo.roles());
+    }
+
+    roles = protobuf::framework::getRoles(newInfo);
+
+    if (newInfo.user() != info.user()) {
+      LOG(WARNING) << "Cannot update FrameworkInfo.user to '" << newInfo.user()
                    << "' for framework " << id() << ". Check MESOS-703";
     }
 
-    info.set_name(source.name());
+    info.set_name(newInfo.name());
 
-    if (source.has_failover_timeout()) {
-      info.set_failover_timeout(source.failover_timeout());
+    if (newInfo.has_failover_timeout()) {
+      info.set_failover_timeout(newInfo.failover_timeout());
     } else {
       info.clear_failover_timeout();
     }
 
-    if (source.checkpoint() != info.checkpoint()) {
+    if (newInfo.checkpoint() != info.checkpoint()) {
       LOG(WARNING) << "Cannot update FrameworkInfo.checkpoint to '"
-                   << stringify(source.checkpoint()) << "' for framework "
+                   << stringify(newInfo.checkpoint()) << "' for framework "
                    << id() << ". Check MESOS-703";
     }
 
-    if (source.has_hostname()) {
-      info.set_hostname(source.hostname());
+    if (newInfo.has_hostname()) {
+      info.set_hostname(newInfo.hostname());
     } else {
       info.clear_hostname();
     }
 
-    if (source.principal() != info.principal()) {
+    if (newInfo.principal() != info.principal()) {
       LOG(WARNING) << "Cannot update FrameworkInfo.principal to '"
-                   << source.principal() << "' for framework " << id()
+                   << newInfo.principal() << "' for framework " << id()
                    << ". Check MESOS-703";
     }
 
-    if (source.has_webui_url()) {
-      info.set_webui_url(source.webui_url());
+    if (newInfo.has_webui_url()) {
+      info.set_webui_url(newInfo.webui_url());
     } else {
       info.clear_webui_url();
     }
 
-    if (source.capabilities_size() > 0) {
-      info.mutable_capabilities()->CopyFrom(source.capabilities());
+    if (newInfo.capabilities_size() > 0) {
+      info.mutable_capabilities()->CopyFrom(newInfo.capabilities());
     } else {
       info.clear_capabilities();
     }
     capabilities = protobuf::framework::Capabilities(info.capabilities());
 
-    if (source.has_labels()) {
-      info.mutable_labels()->CopyFrom(source.labels());
+    if (newInfo.has_labels()) {
+      info.mutable_labels()->CopyFrom(newInfo.labels());
     } else {
       info.clear_labels();
     }
 
-    return Nothing();
+    const std::set<std::string>& newRoles = roles;
+
+    const std::set<std::string> removedRoles = [&]() {
+      std::set<std::string> result = oldRoles;
+      foreach (const std::string& role, newRoles) {
+        result.erase(role);
+      }
+      return result;
+    }();
+
+    foreach (const std::string& role, removedRoles) {
+      auto allocatedToRole = [&role](const Resource& resource) {
+        return resource.allocation_info().role() == role;
+      };
+
+      // Stop tracking the framework under this role if there are
+      // no longer any resources allocated to it.
+      if (totalUsedResources.filter(allocatedToRole).empty()) {
+        CHECK(totalOfferedResources.filter(allocatedToRole).empty());
+        untrackUnderRole(role);
+      }
+    }
+
+    const std::set<std::string> addedRoles = [&]() {
+      std::set<std::string> result = newRoles;
+      foreach (const std::string& role, oldRoles) {
+        result.erase(role);
+      }
+      return result;
+    }();
+
+    foreach (const std::string& role, addedRoles) {
+      // NOTE: It's possible that we're already tracking this framework
+      // under the role because a framework can unsubscribe from a role
+      // while it still has resources allocated to the role.
+      if (!isTrackedUnderRole(role)) {
+        trackUnderRole(role);
+      }
+    }
   }
 
   void updateConnection(const process::UPID& newPid)
@@ -2588,6 +2688,10 @@ struct Framework
   bool active() const    { return state == ACTIVE; }
   bool connected() const { return state == ACTIVE || state == INACTIVE; }
   bool recovered() const { return state == RECOVERED; }
+
+  bool isTrackedUnderRole(const std::string& role) const;
+  void trackUnderRole(const std::string& role);
+  void untrackUnderRole(const std::string& role);
 
   Master* const master;
 
@@ -2680,6 +2784,31 @@ struct Framework
   Option<process::Owned<Heartbeater>> heartbeater;
 
 private:
+  Framework(Master* const _master,
+            const Flags& masterFlags,
+            const FrameworkInfo& _info,
+            State state,
+            const process::Time& time)
+    : master(_master),
+      info(_info),
+      roles(protobuf::framework::getRoles(_info)),
+      capabilities(_info.capabilities()),
+      state(state),
+      registeredTime(time),
+      reregisteredTime(time),
+      completedTasks(masterFlags.max_completed_tasks_per_framework),
+      unreachableTasks(masterFlags.max_unreachable_tasks_per_framework)
+  {
+    foreach (const std::string& role, roles) {
+      // NOTE: It's possible that we're already being tracked under the role
+      // because a framework can unsubscribe from a role while it still has
+      // resources allocated to the role.
+      if (!isTrackedUnderRole(role)) {
+        trackUnderRole(role);
+      }
+    }
+  }
+
   Framework(const Framework&);              // No copying.
   Framework& operator=(const Framework&); // No assigning.
 };
