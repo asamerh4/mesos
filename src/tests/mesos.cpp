@@ -646,11 +646,10 @@ void ContainerizerTest<slave::MesosContainerizer>::SetUp()
 {
   MesosTest::SetUp();
 
-  subsystems.insert("cpu");
-  subsystems.insert("cpuacct");
-  subsystems.insert("memory");
-  subsystems.insert("freezer");
-  subsystems.insert("perf_event");
+  Try<std::set<string>> supportedSubsystems = cgroups::subsystems();
+  ASSERT_SOME(supportedSubsystems);
+
+  subsystems = supportedSubsystems.get();
 
   Result<string> user = os::user();
   EXPECT_SOME(user);
@@ -760,6 +759,10 @@ void ContainerizerTest<slave::MesosContainerizer>::TearDown()
             Clock::resume();
           }
 
+          // Since we are tearing down the tests, kill any processes
+          // that might remain. Any remaining zombie processes will
+          // not prevent the destroy from succeeding.
+          EXPECT_SOME(cgroups::kill(hierarchy, cgroup, SIGKILL));
           AWAIT_READY(cgroups::destroy(hierarchy, cgroup));
 
           if (paused) {

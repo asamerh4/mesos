@@ -16,6 +16,7 @@
 
 #include <unistd.h>
 
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -59,10 +60,12 @@ using process::Message;
 using process::Owned;
 using process::PID;
 using process::Promise;
+using process::UPID;
 
 using process::http::OK;
 using process::http::Response;
 
+using std::initializer_list;
 using std::vector;
 
 using testing::_;
@@ -146,7 +149,7 @@ TEST_F(UpgradeTest, ReregisterOldAgentWithMultiRoleMaster)
     .Times(AtMost(1));
 
   AWAIT_READY(status);
-  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  EXPECT_EQ(TASK_RUNNING, status->state());
 
   master->reset();
   master = StartMaster(masterFlags);
@@ -386,6 +389,147 @@ TEST_F(UpgradeTest, UpgradeSlaveIntoMultiRole)
 
   driver.stop();
   driver.join();
+}
+
+
+// This test ensures that scheduler can upgrade to MULTI_ROLE
+// without affecting tasks that were previously running.
+TEST_F(UpgradeTest, MultiRoleSchedulerUpgrade)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> agent = StartSlave(&detector, &containerizer);
+  ASSERT_SOME(agent);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("foo");
+
+  MockScheduler sched1;
+  MesosSchedulerDriver driver1(
+      &sched1, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched1, registered(&driver1, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched1, resourceOffers(&driver1, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver1.start();
+
+  AWAIT_READY(frameworkId);
+  AWAIT_READY(offers);
+  ASSERT_NE(0u, offers->size());
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("foo");
+  task.mutable_slave_id()->CopyFrom(offers.get()[0].slave_id());
+  task.mutable_resources()->CopyFrom(offers.get()[0].resources());
+  task.mutable_executor()->CopyFrom(DEFAULT_EXECUTOR_INFO);
+
+  EXPECT_CALL(exec, registered(_, _, _, _));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched1, statusUpdate(&driver1, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver1.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status->state());
+  EXPECT_TRUE(status->has_executor_id());
+  EXPECT_EQ(exec.id, status->executor_id());
+
+  frameworkInfo.mutable_id()->CopyFrom(frameworkId.get());
+  frameworkInfo.add_roles(frameworkInfo.role());
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+  frameworkInfo.clear_role();
+
+  MockScheduler sched2;
+  MesosSchedulerDriver driver2(
+      &sched2, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<Nothing> registered2;
+  EXPECT_CALL(sched2, registered(&driver2, frameworkId.get(), _))
+    .WillOnce(FutureSatisfy(&registered2));
+
+  Future<UpdateFrameworkMessage> updateFrameworkMessage =
+    FUTURE_PROTOBUF(UpdateFrameworkMessage(), _, _);
+
+  // Scheduler1 should get an error due to failover.
+  EXPECT_CALL(sched1, error(&driver1, "Framework failed over"));
+
+  driver2.start();
+
+  AWAIT_READY(registered2);
+
+  // Wait for the agent to get the updated framework info.
+  AWAIT_READY(updateFrameworkMessage);
+
+  // Check that the framework has been updated to use `roles` rather than `role`
+  // in both the master and the agent.
+  initializer_list<UPID> pids = { master.get()->pid, agent.get()->pid };
+  foreach (const UPID& pid, pids) {
+    Future<Response> response = process::http::get(
+        pid, "state", None(), createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(parse);
+
+    JSON::Value result = parse.get();
+
+    JSON::Object unexpected = {
+      {
+        "frameworks",
+        JSON::Array { JSON::Object { { "role", "foo" } } }
+      }
+    };
+
+    EXPECT_TRUE(!result.contains(unexpected));
+
+    JSON::Object expected = {
+      {
+        "frameworks",
+        JSON::Array { JSON::Object { { "roles", JSON::Array { "foo" } } } }
+      }
+    };
+
+    EXPECT_TRUE(result.contains(expected));
+  }
+
+  driver1.stop();
+  driver1.join();
+
+  Future<TaskStatus> status2;
+  EXPECT_CALL(sched2, statusUpdate(&driver2, _))
+    .WillOnce(FutureArg<1>(&status2));
+
+  // Trigger explicit reconciliation.
+  driver2.reconcileTasks({status.get()});
+
+  AWAIT_READY(status2);
+  EXPECT_EQ(TASK_RUNNING, status2->state());
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver2.stop();
+  driver2.join();
 }
 
 } // namespace tests {

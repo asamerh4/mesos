@@ -190,6 +190,10 @@ protected:
       foreach (const string& cgroup, cgroups.get()) {
         // Remove any cgroups that start with TEST_CGROUPS_ROOT.
         if (cgroup == TEST_CGROUPS_ROOT) {
+          // Since we are tearing down the tests, kill any processes
+          // that might remain. Any remaining zombie processes will
+          // not prevent the destroy from succeeding.
+          EXPECT_SOME(cgroups::kill(hierarchy, cgroup, SIGKILL));
           AWAIT_READY(cgroups::destroy(hierarchy, cgroup));
         }
       }
@@ -572,7 +576,7 @@ TEST_F(CgroupsAnyHierarchyWithCpuMemoryTest, ROOT_CGROUPS_Listen)
 
   // TODO(vinod): Instead of asserting here dynamically disable
   // the test if swap is enabled on the host.
-  ASSERT_EQ(memory.get().totalSwap, Bytes(0))
+  ASSERT_EQ(memory->totalSwap, Bytes(0))
     << "-------------------------------------------------------------\n"
     << "We cannot run this test because it appears you have swap\n"
     << "enabled, but feel free to disable this test.\n"
@@ -1092,7 +1096,7 @@ TEST_F(CgroupsAnyHierarchyMemoryPressureTest, ROOT_IncreaseRSS)
 
   // TODO(vinod): Instead of asserting here dynamically disable
   // the test if swap is enabled on the host.
-  ASSERT_EQ(memory.get().totalSwap, Bytes(0))
+  ASSERT_EQ(memory->totalSwap, Bytes(0))
     << "-------------------------------------------------------------\n"
     << "We cannot run this test because it appears you have swap\n"
     << "enabled, but feel free to disable this test.\n"

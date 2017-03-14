@@ -560,6 +560,7 @@ authentication_HEADERS =						\
   $(top_srcdir)/include/mesos/authentication/authentication.hpp		\
   $(top_srcdir)/include/mesos/authentication/authentication.proto	\
   $(top_srcdir)/include/mesos/authentication/authenticator.hpp		\
+  $(top_srcdir)/include/mesos/authentication/secret_generator.hpp	\
   $(top_srcdir)/include/mesos/authentication/http/basic_authenticator_factory.hpp
 
 nodist_authentication_HEADERS =						\
@@ -653,7 +654,8 @@ module_HEADERS =							\
   $(top_srcdir)/include/mesos/module/qos_controller.hpp			\
   $(top_srcdir)/include/mesos/module/resource_estimator.hpp		\
   $(top_srcdir)/include/mesos/module/contender.hpp			\
-  $(top_srcdir)/include/mesos/module/detector.hpp
+  $(top_srcdir)/include/mesos/module/detector.hpp			\
+  $(top_srcdir)/include/mesos/module/secret_generator.hpp
 
 nodist_module_HEADERS =							\
   ../include/mesos/module/hook.pb.h					\
@@ -1277,6 +1279,12 @@ if WITH_NETWORK_ISOLATOR
 libmesos_no_3rdparty_la_SOURCES += $(MESOS_NETWORK_ISOLATOR_FILES)
 else
 EXTRA_DIST += $(MESOS_NETWORK_ISOLATOR_FILES)
+endif
+
+if ENABLE_SSL
+libmesos_no_3rdparty_la_SOURCES +=					\
+  authentication/executor/jwt_secret_generator.cpp				\
+  authentication/executor/jwt_secret_generator.hpp
 endif
 
 libmesos_no_3rdparty_la_CPPFLAGS = $(MESOS_CPPFLAGS)
@@ -2382,6 +2390,11 @@ if WITH_NETWORK_ISOLATOR
 mesos_tests_SOURCES +=						\
   tests/containerizer/port_mapping_tests.cpp			\
   tests/containerizer/routing_tests.cpp
+endif
+
+if ENABLE_SSL
+mesos_tests_SOURCES +=						\
+  tests/secret_generator_tests.cpp
 endif
 
 if HAS_JAVA

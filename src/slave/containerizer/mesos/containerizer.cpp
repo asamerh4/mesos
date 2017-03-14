@@ -594,6 +594,14 @@ Future<hashset<ContainerID>> MesosContainerizer::containers()
 }
 
 
+Future<Nothing> MesosContainerizer::remove(const ContainerID& containerId)
+{
+  return dispatch(process.get(),
+                  &MesosContainerizerProcess::remove,
+                  containerId);
+}
+
+
 Future<Nothing> MesosContainerizerProcess::recover(
     const Option<state::SlaveState>& state)
 {
@@ -1011,13 +1019,6 @@ Future<bool> MesosContainerizerProcess::launch(
     if (taskInfo->has_container()) {
       ContainerInfo* containerInfo = containerConfig.mutable_container_info();
       containerInfo->CopyFrom(taskInfo->container());
-
-      if (taskInfo->container().mesos().has_image()) {
-        // For command tasks, we need to set the command executor user
-        // as root as it needs to perform chroot (even when
-        // switch_user is set to false).
-        containerConfig.mutable_command_info()->set_user("root");
-      }
     }
   } else {
     // Other cases.
@@ -1454,6 +1455,15 @@ Future<bool> MesosContainerizerProcess::_launch(
   // Determine the user to launch the container as.
   if (container->config.has_user()) {
     launchInfo.set_user(container->config.user());
+  }
+
+  // TODO(gilbert): Remove this once we no longer support command
+  // task in favor of default executor.
+  if (container->config.has_task_info() &&
+      container->config.has_rootfs()) {
+    // We need to set the executor user as root as it needs to
+    // perform chroot (even when switch_user is set to false).
+    launchInfo.set_user("root");
   }
 
   // Use a pipe to block the child until it's been isolated.
@@ -2371,6 +2381,49 @@ void MesosContainerizerProcess::______destroy(
   }
 
   containers_.erase(containerId);
+}
+
+
+Future<Nothing> MesosContainerizerProcess::remove(
+    const ContainerID& containerId)
+{
+  // TODO(gkleiman): Check that recovery has completed before continuing.
+
+  CHECK(containerId.has_parent());
+
+  if (containers_.contains(containerId)) {
+    return Failure("Nested container has not terminated yet");
+  }
+
+  const ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
+
+  if (!containers_.contains(rootContainerId)) {
+    return Failure("Unknown parent container");
+  }
+
+  const string runtimePath =
+    containerizer::paths::getRuntimePath(flags.runtime_dir, containerId);
+
+  if (os::exists(runtimePath)) {
+    Try<Nothing> rmdir = os::rmdir(runtimePath);
+    if (rmdir.isError()) {
+      return Failure(
+          "Failed to remove the runtime directory: " + rmdir.error());
+    }
+  }
+
+  const string sandboxPath = containerizer::paths::getSandboxPath(
+      containers_[rootContainerId]->directory.get(), containerId);
+
+  if (os::exists(sandboxPath)) {
+    Try<Nothing> rmdir = os::rmdir(sandboxPath);
+    if (rmdir.isError()) {
+      return Failure(
+          "Failed to remove the sandbox directory: " + rmdir.error());
+    }
+  }
+
+  return Nothing();
 }
 
 
