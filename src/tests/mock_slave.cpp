@@ -18,6 +18,8 @@
 
 #include <gmock/gmock.h>
 
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <mesos/slave/qos_controller.hpp>
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -32,6 +34,8 @@
 #include "tests/mock_slave.hpp"
 
 using mesos::master::detector::MasterDetector;
+
+using mesos::slave::ContainerTermination;
 
 using std::list;
 
@@ -104,7 +108,8 @@ MockSlave::MockSlave(
     MasterDetector* detector,
     slave::Containerizer* containerizer,
     const Option<mesos::slave::QoSController*>& _qosController,
-    const Option<mesos::Authorizer*>& authorizer)
+    const Option<mesos::Authorizer*>& authorizer,
+    const Option<mesos::SecretGenerator*>& _mockSecretGenerator)
   : slave::Slave(
         process::ID::generate("slave"),
         flags,
@@ -116,7 +121,8 @@ MockSlave::MockSlave(
         &resourceEstimator,
         _qosController.isSome() ? _qosController.get() : &qosController,
         authorizer),
-    files(slave::READONLY_HTTP_AUTHENTICATION_REALM)
+    files(slave::READONLY_HTTP_AUTHENTICATION_REALM),
+    mockSecretGenerator(_mockSecretGenerator)
 {
   // Set up default behaviors, calling the original methods.
   EXPECT_CALL(*this, runTask(_, _, _, _, _))
@@ -135,12 +141,26 @@ MockSlave::MockSlave(
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_qosCorrections));
   EXPECT_CALL(*this, usage())
     .WillRepeatedly(Invoke(this, &MockSlave::unmocked_usage));
+  EXPECT_CALL(*this, executorTerminated(_, _, _))
+    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_executorTerminated));
 }
 
 
 MockSlave::~MockSlave()
 {
   delete statusUpdateManager;
+}
+
+
+void MockSlave::initialize()
+{
+  Slave::initialize();
+
+  if (mockSecretGenerator.isSome()) {
+    delete secretGenerator;
+    secretGenerator = mockSecretGenerator.get();
+    mockSecretGenerator = None();
+  }
 }
 
 
@@ -206,6 +226,15 @@ void MockSlave::unmocked_qosCorrections()
 Future<ResourceUsage> MockSlave::unmocked_usage()
 {
   return slave::Slave::usage();
+}
+
+
+void MockSlave::unmocked_executorTerminated(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId,
+    const Future<Option<ContainerTermination>>& termination)
+{
+  slave::Slave::executorTerminated(frameworkId, executorId, termination);
 }
 
 } // namespace tests {

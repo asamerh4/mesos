@@ -331,8 +331,16 @@
         tab: 'frameworks'
       },
       {
+        pathRegexp: /^\/roles/,
+        tab: 'roles'
+      },
+      {
         pathRegexp: /^\/offers/,
         tab: 'offers'
+      },
+      {
+        pathRegexp: /^\/maintenance/,
+        tab: 'maintenance'
       }
     ];
 
@@ -479,12 +487,36 @@
 
   mesosApp.controller('FrameworksCtrl', function() {});
 
+  mesosApp.controller('RolesCtrl', function($scope, $http) {
+    var update = function() {
+      // TODO(haosdent): Send requests to the leading master directly
+      // once `leadingMasterURL` is public.
+      $http.jsonp('/master/roles?jsonp=JSON_CALLBACK')
+      .success(function(response) {
+        $scope.roles = response;
+      })
+      .error(function() {
+        if ($scope.isErrorModalOpen === false) {
+          popupErrorModal();
+        }
+      });
+    };
+
+    if ($scope.state) {
+      update();
+    }
+
+    var removeListener = $scope.$on('state_updated', update);
+    $scope.$on('$routeChangeStart', removeListener);
+  });
+
   mesosApp.controller('OffersCtrl', function() {});
 
   mesosApp.controller('MaintenanceCtrl', function($scope, $http) {
-    // TODO(haosdent): Send requests to the leading master directly
-    // once `leadingMasterURL` is public.
-    $http.jsonp('/master/maintenance/schedule?jsonp=JSON_CALLBACK')
+    var update = function() {
+      // TODO(haosdent): Send requests to the leading master directly
+      // once `leadingMasterURL` is public.
+      $http.jsonp('/master/maintenance/schedule?jsonp=JSON_CALLBACK')
       .success(function(response) {
         $scope.maintenance = response;
       })
@@ -493,6 +525,14 @@
           popupErrorModal();
         }
       });
+    };
+
+    if ($scope.state) {
+      update();
+    }
+
+    var removeListener = $scope.$on('state_updated', update);
+    $scope.$on('$routeChangeStart', removeListener);
   });
 
   mesosApp.controller('FrameworkCtrl', function($scope, $routeParams) {

@@ -77,6 +77,9 @@ public:
   Option<JSON::Object> executor_environment_variables;
   Duration executor_registration_timeout;
   Duration executor_shutdown_grace_period;
+#ifdef USE_SSL_SOCKET
+  Option<std::string> executor_secret_key;
+#endif // USE_SSL_SOCKET
   Duration gc_delay;
   double gc_disk_headroom;
   Duration disk_watch_interval;
@@ -141,9 +144,12 @@ public:
   Option<std::string> modulesDir;
   std::string authenticatee;
   std::string authorizer;
-  std::string http_authenticators;
+  Option<std::string> http_authenticators;
   bool authenticate_http_readonly;
   bool authenticate_http_readwrite;
+#ifdef USE_SSL_SOCKET
+  bool authenticate_http_executors;
+#endif // USE_SSL_SOCKET
   Option<Path> http_credentials;
   Option<std::string> hooks;
   Option<std::string> resource_estimator;

@@ -18,6 +18,8 @@
 #include <list>
 #include <set>
 
+#include <mesos/type_utils.hpp>
+
 #include <process/io.hpp>
 #include <process/pid.hpp>
 #include <process/subprocess.hpp>
@@ -26,6 +28,9 @@
 #include <stout/net.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/strings.hpp>
+
+#include <stout/os/constants.hpp>
 
 #include "common/protobuf_utils.hpp"
 
@@ -690,18 +695,29 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
     env->set_value("0.0.0.0");
 
     if (!containerId.has_parent()) {
-      if (containerNetworks.contains("__MESOS_TEST__")) {
-        // This is only for test. For testing 'network/cni' isolator,
-        // we will use a mock CNI plugin and a mock CNI network
-        // configuration file which has "__MESOS_TEST__" as network
-        // name. The mock plugin will not create a new network
-        // namespace for the container. The container will be launched
-        // in the host's network namespace. The mock plugin will
-        // return the host's IP address for this test container.
-        //
-        // NOTE: There is an implicit assumption here that when used
-        // for testing, '__MESOS_TEST__' is the only network the
-        // container is going to join.
+      auto mesosTestNetwork = [=]() {
+        foreachkey (const string& networkName, containerNetworks) {
+          // We can specify test networks to the `network/cni` isolator
+          // with a name of the form "__MESOS_TEST__*".  For these test
+          // networks we will use a mock CNI plugin and a mock CNI
+          // network configuration file which has "__MESOS_TEST__*" as
+          // network name. The mock plugin will not create a new network
+          // namespace for the container. The container will be launched
+          // in the host's network namespace. The mock plugin will
+          // return the host's IP address for this test container.
+          //
+          // NOTE: There is an implicit assumption here that when used
+          // for testing, '__MESOS_TEST__*' are the only networks the
+          // container is going to join.
+          if (strings::contains(networkName, "__MESOS_TEST__")) {
+            return true;
+          }
+        }
+
+        return false;
+      };
+
+      if (mesosTestNetwork()) {
         launchInfo.add_clone_namespaces(CLONE_NEWNS);
         launchInfo.add_clone_namespaces(CLONE_NEWUTS);
       } else {
@@ -970,39 +986,34 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
         hostsPath + "': " + write.error());
   }
 
-  // Update 'resolv.conf' with nameservers learned from IPAM. In case
-  // IPAM has not specified a DNS then we set the container
-  // 'resolv.conf' to be the same as the host 'resolv.conf'
-  // ('/etc/resolv.conf').
-  stringstream resolv;
-  foreachvalue (const ContainerNetwork& network,
-                info->containerNetworks) {
-    if (network.cniNetworkInfo.isNone() || !network.cniNetworkInfo->has_dns()) {
-      continue;
-    }
+  cni::spec::DNS dns;
 
-    foreach (const string& nameserver,
-             network.cniNetworkInfo->dns().nameservers()) {
-      resolv << "nameserver " << nameserver << endl;
+  // Collect all the DNS resolver specifications from the networks'
+  // IPAM plugins. Ordering is preserved and for single-value fields,
+  // the last network will win.
+  foreachvalue (const ContainerNetwork& network, info->containerNetworks) {
+    if (network.cniNetworkInfo.isSome() && network.cniNetworkInfo->has_dns()) {
+      dns.MergeFrom(network.cniNetworkInfo->dns());
     }
   }
 
-  // If `resolv` does not have any nameserver set `resolvPath` to
-  // '/etc/resolv.conf'.
-  if (resolv.str().size() == 0) {
+  // If IPAM has not specified any DNS servers, then we set
+  // the container 'resolv.conf' to be the same as the host
+  // 'resolv.conf' ('/etc/resolv.conf').
+  if (dns.nameservers().empty()) {
     if (!os::exists("/etc/resolv.conf")){
-      return Failure("Cannot find host /etc/resolv.conf");
+      return Failure("Cannot find host's /etc/resolv.conf");
     }
 
     resolvPath = "/etc/resolv.conf";
 
     LOG(INFO) << "Unable to find DNS nameservers for container "
-              << containerId << ". Using host '/etc/resolv.conf'";
+              << containerId << ", using host '/etc/resolv.conf'";
   } else {
     LOG(INFO) << "DNS nameservers for container " << containerId
-              << " are:\n" << resolv.str();
+              << " are: " << strings::join(", ", dns.nameservers());
 
-    write = os::write(resolvPath, resolv.str());
+    write = os::write(resolvPath, cni::spec::formatResolverConfig(dns));
     if (write.isError()) {
       return Failure(
           "Failed to write 'resolv.conf' file at '" +
@@ -1038,8 +1049,8 @@ Future<Nothing> NetworkCniIsolatorProcess::__isolate(
   Try<Subprocess> s = subprocess(
       path::join(flags.launcher_dir, "mesos-containerizer"),
       argv,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       &setup.flags);
 

@@ -3829,7 +3829,7 @@ void Master::accept(
   // inject the offer's allocation info into the operation's
   // resources if the scheduler has not done so already.
   foreach (Offer::Operation& operation, *accept.mutable_operations()) {
-    protobuf::adjustOfferOperation(&operation, allocationInfo.get());
+    protobuf::injectAllocationInfo(&operation, allocationInfo.get());
   }
 
   CHECK_SOME(slaveId);
@@ -9222,7 +9222,13 @@ void Slave::removeExecutor(const FrameworkID& frameworkId,
 
 void Slave::apply(const Offer::Operation& operation)
 {
-  Try<Resources> resources = totalResources.apply(operation);
+  // We need to strip the allocation info from the operation's
+  // resources in order to apply the operation successfully
+  // since the agent's total is stored as unallocated resources.
+  Offer::Operation strippedOperation = operation;
+  protobuf::stripAllocationInfo(&strippedOperation);
+
+  Try<Resources> resources = totalResources.apply(strippedOperation);
   CHECK_SOME(resources);
 
   totalResources = resources.get();

@@ -1,10 +1,35 @@
+Release Notes - Mesos - Version 1.3.0 (WIP)
+-------------------------------------------
+This release contains the following new features:
+
+  * [MESOS-1763] - Support for frameworks to receive resources for multiple
+    roles. This allows "multi-user" frameworks to leverage the role-based
+    resource allocation in mesos. Prior to this support, one had to run
+    multiple instances of a single-user framework to achieve multi-user
+    resource allocation, or implement multi-user resource allocation in
+    the framework.
+
+  * [MESOS-6627] - Support for frameworks to modify the role(s) they are
+    subscribed to. This is essential to supporting "multi-user" frameworks
+    (see MESOS-1763) in that roles are expected to come and go over time
+    (e.g. new employees join, new teams are formed, employees leave, teams
+    are disbanded, etc).
+
+
 Release Notes - Mesos - Version 1.2.1 (WIP)
 -------------------------------------------
 * This is a bug fix release.
 
 All Issues:
 ** Bug
+  * [MESOS-6951] - Docker containerizer: mangled environment when env value contains LF byte.
+  * [MESOS-7197] - Requesting tiny amount of CPU crashes master.
   * [MESOS-7208] - Persistent volume ownership is set to root when task is running with non-root user
+  * [MESOS-7237] - Enabling cgroups_limit_swap can lead to "invalid argument" error.
+  * [MESOS-7261] - maintenance.html is missing during packaging.
+  * [MESOS-7263] - User supplied task environment variables cause warnings in sandbox stdout.
+  * [MESOS-7264] - Possibly duplicate environment variables should not leak values to the sandbox.
+  * [MESOS-7265] - Containerizer startup may cause sensitive data to leak into sandbox logs.
 
 
 Release Notes - Mesos - Version 1.2.0
@@ -449,6 +474,7 @@ Release Notes - Mesos - Version 1.1.2 (WIP)
 All Issues:
 ** Bug
   * [MESOS-2537] - AC_ARG_ENABLED checks are broken.
+  * [MESOS-7237] - Enabling cgroups_limit_swap can lead to "invalid argument" error.
 
 
 Release Notes - Mesos - Version 1.1.1

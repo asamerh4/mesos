@@ -251,6 +251,11 @@ std::ostream& operator<<(
     const CapabilityInfo& capabilityInfo);
 
 
+std::ostream& operator<<(
+    std::ostream& stream,
+    const CheckStatusInfo& checkStatusInfo);
+
+
 std::ostream& operator<<(std::ostream& stream, const CommandInfo& commandInfo);
 
 
@@ -261,7 +266,9 @@ std::ostream& operator<<(
     std::ostream& stream,
     const ContainerInfo& containerInfo);
 
+
 std::ostream& operator<<(std::ostream& stream, const Environment& environment);
+
 
 std::ostream& operator<<(std::ostream& stream, const ExecutorID& executorId);
 
@@ -304,12 +311,18 @@ std::ostream& operator<<(
     const std::vector<TaskID>& taskIds);
 
 
+std::ostream& operator<<(std::ostream& stream, const CheckInfo::Type& type);
+
+
 std::ostream& operator<<(
     std::ostream& stream,
     const FrameworkInfo::Capability& capability);
 
 
 std::ostream& operator<<(std::ostream& stream, const Image::Type& imageType);
+
+
+std::ostream& operator<<(std::ostream& stream, const Secret::Type& secretType);
 
 
 std::ostream& operator<<(std::ostream& stream, const RLimitInfo& rlimitInfo);

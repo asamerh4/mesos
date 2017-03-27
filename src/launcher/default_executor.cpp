@@ -43,9 +43,11 @@
 #include <stout/os.hpp>
 #include <stout/uuid.hpp>
 
+#include "checks/checker.hpp"
 #include "checks/health_checker.hpp"
 
 #include "common/http.hpp"
+#include "common/protobuf_utils.hpp"
 #include "common/status_utils.hpp"
 
 #include "internal/devolve.hpp"
@@ -85,13 +87,25 @@ private:
   struct Container
   {
     ContainerID containerId;
-    TaskID taskId;
+    TaskInfo taskInfo;
     TaskGroupInfo taskGroup; // Task group of the child container.
+
+    Option<TaskStatus> lastTaskStatus;
+
+    // Checker for the container.
+    Option<Owned<checks::Checker>> checker;
+
+    // Health checker for the container.
+    Option<Owned<checks::HealthChecker>> healthChecker;
 
     // Connection used for waiting on the child container. It is possible
     // that a container is active but a connection for sending the
     // `WAIT_NESTED_CONTAINER` call has not been established yet.
     Option<Connection> waiting;
+
+    // Indicates whether a status update acknowledgement
+    // has been received for any status update.
+    bool acknowledged;
 
     // Set to true if the child container is in the process of being killed.
     bool killing;
@@ -106,7 +120,8 @@ public:
       const ExecutorID& _executorId,
       const ::URL& _agent,
       const string& _sandboxDirectory,
-      const string& _launcherDirectory)
+      const string& _launcherDirectory,
+      const Option<string>& _authenticationToken)
     : ProcessBase(process::ID::generate("default-executor")),
       state(DISCONNECTED),
       contentType(ContentType::PROTOBUF),
@@ -119,7 +134,8 @@ public:
       executorId(_executorId),
       agent(_agent),
       sandboxDirectory(_sandboxDirectory),
-      launcherDirectory(_launcherDirectory) {}
+      launcherDirectory(_launcherDirectory),
+      authenticationToken(_authenticationToken) {}
 
   virtual ~DefaultExecutor() = default;
 
@@ -146,6 +162,13 @@ public:
         container->waiting = None();
       }
     }
+
+    // Pause all health checks.
+    foreachvalue (Owned<Container> container, containers) {
+      if (container->healthChecker.isSome()) {
+        container->healthChecker->get()->pause();
+      }
+    }
   }
 
   void received(const Event& event)
@@ -170,6 +193,13 @@ public:
           wait(containers.keys());
         }
 
+        // Resume all health checks.
+        foreachvalue (Owned<Container> container, containers) {
+          if (container->healthChecker.isSome()) {
+            container->healthChecker->get()->resume();
+          }
+        }
+
         break;
       }
 
@@ -192,12 +222,25 @@ public:
       }
 
       case Event::ACKNOWLEDGED: {
-        // Remove the corresponding update.
-        unacknowledgedUpdates.erase(
-            UUID::fromBytes(event.acknowledged().uuid()).get());
+        const UUID uuid = UUID::fromBytes(event.acknowledged().uuid()).get();
 
-        // Remove the corresponding task.
-        unacknowledgedTasks.erase(event.acknowledged().task_id());
+        if (!unacknowledgedUpdates.contains(uuid)) {
+          LOG(WARNING) << "Received acknowledgement " << uuid
+                       << " for unknown status update";
+          return;
+        }
+
+        // Remove the corresponding update.
+        unacknowledgedUpdates.erase(uuid);
+
+        // Mark the corresponding task as acknowledged. An acknowledgement
+        // may be received after the task has already been removed from
+        // `containers`.
+        const TaskID taskId = event.acknowledged().task_id();
+        if (containers.contains(taskId)) {
+          containers.at(taskId)->acknowledged = true;
+        }
+
         break;
       }
 
@@ -258,9 +301,14 @@ protected:
       subscribe->add_unacknowledged_updates()->MergeFrom(update);
     }
 
-    // Send the unacknowledged tasks.
-    foreachvalue (const TaskInfo& task, unacknowledgedTasks) {
-      subscribe->add_unacknowledged_tasks()->MergeFrom(task);
+    // Send all unacknowledged tasks. We don't send unacknowledged terminated
+    // (and hence already removed from `containers`) tasks, because for such
+    // tasks `WAIT_NESTED_CONTAINER` call has already succeeded, meaning the
+    // agent knows about the tasks and corresponding containers.
+    foreachvalue (const Owned<Container>& container, containers) {
+      if (!container->acknowledged) {
+        subscribe->add_unacknowledged_tasks()->MergeFrom(container->taskInfo);
+      }
     }
 
     mesos->send(evolve(call));
@@ -334,6 +382,41 @@ protected:
         launch->mutable_container()->CopyFrom(task.container());
       }
 
+      // Currently, it is not possible to specify resources for nested
+      // containers (i.e., all resources are merged in the top level
+      // executor container). This means that any disk resources used by
+      // the task are mounted on the top level container. As a workaround,
+      // we set up the volume mapping allowing child containers to share
+      // the volumes from their parent containers sandbox.
+      foreach (const Resource& resource, task.resources()) {
+        // Ignore if there are no disk resources or if the
+        // disk resources did not specify a volume mapping.
+        if (!resource.has_disk() || !resource.disk().has_volume()) {
+          continue;
+        }
+
+        // Set `ContainerInfo.type` to 'MESOS' if the task did
+        // not specify a container.
+        if (!task.has_container()) {
+          launch->mutable_container()->set_type(ContainerInfo::MESOS);
+        }
+
+        const Volume& executorVolume = resource.disk().volume();
+
+        Volume* taskVolume = launch->mutable_container()->add_volumes();
+        taskVolume->set_mode(executorVolume.mode());
+        taskVolume->set_container_path(executorVolume.container_path());
+
+        Volume::Source* source = taskVolume->mutable_source();
+        source->set_type(Volume::Source::SANDBOX_PATH);
+
+        Volume::Source::SandboxPath* sandboxPath =
+          source->mutable_sandbox_path();
+
+        sandboxPath->set_type(Volume::Source::SandboxPath::PARENT);
+        sandboxPath->set_path(executorVolume.container_path());
+      }
+
       responses.push_back(post(connection.get(), call));
     }
 
@@ -399,33 +482,60 @@ protected:
       const TaskInfo& task = taskGroup.tasks().Get(index++);
       const TaskID& taskId = task.task_id();
 
-      unacknowledgedTasks[taskId] = task;
-      containers[taskId] = Owned<Container>(
-          new Container {containerId, taskId, taskGroup, None(), false, false});
+      containers[taskId] = Owned<Container>(new Container{
+        containerId,
+        task,
+        taskGroup,
+        None(),
+        None(),
+        None(),
+        None(),
+        false,
+        false,
+        false});
+
+      if (task.has_check()) {
+        // TODO(alexr): Add support for command checks.
+        CHECK_NE(CheckInfo::COMMAND, task.check().type())
+          << "Command checks are not supported yet";
+
+        Try<Owned<checks::Checker>> checker =
+          checks::Checker::create(
+              task.check(),
+              defer(self(), &Self::taskCheckUpdated, taskId, lambda::_1),
+              taskId,
+              None(),
+              vector<string>());
+
+        if (checker.isError()) {
+          // TODO(anand): Should we send a TASK_FAILED instead?
+          LOG(ERROR) << "Failed to create checker: " << checker.error();
+          _shutdown();
+          return;
+        }
+
+        containers.at(taskId)->checker = checker.get();
+      }
 
       if (task.has_health_check()) {
-        // TODO(anand): Add support for command health checks.
-        CHECK_NE(HealthCheck::COMMAND, task.health_check().type())
-          << "Command health checks are not supported yet";
-
-        Try<Owned<checks::HealthChecker>> _checker =
+        Try<Owned<checks::HealthChecker>> healthChecker =
           checks::HealthChecker::create(
               task.health_check(),
               launcherDirectory,
               defer(self(), &Self::taskHealthUpdated, lambda::_1),
               taskId,
-              None(),
-              vector<string>());
+              containerId,
+              agent);
 
-        if (_checker.isError()) {
+        if (healthChecker.isError()) {
           // TODO(anand): Should we send a TASK_FAILED instead?
           LOG(ERROR) << "Failed to create health checker: "
-                     << _checker.error();
+                     << healthChecker.error();
           _shutdown();
           return;
         }
 
-        checkers[taskId] = _checker.get();
+        containers.at(taskId)->healthChecker = healthChecker.get();
       }
 
       // Currently, the Mesos agent does not expose the mapping from
@@ -456,7 +566,8 @@ protected:
     // Send a TASK_RUNNING status update now that the task group has
     // been successfully launched.
     foreach (const TaskInfo& task, taskGroup.tasks()) {
-      update(task.task_id(), TASK_RUNNING);
+      const TaskStatus status = createTaskStatus(task.task_id(), TASK_RUNNING);
+      forward(status);
     }
 
     auto taskIds = [&taskGroup]() {
@@ -586,7 +697,7 @@ protected:
     auto retry_ = [this, container]() mutable {
       container->waiting->disconnect();
       container->waiting = None();
-      retry(connectionId.get(), container->taskId);
+      retry(connectionId.get(), container->taskInfo.task_id());
     };
 
     // It is possible that the response failed due to a network blip
@@ -627,15 +738,20 @@ protected:
       deserialize<agent::Response>(contentType, response->body);
     CHECK_SOME(waitResponse);
 
-    // If the task has been health checked, stop the associated checker.
-    //
-    // TODO(alexr): Once we support `TASK_KILLING` in this executor, health
-    // checking should be stopped right before sending the `TASK_KILLING`
-    // update to avoid subsequent `TASK_RUNNING` updates.
-    if (checkers.contains(taskId)) {
-      CHECK_NOTNULL(checkers.at(taskId).get());
-      checkers.at(taskId)->stop();
-      checkers.erase(taskId);
+    // If there is an associated checker with the task, stop it to
+    // avoid sending check updates after a terminal status update.
+    if (container->checker.isSome()) {
+      CHECK_NOTNULL(container->checker->get());
+      container->checker->get()->stop();
+      container->checker = None();
+    }
+
+    // If the task is health checked, pause the associated health checker
+    // to avoid sending health updates after a terminal status update.
+    if (container->healthChecker.isSome()) {
+      CHECK_NOTNULL(container->healthChecker->get());
+      container->healthChecker->get()->pause();
+      container->healthChecker = None();
     }
 
     TaskState taskState;
@@ -662,11 +778,18 @@ protected:
       message = "Command " + WSTRINGIFY(status.get());
     }
 
+    TaskStatus taskStatus = createTaskStatus(
+        taskId,
+        taskState,
+        None(),
+        message);
+
+    // Indicate that a task has been unhealthy upon termination.
     if (unhealthy) {
-      update(taskId, taskState, message, false);
-    } else {
-      update(taskId, taskState, message, None());
+      taskStatus.set_healthy(false);
     }
+
+    forward(taskStatus);
 
     CHECK(containers.contains(taskId));
     containers.erase(taskId);
@@ -716,7 +839,8 @@ protected:
 
         // Ignore if it's the same task that triggered this callback or
         // if the task is no longer active.
-        if (taskId == container->taskId || !containers.contains(taskId)) {
+        if (taskId == container->taskInfo.task_id() ||
+            !containers.contains(taskId)) {
           continue;
         }
 
@@ -738,12 +862,6 @@ protected:
     LOG(INFO) << "Shutting down";
 
     shuttingDown = true;
-
-    // Stop health checking all tasks because we are shutting down.
-    foreach (const Owned<checks::HealthChecker>& checker, checkers.values()) {
-      checker->stop();
-    }
-    checkers.clear();
 
     if (!launched) {
       _shutdown();
@@ -813,6 +931,26 @@ protected:
     CHECK(!container->killing);
     container->killing = true;
 
+    // If the task is checked, stop the associated checker.
+    //
+    // TODO(alexr): Once we support `TASK_KILLING` in this executor,
+    // consider continuing checking the task after sending `TASK_KILLING`.
+    if (container->checker.isSome()) {
+      CHECK_NOTNULL(container->checker->get());
+      container->checker->get()->stop();
+      container->checker = None();
+    }
+
+    // If the task is health checked, pause the associated health checker.
+    //
+    // TODO(alexr): Once we support `TASK_KILLING` in this executor,
+    // consider health checking the task after sending `TASK_KILLING`.
+    if (container->healthChecker.isSome()) {
+      CHECK_NOTNULL(container->healthChecker->get());
+      container->healthChecker->get()->pause();
+      container->healthChecker = None();
+    }
+
     LOG(INFO) << "Killing child container " << container->containerId;
 
     agent::Call call;
@@ -859,12 +997,77 @@ protected:
     kill(container);
   }
 
+  void taskCheckUpdated(
+      const TaskID& taskId,
+      const CheckStatusInfo& checkStatus)
+  {
+    // If the checked container has already been waited on,
+    // ignore the check update. This prevents us from sending
+    // `TASK_RUNNING` after a terminal status update.
+    if (!containers.contains(taskId)) {
+      VLOG(1) << "Received check update for terminated task"
+              << " '" << taskId << "'; ignoring";
+      return;
+    }
+
+    // If the checked container has already been asked to terminate,
+    // ignore the check update.
+    //
+    // TODO(alexr): Once we support `TASK_KILLING` in this executor,
+    // consider sending check updates after sending `TASK_KILLING`.
+    if (containers.at(taskId)->checker.isNone()) {
+      VLOG(1) << "Received check update for terminating task"
+              << " '" << taskId << "'; ignoring";
+      return;
+    }
+
+    LOG(INFO) << "Received check update '" << checkStatus
+              << "' for task '" << taskId << "'";
+
+    // Use the previous task status to preserve all attached information.
+    // We always send a `TASK_RUNNING` right after the task is launched.
+    CHECK_SOME(containers.at(taskId)->lastTaskStatus);
+    const TaskStatus status = protobuf::createTaskStatus(
+        containers.at(taskId)->lastTaskStatus.get(),
+        UUID::random(),
+        Clock::now().secs(),
+        None(),
+        None(),
+        None(),
+        TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
+        None(),
+        None(),
+        checkStatus);
+
+    forward(status);
+  }
+
   void taskHealthUpdated(const TaskHealthStatus& healthStatus)
   {
-    // This prevents us from sending `TASK_RUNNING` after a terminal status
-    // update, because we may receive an update from a health check scheduled
-    // before the task has been waited on.
-    if (!checkers.contains(healthStatus.task_id())) {
+    if (state == DISCONNECTED) {
+      VLOG(1) << "Ignoring task health update for task"
+              << " '" << healthStatus.task_id() << "',"
+              << " because the executor is not connected to the agent";
+      return;
+    }
+
+    // If the health checked container has already been waited on,
+    // ignore the health update. This prevents us from sending
+    // `TASK_RUNNING` after a terminal status update.
+    if (!containers.contains(healthStatus.task_id())) {
+      VLOG(1) << "Received task health update for terminated task"
+              << " '" << healthStatus.task_id() << "'; ignoring";
+      return;
+    }
+
+    // If the health checked container has already been asked to
+    // terminate, ignore the health update.
+    //
+    // TODO(alexr): Once we support `TASK_KILLING` in this executor,
+    // consider sending health updates after sending `TASK_KILLING`.
+    if (containers.at(healthStatus.task_id())->healthChecker.isNone()) {
+      VLOG(1) << "Received task health update for terminating task"
+              << " '" << healthStatus.task_id() << "'; ignoring";
       return;
     }
 
@@ -872,8 +1075,21 @@ protected:
               << " '" << healthStatus.task_id() << "', task is "
               << (healthStatus.healthy() ? "healthy" : "not healthy");
 
-    update(
-        healthStatus.task_id(), TASK_RUNNING, None(), healthStatus.healthy());
+    // Use the previous task status to preserve all attached information.
+    // We always send a `TASK_RUNNING` right after the task is launched.
+    CHECK_SOME(containers.at(healthStatus.task_id())->lastTaskStatus);
+    const TaskStatus status = protobuf::createTaskStatus(
+        containers.at(healthStatus.task_id())->lastTaskStatus.get(),
+        UUID::random(),
+        Clock::now().secs(),
+        None(),
+        None(),
+        None(),
+        None(),
+        None(),
+        healthStatus.healthy());
+
+    forward(status);
 
     if (healthStatus.kill_task()) {
       unhealthy = true;
@@ -882,38 +1098,72 @@ protected:
   }
 
 private:
-  void update(
+  // Use this helper to create a status update from scratch, i.e., without
+  // previously attached extra information like `data` or `check_status`.
+  TaskStatus createTaskStatus(
       const TaskID& taskId,
       const TaskState& state,
-      const Option<string>& message = None(),
-      const Option<bool>& healthy = None())
+      const Option<TaskStatus::Reason>& reason = None(),
+      const Option<string>& message = None())
   {
-    UUID uuid = UUID::random();
+    TaskStatus status = protobuf::createTaskStatus(
+        taskId,
+        state,
+        UUID::random(),
+        Clock::now().secs());
 
-    TaskStatus status;
-    status.mutable_task_id()->CopyFrom(taskId);
     status.mutable_executor_id()->CopyFrom(executorId);
-
-    status.set_state(state);
     status.set_source(TaskStatus::SOURCE_EXECUTOR);
-    status.set_uuid(uuid.toBytes());
-    status.set_timestamp(Clock::now().secs());
+
+    if (reason.isSome()) {
+      status.set_reason(reason.get());
+    }
 
     if (message.isSome()) {
       status.set_message(message.get());
     }
 
-    if (healthy.isSome()) {
-      status.set_healthy(healthy.get());
-    }
-
-    // Fill the container ID associated with this task.
     CHECK(containers.contains(taskId));
     const Owned<Container>& container = containers.at(taskId);
 
+    // TODO(alexr): Augment health information in a way similar to
+    // `CheckStatusInfo`. See MESOS-6417 for more details.
+
+    // If a check for the task has been defined, `check_status` field in each
+    // task status must be set to a valid `CheckStatusInfo` message even if
+    // there is no check status available yet.
+    if (container->taskInfo.has_check()) {
+      CheckStatusInfo checkStatusInfo;
+      checkStatusInfo.set_type(container->taskInfo.check().type());
+      switch (container->taskInfo.check().type()) {
+        case CheckInfo::COMMAND: {
+          checkStatusInfo.mutable_command();
+          break;
+        }
+
+        case CheckInfo::HTTP: {
+          checkStatusInfo.mutable_http();
+          break;
+        }
+
+        case CheckInfo::UNKNOWN: {
+          LOG(FATAL) << "UNKNOWN check type is invalid";
+          break;
+        }
+      }
+
+      status.mutable_check_status()->CopyFrom(checkStatusInfo);
+    }
+
+    // Fill the container ID associated with this task.
     ContainerStatus* containerStatus = status.mutable_container_status();
     containerStatus->mutable_container_id()->CopyFrom(container->containerId);
 
+    return status;
+  }
+
+  void forward(const TaskStatus& status)
+  {
     Call call;
     call.set_type(Call::UPDATE);
 
@@ -923,7 +1173,11 @@ private:
     call.mutable_update()->mutable_status()->CopyFrom(status);
 
     // Capture the status update.
-    unacknowledgedUpdates[uuid] = call.update();
+    unacknowledgedUpdates[UUID::fromBytes(status.uuid()).get()] = call.update();
+
+    // Overwrite the last task status.
+    CHECK(containers.contains(status.task_id()));
+    containers.at(status.task_id())->lastTaskStatus = status;
 
     mesos->send(evolve(call));
   }
@@ -938,6 +1192,10 @@ private:
     request.body = serialize(contentType, evolve(call));
     request.headers = {{"Accept", stringify(contentType)},
                        {"Content-Type", stringify(contentType)}};
+
+    if (authenticationToken.isSome()) {
+      request.headers["Authorization"] = "Bearer " + authenticationToken.get();
+    }
 
     // Only pipeline requests when there is an active connection.
     if (connection.isSome()) {
@@ -1034,12 +1292,9 @@ private:
   const ::URL agent; // Agent API URL.
   const string sandboxDirectory;
   const string launcherDirectory;
+  const Option<string> authenticationToken;
 
   LinkedHashMap<UUID, Call::Update> unacknowledgedUpdates;
-
-  // A task is considered unacknowledged if no status update
-  // acknowledgements have been received for it yet.
-  LinkedHashMap<TaskID, TaskInfo> unacknowledgedTasks;
 
   // Active child containers.
   LinkedHashMap<TaskID, Owned<Container>> containers;
@@ -1050,9 +1305,6 @@ private:
   // the stale instance. We initialize this to a new value upon receiving
   // a `connected()` callback.
   Option<UUID> connectionId;
-
-  // TODO(anand): Move the health checker information to the `Container` struct.
-  hashmap<TaskID, Owned<checks::HealthChecker>> checkers; // Health checkers.
 };
 
 } // namespace internal {
@@ -1147,13 +1399,20 @@ int main(int argc, char** argv)
   }
   sandboxDirectory = value.get();
 
+  Option<string> authenticationToken;
+  value = os::getenv("MESOS_EXECUTOR_AUTHENTICATION_TOKEN");
+  if (value.isSome()) {
+    authenticationToken = value.get();
+  }
+
   Owned<mesos::internal::DefaultExecutor> executor(
       new mesos::internal::DefaultExecutor(
           frameworkId,
           executorId,
           agent,
           sandboxDirectory,
-          flags.launcher_dir));
+          flags.launcher_dir,
+          authenticationToken));
 
   process::spawn(executor.get());
   process::wait(executor.get());

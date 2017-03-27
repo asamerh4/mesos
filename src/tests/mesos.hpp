@@ -34,6 +34,8 @@
 
 #include <mesos/v1/scheduler/scheduler.hpp>
 
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <mesos/authorizer/authorizer.hpp>
 
 #include <mesos/fetcher/fetcher.hpp>
@@ -361,13 +363,17 @@ using mesos::v1::TASK_GONE_BY_OPERATOR;
 using mesos::v1::TASK_UNKNOWN;
 
 using mesos::v1::AgentID;
+using mesos::v1::CheckInfo;
+using mesos::v1::CommandInfo;
 using mesos::v1::ContainerID;
 using mesos::v1::ContainerStatus;
+using mesos::v1::Environment;
 using mesos::v1::ExecutorID;
 using mesos::v1::ExecutorInfo;
 using mesos::v1::Filters;
 using mesos::v1::FrameworkID;
 using mesos::v1::FrameworkInfo;
+using mesos::v1::HealthCheck;
 using mesos::v1::InverseOffer;
 using mesos::v1::MachineID;
 using mesos::v1::Metric;
@@ -2136,6 +2142,17 @@ public:
       getObjectApprover, process::Future<process::Owned<ObjectApprover>>(
           const Option<authorization::Subject>& subject,
           const authorization::Action& action));
+};
+
+
+class MockSecretGenerator : public SecretGenerator
+{
+public:
+  MockSecretGenerator() = default;
+  virtual ~MockSecretGenerator() = default;
+
+  MOCK_METHOD1(generate, process::Future<Secret>(
+      const process::http::authentication::Principal& principal));
 };
 
 

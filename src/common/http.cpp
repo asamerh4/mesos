@@ -26,9 +26,11 @@
 #include <mesos/resources.hpp>
 
 #include <mesos/authentication/http/basic_authenticator_factory.hpp>
+#include <mesos/authentication/http/combined_authenticator.hpp>
 #include <mesos/authorizer/authorizer.hpp>
 #include <mesos/module/http_authenticator.hpp>
 
+#include <process/authenticator.hpp>
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
 #include <process/http.hpp>
@@ -58,11 +60,15 @@ using process::Failure;
 using process::Owned;
 
 using process::http::authentication::Authenticator;
+#ifdef USE_SSL_SOCKET
+using process::http::authentication::JWTAuthenticator;
+#endif // USE_SSL_SOCKET
 using process::http::authentication::Principal;
 
 using process::http::authorization::AuthorizationCallbacks;
 
 using mesos::http::authentication::BasicAuthenticatorFactory;
+using mesos::http::authentication::CombinedAuthenticator;
 
 namespace mesos {
 
@@ -938,72 +944,143 @@ bool approveViewRole(
   return approved.get();
 }
 
+namespace {
+
+Result<Authenticator*> createBasicAuthenticator(
+    const string& realm,
+    const string& authenticatorName,
+    const Option<Credentials>& credentials)
+{
+  if (credentials.isNone()) {
+    return Error(
+        "No credentials provided for the default '" +
+        string(internal::DEFAULT_BASIC_HTTP_AUTHENTICATOR) +
+        "' HTTP authenticator for realm '" + realm + "'");
+  }
+
+  LOG(INFO) << "Creating default '"
+            << internal::DEFAULT_BASIC_HTTP_AUTHENTICATOR
+            << "' HTTP authenticator for realm '" << realm << "'";
+
+  return BasicAuthenticatorFactory::create(realm, credentials.get());
+}
+
+
+#ifdef USE_SSL_SOCKET
+Result<Authenticator*> createJWTAuthenticator(
+    const string& realm,
+    const string& authenticatorName,
+    const Option<string>& secretKey)
+{
+  if (secretKey.isNone()) {
+    return Error(
+        "No secret key provided for the default '" +
+        string(internal::DEFAULT_JWT_HTTP_AUTHENTICATOR) +
+        "' HTTP authenticator for realm '" + realm + "'");
+  }
+
+  LOG(INFO) << "Creating default '"
+            << internal::DEFAULT_JWT_HTTP_AUTHENTICATOR
+            << "' HTTP authenticator for realm '" << realm << "'";
+
+  return new JWTAuthenticator(realm, secretKey.get());
+}
+#endif // USE_SSL_SOCKET
+
+
+Result<Authenticator*> createCustomAuthenticator(
+    const string& realm,
+    const string& authenticatorName)
+{
+  if (!modules::ModuleManager::contains<Authenticator>(authenticatorName)) {
+    return Error(
+        "HTTP authenticator '" + authenticatorName + "' not found. "
+        "Check the spelling (compare to '" +
+        string(internal::DEFAULT_BASIC_HTTP_AUTHENTICATOR) +
+        "') or verify that the authenticator was loaded "
+        "successfully (see --modules)");
+  }
+
+  LOG(INFO) << "Creating '" << authenticatorName << "' HTTP authenticator "
+            << "for realm '" << realm << "'";
+
+  return modules::ModuleManager::create<Authenticator>(authenticatorName);
+}
+
+} // namespace {
 
 Try<Nothing> initializeHttpAuthenticators(
     const string& realm,
-    const vector<string>& httpAuthenticatorNames,
-    const Option<Credentials>& credentials)
+    const vector<string>& authenticatorNames,
+    const Option<Credentials>& credentials,
+    const Option<string>& secretKey)
 {
-  if (httpAuthenticatorNames.empty()) {
-    return Error("No HTTP authenticator specified for realm '" + realm + "'");
+  if (authenticatorNames.empty()) {
+    return Error(
+        "No HTTP authenticators specified for realm '" + realm + "'");
   }
 
-  if (httpAuthenticatorNames.size() > 1) {
-    return Error("Multiple HTTP authenticators not supported");
-  }
+  Option<Authenticator*> authenticator;
 
-  Option<Authenticator*> httpAuthenticator;
-  if (httpAuthenticatorNames[0] == internal::DEFAULT_HTTP_AUTHENTICATOR) {
-    if (credentials.isNone()) {
-      return Error(
-          "No credentials provided for the default '" +
-          string(internal::DEFAULT_HTTP_AUTHENTICATOR) +
-          "' HTTP authenticator for realm '" + realm + "'");
+  if (authenticatorNames.size() == 1) {
+    Result<Authenticator*> authenticator_ = None();
+    if (authenticatorNames[0] == internal::DEFAULT_BASIC_HTTP_AUTHENTICATOR) {
+      authenticator_ =
+        createBasicAuthenticator(realm, authenticatorNames[0], credentials);
+#ifdef USE_SSL_SOCKET
+    } else if (
+        authenticatorNames[0] == internal::DEFAULT_JWT_HTTP_AUTHENTICATOR) {
+      authenticator_ =
+        createJWTAuthenticator(realm, authenticatorNames[0], secretKey);
+#endif // USE_SSL_SOCKET
+    } else {
+      authenticator_ = createCustomAuthenticator(realm, authenticatorNames[0]);
     }
 
-    LOG(INFO) << "Using default '" << internal::DEFAULT_HTTP_AUTHENTICATOR
-              << "' HTTP authenticator for realm '" << realm << "'";
-
-    Try<Authenticator*> authenticator =
-      BasicAuthenticatorFactory::create(realm, credentials.get());
-    if (authenticator.isError()) {
+    if (authenticator_.isError()) {
       return Error(
-          "Could not create HTTP authenticator module '" +
-          httpAuthenticatorNames[0] + "': " + authenticator.error());
+          "Failed to create HTTP authenticator module '" +
+          authenticatorNames[0] + "': " + authenticator_.error());
     }
 
-    httpAuthenticator = authenticator.get();
+    CHECK_SOME(authenticator_);
+    authenticator = authenticator_.get();
   } else {
-    if (!modules::ModuleManager::contains<Authenticator>(
-          httpAuthenticatorNames[0])) {
-      return Error(
-          "HTTP authenticator '" + httpAuthenticatorNames[0] +
-          "' not found. Check the spelling (compare to '" +
-          string(internal::DEFAULT_HTTP_AUTHENTICATOR) +
-          "') or verify that the authenticator was loaded "
-          "successfully (see --modules)");
+    // There are multiple authenticators loaded for this realm,
+    // so construct a `CombinedAuthenticator` to handle them.
+    vector<Owned<Authenticator>> authenticators;
+    foreach (const string& name, authenticatorNames) {
+      Result<Authenticator*> authenticator_ = None();
+      if (name == internal::DEFAULT_BASIC_HTTP_AUTHENTICATOR) {
+        authenticator_ = createBasicAuthenticator(realm, name, credentials);
+#ifdef USE_SSL_SOCKET
+      } else if (name == internal::DEFAULT_JWT_HTTP_AUTHENTICATOR) {
+        authenticator_ = createJWTAuthenticator(realm, name, secretKey);
+#endif // USE_SSL_SOCKET
+      } else {
+        authenticator_ = createCustomAuthenticator(realm, name);
+      }
+
+      if (authenticator_.isError()) {
+        return Error(
+            "Failed to create HTTP authenticator module '" +
+            name + "': " + authenticator_.error());
+      }
+
+      CHECK_SOME(authenticator_);
+      authenticators.push_back(Owned<Authenticator>(authenticator_.get()));
     }
 
-    Try<Authenticator*> module =
-      modules::ModuleManager::create<Authenticator>(httpAuthenticatorNames[0]);
-    if (module.isError()) {
-      return Error(
-          "Could not create HTTP authenticator module '" +
-          httpAuthenticatorNames[0] + "': " + module.error());
-    }
-    LOG(INFO) << "Using '" << httpAuthenticatorNames[0]
-              << "' HTTP authenticator for realm '" << realm << "'";
-    httpAuthenticator = module.get();
+    authenticator = new CombinedAuthenticator(realm, std::move(authenticators));
   }
 
-  CHECK(httpAuthenticator.isSome());
+  CHECK(authenticator.isSome());
 
-  // Ownership of the `httpAuthenticator` is passed to libprocess.
+  // Ownership of the authenticator is passed to libprocess.
   process::http::authentication::setAuthenticator(
-    realm, Owned<Authenticator>(httpAuthenticator.get()));
+      realm, Owned<Authenticator>(authenticator.get()));
 
   return Nothing();
 }
-
 
 }  // namespace mesos {

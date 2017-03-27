@@ -1701,6 +1701,19 @@ TEST(ResourcesTest, PrecisionRounding)
 }
 
 
+TEST(ResourcesTest, PrecisionVerySmallValue)
+{
+  Resources r1 = Resources::parse("cpus:2;mem:1024").get();
+  Resources r2 = Resources::parse("cpus:0.00001;mem:1").get();
+
+  Resources r3 = r1 - (r1 - r2);
+  EXPECT_TRUE(r3.contains(r2));
+
+  Resources r4 = Resources::parse("cpus:0;mem:1").get();
+  EXPECT_EQ(r2, r4);
+}
+
+
 TEST(ReservedResourcesTest, Validation)
 {
   // Unreserved.
@@ -2389,83 +2402,6 @@ TEST(ResourcesOperationTest, CreateSharedPersistentVolume)
   create2.mutable_create()->add_volumes()->CopyFrom(volume2);
 
   EXPECT_ERROR(total.apply(create2));
-}
-
-
-// Operations can contain allocated or unallocated resources.
-// When applying an operation, `Resources::apply()` will handle
-// the case where the operation contains allocated resources and
-// is being applied to unallocated resources. Here the allocation
-// info is simply ignored.
-//
-// TODO(bmahler): Instead of having `Resources::apply()` handle
-// this, consider requiring that callers strip the allocation
-// info when applying an operation on allocated resources to
-// resources that are unallocated.
-TEST(ResourcesOperationTest, ApplyWithAllocationInfo)
-{
-  auto unallocated = [](const Resources& resources) {
-    Resources result = resources;
-    result.unallocate();
-    return result;
-  };
-
-  // Apply a RESERVE -> CREATE -> DESTROY -> UNRESERVE sequence
-  // of operations with allocated resources to unallocated resources.
-  Resources total = Resources::parse("cpus:1;mem:500;disk:1000").get();
-
-  // Apply the RESERVE with allocated resources.
-  Offer::Operation reserve;
-  reserve.set_type(Offer::Operation::RESERVE);
-  reserve.mutable_reserve()->mutable_resources()->CopyFrom(total);
-
-  for (int i = 0; i < reserve.reserve().resources_size(); ++i) {
-    Resource* resource = reserve.mutable_reserve()->mutable_resources(i);
-
-    resource->mutable_reservation();
-    resource->set_role("role");
-
-    resource->mutable_allocation_info()->set_role("role");
-  }
-
-  Try<Resources> applied = total.apply(reserve);
-  EXPECT_SOME_EQ(unallocated(reserve.reserve().resources()), applied);
-
-  // Apply the CREATE with allocated resources.
-  Resources disk = Resources(reserve.reserve().resources()).filter(
-      [](const Resource& r) { return r.name() == "disk"; });
-  Resources nonDisk = Resources(reserve.reserve().resources()).filter(
-      [](const Resource& r) { return r.name() != "disk"; });
-
-  ASSERT_EQ(1u, disk.size());
-
-  Resource volume = *disk.begin();
-  volume.mutable_disk()->mutable_persistence()->set_id("id");
-
-  Offer::Operation create;
-  create.set_type(Offer::Operation::CREATE);
-  create.mutable_create()->add_volumes()->CopyFrom(volume);
-
-  applied = applied->apply(create);
-  EXPECT_SOME_EQ(unallocated(nonDisk + volume), applied);
-
-  // Apply the DESTROY with allocated resources.
-  Offer::Operation destroy;
-  destroy.set_type(Offer::Operation::DESTROY);
-  destroy.mutable_destroy()->mutable_volumes()->CopyFrom(
-      create.create().volumes());
-
-  applied = applied->apply(destroy);
-  EXPECT_SOME_EQ(unallocated(reserve.reserve().resources()), applied);
-
-  // Apply the UNRESERVE with allocated resources.
-  Offer::Operation unreserve;
-  unreserve.set_type(Offer::Operation::UNRESERVE);
-  unreserve.mutable_unreserve()->mutable_resources()->CopyFrom(
-      reserve.reserve().resources());
-
-  applied = applied->apply(unreserve);
-  EXPECT_SOME_EQ(total, applied);
 }
 
 
@@ -3308,6 +3244,37 @@ TEST_P(Resources_Contains_BENCHMARK_Test, Contains)
        << abbreviate(stringify(superset), 50)
        << " contains subset resources " << abbreviate(stringify(subset), 50)
        << endl;
+}
+
+
+class Resources_Parse_BENCHMARK_Test
+  : public MesosTest,
+    public ::testing::WithParamInterface<size_t> {};
+
+
+INSTANTIATE_TEST_CASE_P(
+    Resources_Parse,
+    Resources_Parse_BENCHMARK_Test,
+    ::testing::Values(1000U, 10000U, 50000U));
+
+
+TEST_P(Resources_Parse_BENCHMARK_Test, Parse)
+{
+  const size_t iterationCount = GetParam();
+  const size_t resourcesCount = 100;
+
+  vector<string> rawResources;
+
+  for (size_t i = 0; i < resourcesCount; i++) {
+    rawResources.push_back("res" + stringify(i) + ":" + stringify(i));
+  }
+
+  string inputString = strings::join(";", rawResources);
+
+  for (size_t i = 0; i < iterationCount; i++) {
+    Try<Resources> resource = Resources::parse(inputString);
+    EXPECT_SOME(resource);
+  }
 }
 
 } // namespace tests {

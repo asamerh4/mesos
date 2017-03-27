@@ -249,6 +249,11 @@ std::ostream& operator<<(
     const CapabilityInfo& capabilityInfo);
 
 
+std::ostream& operator<<(
+    std::ostream& stream,
+    const CheckStatusInfo& checkStatusInfo);
+
+
 std::ostream& operator<<(std::ostream& stream, const ContainerID& containerId);
 
 
@@ -306,12 +311,18 @@ std::ostream& operator<<(
     const std::vector<TaskID>& taskIds);
 
 
+std::ostream& operator<<(std::ostream& stream, const CheckInfo::Type& type);
+
+
 std::ostream& operator<<(
     std::ostream& stream,
     const FrameworkInfo::Capability& capability);
 
 
 std::ostream& operator<<(std::ostream& stream, const Image::Type& imageType);
+
+
+std::ostream& operator<<(std::ostream& stream, const Secret::Type& secretType);
 
 
 template <typename T>

@@ -342,6 +342,13 @@ mesos::internal::slave::Flags::Flags()
       "terminations may occur.",
       DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD);
 
+#ifdef USE_SSL_SOCKET
+  add(&Flags::executor_secret_key,
+      "executor_secret_key",
+      "The key used when generating executor secrets. This flag is only\n"
+      "available when Mesos is built with SSL support.");
+#endif // USE_SSL_SOCKET
+
   add(&Flags::gc_delay,
       "gc_delay",
       "Maximum amount of time to wait before cleaning up\n"
@@ -869,11 +876,8 @@ mesos::internal::slave::Flags::Flags()
       "http_authenticators",
       "HTTP authenticator implementation to use when handling requests to\n"
       "authenticated endpoints. Use the default\n"
-      "`" + string(DEFAULT_HTTP_AUTHENTICATOR) + "`, or load an alternate\n"
-      "HTTP authenticator module using `--modules`.\n"
-      "\n"
-      "Currently there is no support for multiple HTTP authenticators.",
-      DEFAULT_HTTP_AUTHENTICATOR);
+      "`" + string(DEFAULT_BASIC_HTTP_AUTHENTICATOR) + "`, or load an\n"
+      "alternate HTTP authenticator module using `--modules`.");
 
   add(&Flags::authenticate_http_readwrite,
       "authenticate_http_readwrite",
@@ -888,6 +892,15 @@ mesos::internal::slave::Flags::Flags()
       "supporting authentication are allowed. If `false`, unauthenticated\n"
       "requests to such HTTP endpoints are also allowed.",
       false);
+
+#ifdef USE_SSL_SOCKET
+  add(&Flags::authenticate_http_executors,
+      "authenticate_http_executors",
+      "If `true`, only authenticated requests for the HTTP executor API are\n"
+      "allowed. If `false`, unauthenticated requests are also allowed. This\n"
+      "flag is only available when Mesos is built with SSL support.",
+      false);
+#endif // USE_SSL_SOCKET
 
   add(&Flags::http_credentials,
       "http_credentials",

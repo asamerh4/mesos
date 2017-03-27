@@ -208,6 +208,13 @@ slave::Flags MesosTest::CreateSlaveFlags()
   flags.authenticate_http_readonly = true;
   flags.authenticate_http_readwrite = true;
 
+#ifdef USE_SSL_SOCKET
+  // Executor authentication currently has SSL as a dependency, so we
+  // cannot enable it if Mesos was not built with SSL support.
+  flags.authenticate_http_executors = true;
+  flags.executor_secret_key = "secret_key";
+#endif // USE_SSL_SOCKET
+
   {
     // Create a default HTTP credentials file.
     const string& path = path::join(directory.get(), "http_credentials");
@@ -565,9 +572,6 @@ slave::Flags ContainerizerTest<slave::MesosContainerizer>::CreateSlaveFlags()
     flags.isolation = "cgroups/cpu,cgroups/mem";
     flags.cgroups_hierarchy = baseHierarchy;
     flags.cgroups_root = TEST_CGROUPS_ROOT + "_" + UUID::random().toString();
-
-    // Enable putting the slave into memory and cpuacct cgroups.
-    flags.agent_subsystems = "memory,cpuacct";
   } else {
     flags.isolation = "posix/cpu,posix/mem";
   }

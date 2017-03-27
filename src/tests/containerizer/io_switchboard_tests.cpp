@@ -31,6 +31,8 @@
 #include <stout/protobuf.hpp>
 #include <stout/uuid.hpp>
 
+#include <stout/os/constants.hpp>
+
 #include <mesos/http.hpp>
 #include <mesos/mesos.hpp>
 
@@ -162,7 +164,7 @@ protected:
 
 TEST_F(IOSwitchboardServerTest, RedirectLog)
 {
-  Try<int> nullFd = os::open("/dev/null", O_RDWR);
+  Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
 
   Try<std::array<int, 2>> stdoutPipe_ = os::pipe();
@@ -250,7 +252,7 @@ TEST_F(IOSwitchboardServerTest, RedirectLog)
 
 TEST_F(IOSwitchboardServerTest, AttachOutput)
 {
-  Try<int> nullFd = os::open("/dev/null", O_RDWR);
+  Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
 
   string stdoutPath = path::join(sandbox.get(), "stdout");
@@ -366,7 +368,7 @@ TEST_F(IOSwitchboardServerTest, SendHeartbeat)
 
   const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
 
-  Try<int> nullFd = os::open("/dev/null", O_RDWR);
+  Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
 
   Duration heartbeat = Milliseconds(10);
@@ -473,7 +475,7 @@ TEST_F(IOSwitchboardServerTest, AttachInput)
 
   const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
 
-  Try<int> nullFd = os::open("/dev/null", O_RDWR);
+  Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
 
   string stdinPath = path::join(sandbox.get(), "stdin");
@@ -604,7 +606,7 @@ TEST_F(IOSwitchboardServerTest, ReceiveHeartbeat)
 
   const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
 
-  Try<int> nullFd = os::open("/dev/null", O_RDWR);
+  Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
 
   string socketPath = path::join(sandbox.get(), "mesos-io-switchboard");
@@ -708,9 +710,6 @@ TEST_F(IOSwitchboardTest, ContainerAttach)
   slave::Flags flags = CreateSlaveFlags();
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
-#ifdef __linux__
-  flags.agent_subsystems = None();
-#endif
 
   Fetcher fetcher;
 
@@ -777,9 +776,6 @@ TEST_F(IOSwitchboardTest, OutputRedirectionWithTTY)
   slave::Flags flags = CreateSlaveFlags();
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
-#ifdef __linux__
-  flags.agent_subsystems = None();
-#endif
 
   Fetcher fetcher;
 
@@ -845,9 +841,6 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
   slave::Flags flags = CreateSlaveFlags();
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
-#ifdef __linux__
-  flags.agent_subsystems = None();
-#endif
 
   Fetcher fetcher;
 
@@ -943,9 +936,6 @@ TEST_F(IOSwitchboardTest, DISABLED_RecoverThenKillSwitchboardContainerDestroyed)
   slave::Flags flags = CreateSlaveFlags();
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
-#ifdef __linux__
-  flags.agent_subsystems = None();
-#endif
 
   Fetcher fetcher;
 
@@ -1067,9 +1057,6 @@ TEST_F(IOSwitchboardTest, ContainerAttachAfterSlaveRestart)
   slave::Flags flags = CreateSlaveFlags();
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
-#ifdef __linux__
-  flags.agent_subsystems = None();
-#endif
 
   Fetcher fetcher;
 

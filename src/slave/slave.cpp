@@ -31,6 +31,8 @@
 
 #include <mesos/type_utils.hpp>
 
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <mesos/module/authenticatee.hpp>
 
 #include <process/async.hpp>
@@ -51,35 +53,35 @@
 #include <stout/fs.hpp>
 #include <stout/lambda.hpp>
 #include <stout/net.hpp>
+#include <stout/numify.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
-
-#ifdef __linux__
-#include <stout/proc.hpp>
-#endif // __linux__
-#include <stout/numify.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 #include <stout/uuid.hpp>
 #include <stout/utils.hpp>
 
-#ifdef __linux__
-#include "linux/cgroups.hpp"
-#include "linux/fs.hpp"
-#endif // __linux__
-
 #include "authentication/cram_md5/authenticatee.hpp"
+
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
 
 #include "common/build.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/resources_utils.hpp"
 #include "common/status_utils.hpp"
+#include "common/validation.hpp"
 
 #include "credentials/credentials.hpp"
 
 #include "hook/manager.hpp"
+
+#ifdef __linux__
+#include "linux/fs.hpp"
+#endif // __linux__
 
 #include "logging/logging.hpp"
 
@@ -102,6 +104,12 @@
 #endif // __WINDOWS__
 
 using google::protobuf::RepeatedPtrField;
+
+using mesos::SecretGenerator;
+
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
 
 using mesos::authorization::createSubject;
 
@@ -180,7 +188,8 @@ Slave::Slave(const string& id,
     executorDirectoryMaxAllowedAge(age(0)),
     resourceEstimator(_resourceEstimator),
     qosController(_qosController),
-    authorizer(_authorizer) {}
+    authorizer(_authorizer),
+    secretGenerator(nullptr) {}
 
 
 Slave::~Slave()
@@ -195,6 +204,8 @@ Slave::~Slave()
   }
 
   delete authenticatee;
+
+  delete secretGenerator;
 }
 
 void Slave::signaled(int signal, int uid)
@@ -223,116 +234,6 @@ void Slave::initialize()
                  << " IP address.\n"
                  << "**************************************************";
   }
-
-#ifdef __linux__
-  // Move the slave into its own cgroup for each of the specified
-  // subsystems.
-  //
-  // NOTE: Any subsystem configuration is inherited from the mesos
-  // root cgroup for that subsystem, e.g., by default the memory
-  // cgroup will be unlimited.
-  //
-  // TODO(jieyu): Make sure the corresponding cgroup isolator is
-  // enabled so that the container processes are moved to different
-  // cgroups than the agent cgroup.
-  if (flags.agent_subsystems.isSome()) {
-    foreach (const string& subsystem,
-            strings::tokenize(flags.agent_subsystems.get(), ",")) {
-      LOG(INFO) << "Moving agent process into its own cgroup for"
-                << " subsystem: " << subsystem;
-
-      // Ensure the subsystem is mounted and the Mesos root cgroup is
-      // present.
-      Try<string> hierarchy = cgroups::prepare(
-          flags.cgroups_hierarchy,
-          subsystem,
-          flags.cgroups_root);
-
-      if (hierarchy.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Failed to prepare cgroup " << flags.cgroups_root
-          << " for subsystem " << subsystem << ": " << hierarchy.error();
-      }
-
-      // Create a cgroup for the slave.
-      string cgroup = path::join(flags.cgroups_root, "slave");
-
-      Try<bool> exists = cgroups::exists(hierarchy.get(), cgroup);
-      if (exists.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Failed to find cgroup " << cgroup
-          << " for subsystem " << subsystem
-          << " under hierarchy " << hierarchy.get()
-          << " for agent: " << exists.error();
-      }
-
-      if (!exists.get()) {
-        Try<Nothing> create = cgroups::create(hierarchy.get(), cgroup);
-        if (create.isError()) {
-          EXIT(EXIT_FAILURE)
-            << "Failed to create cgroup " << cgroup
-            << " for subsystem " << subsystem
-            << " under hierarchy " << hierarchy.get()
-            << " for agent: " << create.error();
-        }
-      }
-
-      // Exit if there are processes running inside the cgroup - this
-      // indicates a prior slave (or child process) is still running.
-      Try<set<pid_t>> processes = cgroups::processes(hierarchy.get(), cgroup);
-      if (processes.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Failed to check for existing threads in cgroup " << cgroup
-          << " for subsystem " << subsystem
-          << " under hierarchy " << hierarchy.get()
-          << " for agent: " << processes.error();
-      }
-
-      // Log if there are any processes in the slave's cgroup. They
-      // may be transient helper processes like 'perf' or 'du',
-      // ancillary processes like 'docker log' or possibly a stuck
-      // slave.
-      // TODO(idownes): Generally, it's not a problem if there are
-      // processes running in the slave's cgroup, though any resources
-      // consumed by those processes are accounted to the slave. Where
-      // applicable, transient processes should be configured to
-      // terminate if the slave exits; see example usage for perf in
-      // isolators/cgroups/perf.cpp. Consider moving ancillary
-      // processes to a different cgroup, e.g., moving 'docker log' to
-      // the container's cgroup.
-      if (!processes.get().empty()) {
-        // For each process, we print its pid as well as its command
-        // to help triaging.
-        vector<string> infos;
-        foreach (pid_t pid, processes.get()) {
-          Result<os::Process> proc = os::process(pid);
-
-          // Only print the command if available.
-          if (proc.isSome()) {
-            infos.push_back(stringify(pid) + " '" + proc.get().command + "'");
-          } else {
-            infos.push_back(stringify(pid));
-          }
-        }
-
-        LOG(INFO) << "An agent (or child process) is still running, please"
-                  << " consider checking the following process(es) listed in "
-                  << path::join(hierarchy.get(), cgroup, "cgroups.proc")
-                  << ":\n" << strings::join("\n", infos);
-      }
-
-      // Move all of our threads into the cgroup.
-      Try<Nothing> assign = cgroups::assign(hierarchy.get(), cgroup, getpid());
-      if (assign.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Failed to move agent into cgroup " << cgroup
-          << " for subsystem " << subsystem
-          << " under hierarchy " << hierarchy.get()
-          << " for agent: " << assign.error();
-      }
-    }
-  }
-#endif // __linux__
 
   if (flags.registration_backoff_factor > REGISTER_RETRY_INTERVAL_MAX) {
     EXIT(EXIT_FAILURE)
@@ -375,11 +276,50 @@ void Slave::initialize()
     httpCredentials = credentials.get();
   }
 
+  string httpAuthenticators;
+  if (flags.http_authenticators.isSome()) {
+    httpAuthenticators = flags.http_authenticators.get();
+#ifdef USE_SSL_SOCKET
+  } else if (flags.authenticate_http_executors) {
+    httpAuthenticators =
+      string(DEFAULT_BASIC_HTTP_AUTHENTICATOR) + "," +
+      string(DEFAULT_JWT_HTTP_AUTHENTICATOR);
+#endif // USE_SSL_SOCKET
+  } else {
+    httpAuthenticators = DEFAULT_BASIC_HTTP_AUTHENTICATOR;
+  }
+
+  Option<string> secretKey;
+#ifdef USE_SSL_SOCKET
+  if (flags.executor_secret_key.isSome()) {
+    secretKey = flags.executor_secret_key.get();
+    secretGenerator = new JWTSecretGenerator(secretKey.get());
+  }
+
+  if (flags.authenticate_http_executors) {
+    if (flags.executor_secret_key.isNone()) {
+      EXIT(EXIT_FAILURE) << "--executor_secret_key must be specified when "
+                         << "--authenticate_http_executors is set to true";
+    }
+
+    Try<Nothing> result = initializeHttpAuthenticators(
+        EXECUTOR_HTTP_AUTHENTICATION_REALM,
+        strings::split(httpAuthenticators, ","),
+        httpCredentials,
+        secretKey);
+
+    if (result.isError()) {
+      EXIT(EXIT_FAILURE) << result.error();
+    }
+  }
+#endif // USE_SSL_SOCKET
+
   if (flags.authenticate_http_readonly) {
     Try<Nothing> result = initializeHttpAuthenticators(
         READONLY_HTTP_AUTHENTICATION_REALM,
-        strings::split(flags.http_authenticators, ","),
-        httpCredentials);
+        strings::split(httpAuthenticators, ","),
+        httpCredentials,
+        secretKey);
 
     if (result.isError()) {
       EXIT(EXIT_FAILURE) << result.error();
@@ -389,8 +329,9 @@ void Slave::initialize()
   if (flags.authenticate_http_readwrite) {
     Try<Nothing> result = initializeHttpAuthenticators(
         READWRITE_HTTP_AUTHENTICATION_REALM,
-        strings::split(flags.http_authenticators, ","),
-        httpCredentials);
+        strings::split(httpAuthenticators, ","),
+        httpCredentials,
+        secretKey);
 
     if (result.isError()) {
       EXIT(EXIT_FAILURE) << result.error();
@@ -618,10 +559,7 @@ void Slave::initialize()
       &FrameworkToExecutorMessage::data);
 
   install<UpdateFrameworkMessage>(
-      &Slave::updateFramework,
-      &UpdateFrameworkMessage::framework_id,
-      &UpdateFrameworkMessage::pid,
-      &UpdateFrameworkMessage::framework_info);
+      &Slave::updateFramework);
 
   install<CheckpointResourcesMessage>(
       &Slave::checkpointResources,
@@ -683,10 +621,12 @@ void Slave::initialize()
         options);
 
   route("/api/v1/executor",
+        EXECUTOR_HTTP_AUTHENTICATION_REALM,
         Http::EXECUTOR_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<Principal>& principal) {
           Http::log(request);
-          return http.executor(request);
+          return http.executor(request, principal);
         });
 
   // TODO(ijimenez): Remove this endpoint at the end of the
@@ -1774,6 +1714,8 @@ void Slave::_run(
     const Option<TaskInfo>& task,
     const Option<TaskGroupInfo>& taskGroup)
 {
+  // TODO(anindya_sinha): Consider refactoring the initial steps common
+  // to `_run()` and `__run()`.
   CHECK_NE(task.isSome(), taskGroup.isSome())
     << "Either task or task group should be set but not both";
 
@@ -1787,10 +1729,6 @@ void Slave::_run(
   }
 
   const FrameworkID& frameworkId = frameworkInfo.id();
-
-  LOG(INFO) << "Launching " << taskOrTaskGroup(task, taskGroup)
-            << " for framework " << frameworkId;
-
   Framework* framework = getFramework(frameworkId);
   if (framework == nullptr) {
     LOG(WARNING) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
@@ -1801,27 +1739,200 @@ void Slave::_run(
 
   const ExecutorID& executorId = executorInfo.executor_id();
 
+  // We don't send a status update here because a terminating
+  // framework cannot send acknowledgements.
+  if (framework->state == Framework::TERMINATING) {
+    LOG(WARNING) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
+                 << " of framework " << frameworkId
+                 << " because the framework is terminating";
+
+    // Although we cannot send a status update in this case, we remove
+    // the affected tasks from the pending tasks.
+    foreach (const TaskInfo& _task, tasks) {
+      framework->removePendingTask(_task, executorInfo);
+    }
+
+    if (framework->executors.empty() && framework->pending.empty()) {
+      removeFramework(framework);
+    }
+
+    return;
+  }
+
+  // If any of the tasks in the task group have been killed in the interim,
+  // we send a TASK_KILLED for all the other tasks in the group.
+  bool killed = false;
+  foreach (const TaskInfo& _task, tasks) {
+    if (!framework->pending.contains(executorId) ||
+        !framework->pending.at(executorId).contains(_task.task_id())) {
+      killed = true;
+      break;
+    }
+  }
+
+  if (killed) {
+    LOG(WARNING) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
+                 << " of framework " << frameworkId
+                 << " because it has been killed in the meantime";
+
+    foreach (const TaskInfo& _task, tasks) {
+      framework->removePendingTask(_task, executorInfo);
+
+      const StatusUpdate update = protobuf::createStatusUpdate(
+          frameworkId,
+          info.id(),
+          _task.task_id(),
+          TASK_KILLED,
+          TaskStatus::SOURCE_SLAVE,
+          UUID::random(),
+          "Task killed before it was launched");
+
+      // TODO(vinod): Ensure that the status update manager reliably
+      // delivers this update. Currently, we don't guarantee this
+      // because removal of the framework causes the status update
+      // manager to stop retrying for its un-acked updates.
+      statusUpdate(update, UPID());
+    }
+
+    if (framework->executors.empty() && framework->pending.empty()) {
+      removeFramework(framework);
+    }
+
+    return;
+  }
+
+  CHECK(!future.isDiscarded());
+
+  if (!future.isReady()) {
+    LOG(ERROR) << "Failed to unschedule directories scheduled for gc: "
+               << (future.isFailed() ? future.failure() : "future discarded");
+
+    // We report TASK_DROPPED to the framework because the task was
+    // never launched. For non-partition-aware frameworks, we report
+    // TASK_LOST for backward compatibility.
+    mesos::TaskState taskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            frameworkInfo, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      taskState = TASK_LOST;
+    }
+
+    foreach (const TaskInfo& _task, tasks) {
+      framework->removePendingTask(_task, executorInfo);
+
+      const StatusUpdate update = protobuf::createStatusUpdate(
+          frameworkId,
+          info.id(),
+          _task.task_id(),
+          taskState,
+          TaskStatus::SOURCE_SLAVE,
+          UUID::random(),
+          "Could not launch the task because we failed to unschedule"
+          " directories scheduled for gc",
+          TaskStatus::REASON_GC_ERROR);
+
+      // TODO(vinod): Ensure that the status update manager reliably
+      // delivers this update. Currently, we don't guarantee this
+      // because removal of the framework causes the status update
+      // manager to stop retrying for its un-acked updates.
+      statusUpdate(update, UPID());
+    }
+
+    if (framework->executors.empty() && framework->pending.empty()) {
+      removeFramework(framework);
+    }
+
+    return;
+  }
+
+  // Authorize the task or tasks (as in a task group) to ensure that the
+  // task user is allowed to launch tasks on the agent. If authorization
+  // fails, the task (or all tasks in a task group) are not launched.
+  list<Future<bool>> authorizations;
+
+  LOG(INFO) << "Authorizing " << taskOrTaskGroup(task, taskGroup)
+            << " for framework " << frameworkId;
+
+  foreach (const TaskInfo& _task, tasks) {
+    authorizations.push_back(authorizeTask(_task, frameworkInfo));
+  }
+
+  collect(authorizations)
+    .onAny(defer(self(),
+                 &Self::__run,
+                 lambda::_1,
+                 frameworkInfo,
+                 executorInfo,
+                 task,
+                 taskGroup));
+}
+
+
+void Slave::__run(
+    const Future<list<bool>>& future,
+    const FrameworkInfo& frameworkInfo,
+    const ExecutorInfo& executorInfo,
+    const Option<TaskInfo>& task,
+    const Option<TaskGroupInfo>& taskGroup)
+{
+  CHECK_NE(task.isSome(), taskGroup.isSome())
+    << "Either task or task group should be set but not both";
+
+  vector<TaskInfo> tasks;
+  if (task.isSome()) {
+    tasks.push_back(task.get());
+  } else {
+    foreach (const TaskInfo& _task, taskGroup->tasks()) {
+      tasks.push_back(_task);
+    }
+  }
+
+  const FrameworkID& frameworkId = frameworkInfo.id();
+  Framework* framework = getFramework(frameworkId);
+  if (framework == nullptr) {
+    LOG(WARNING) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
+                 << " because the framework " << frameworkId
+                 << " does not exist";
+    return;
+  }
+
+  const ExecutorID& executorId = executorInfo.executor_id();
+
+  // We don't send a status update here because a terminating
+  // framework cannot send acknowledgements.
+  if (framework->state == Framework::TERMINATING) {
+    LOG(WARNING) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
+                 << " of framework " << frameworkId
+                 << " because the framework is terminating";
+
+    // Although we cannot send a status update in this case, we remove
+    // the affected tasks from the list of pending tasks.
+    foreach (const TaskInfo& _task, tasks) {
+      framework->removePendingTask(_task, executorInfo);
+    }
+
+    if (framework->executors.empty() && framework->pending.empty()) {
+      removeFramework(framework);
+    }
+
+    return;
+  }
+
   // Remove the task/task group from being pending. If any of the
   // tasks in the task group have been killed in the interim, we
   // send a TASK_KILLED for all the other tasks in the group.
   bool killed = false;
   foreach (const TaskInfo& _task, tasks) {
-    if (framework->pending.contains(executorId) &&
-        framework->pending[executorId].contains(_task.task_id())) {
-      framework->pending[executorId].erase(_task.task_id());
-      if (framework->pending[executorId].empty()) {
-        framework->pending.erase(executorId);
-        // NOTE: Ideally we would perform the following check here:
-        //
-        //   if (framework->executors.empty() &&
-        //       framework->pending.empty()) {
-        //     removeFramework(framework);
-        //   }
-        //
-        // However, we need 'framework' to stay valid for the rest of
-        // this function. As such, we perform the check before each of
-        // the 'return' statements below.
-      }
+    if (framework->removePendingTask(_task, executorInfo)) {
+      // NOTE: Ideally we would perform the following check here:
+      //
+      //   if (framework->executors.empty() &&
+      //       framework->pending.empty()) {
+      //     removeFramework(framework);
+      //   }
+      //
+      // However, we need 'framework' to stay valid for the rest of
+      // this function. As such, we perform the check before each of
+      // the 'return' statements below.
     } else {
       killed = true;
     }
@@ -1844,7 +1955,7 @@ void Slave::_run(
       statusUpdate(update, UPID());
     }
 
-    // Refer to the comment after 'framework->pending.erase' above
+    // Refer to the comment after 'framework->removePendingTask' above
     // for why we need this.
     if (framework->executors.empty() && framework->pending.empty()) {
       removeFramework(framework);
@@ -1853,55 +1964,70 @@ void Slave::_run(
     return;
   }
 
-  // We don't send a status update here because a terminating
-  // framework cannot send acknowledgements.
-  if (framework->state == Framework::TERMINATING) {
-    LOG(WARNING) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
-                 << " of framework " << frameworkId
-                 << " because the framework is terminating";
+  CHECK(!future.isDiscarded());
 
-    // Refer to the comment after 'framework->pending.erase' above
-    // for why we need this.
-    if (framework->executors.empty() && framework->pending.empty()) {
-      removeFramework(framework);
-    }
-
-    return;
-  }
-
+  // Validate that the task (or tasks in case of task group) are authorized
+  // to be run on this agent.
+  Option<Error> error = None();
   if (!future.isReady()) {
-    LOG(ERROR) << "Failed to unschedule directories scheduled for gc: "
-               << (future.isFailed() ? future.failure() : "future discarded");
+    error = Error("Failed to authorize " + taskOrTaskGroup(task, taskGroup) +
+                  ": " + future.failure());
+  }
 
-    // We report TASK_DROPPED to the framework because the task was
-    // never launched. For non-partition-aware frameworks, we report
-    // TASK_LOST for backward compatibility.
-    mesos::TaskState taskState = TASK_DROPPED;
-    if (!protobuf::frameworkHasCapability(
-            frameworkInfo, FrameworkInfo::Capability::PARTITION_AWARE)) {
-      taskState = TASK_LOST;
+  if (error.isNone()) {
+    list<bool> authorizations = future.get();
+
+    foreach (const TaskInfo& _task, tasks) {
+      bool authorized = authorizations.front();
+      authorizations.pop_front();
+
+      // If authorization for this task fails, we fail all tasks (in case of
+      // a task group) with this specific error.
+      if (!authorized) {
+        string user = frameworkInfo.user();
+
+        if (_task.has_command() && _task.command().has_user()) {
+          user = _task.command().user();
+        } else if (executorInfo.has_command() &&
+                   executorInfo.command().has_user()) {
+          user = executorInfo.command().user();
+        }
+
+        error = Error("Task '" + stringify(_task.task_id()) + "'"
+                      " is not authorized to launch as"
+                      " user '" + user + "'");
+
+        break;
+      }
     }
+  }
+
+  // For failed authorization, we send a TASK_ERROR status update for
+  // all tasks.
+  if (error.isSome()) {
+    const TaskStatus::Reason reason = task.isSome()
+      ? TaskStatus::REASON_TASK_UNAUTHORIZED
+      : TaskStatus::REASON_TASK_GROUP_UNAUTHORIZED;
+
+    LOG(ERROR) << "Ignoring running " << taskOrTaskGroup(task, taskGroup)
+               << " of framework " << frameworkId
+               << ": " << error->message;
 
     foreach (const TaskInfo& _task, tasks) {
       const StatusUpdate update = protobuf::createStatusUpdate(
           frameworkId,
           info.id(),
           _task.task_id(),
-          taskState,
+          TASK_ERROR,
           TaskStatus::SOURCE_SLAVE,
           UUID::random(),
-          "Could not launch the task because we failed to unschedule"
-          " directories scheduled for gc",
-          TaskStatus::REASON_GC_ERROR);
+          error->message,
+          reason);
 
-      // TODO(vinod): Ensure that the status update manager reliably
-      // delivers this update. Currently, we don't guarantee this
-      // because removal of the framework causes the status update
-      // manager to stop retrying for its un-acked updates.
       statusUpdate(update, UPID());
     }
 
-    // Refer to the comment after 'framework->pending.erase' above
+    // Refer to the comment after 'framework->removePendingTask' above
     // for why we need this.
     if (framework->executors.empty() && framework->pending.empty()) {
       removeFramework(framework);
@@ -1909,6 +2035,9 @@ void Slave::_run(
 
     return;
   }
+
+  LOG(INFO) << "Launching " << taskOrTaskGroup(task, taskGroup)
+            << " for framework " << frameworkId;
 
   auto unallocated = [](const Resources& resources) {
     Resources result = resources;
@@ -1967,7 +2096,7 @@ void Slave::_run(
       statusUpdate(update, UPID());
     }
 
-    // Refer to the comment after 'framework->pending.erase' above
+    // Refer to the comment after 'framework->removePendingTask' above
     // for why we need this.
     if (framework->executors.empty() && framework->pending.empty()) {
       removeFramework(framework);
@@ -2020,7 +2149,7 @@ void Slave::_run(
       statusUpdate(update, UPID());
     }
 
-    // Refer to the comment after 'framework->pending.erase' above
+    // Refer to the comment after 'framework->removePendingTask' above
     // for why we need this.
     if (framework->executors.empty() && framework->pending.empty()) {
       removeFramework(framework);
@@ -2039,7 +2168,7 @@ void Slave::_run(
                  << " of framework " << frameworkId
                  << " because the agent is terminating";
 
-    // Refer to the comment after 'framework->pending.erase' above
+    // Refer to the comment after 'framework->removePendingTask' above
     // for why we need this.
     if (framework->executors.empty() && framework->pending.empty()) {
       removeFramework(framework);
@@ -2057,9 +2186,24 @@ void Slave::_run(
   Executor* executor = framework->getExecutor(executorId);
 
   if (executor == nullptr) {
-    executor = framework->launchExecutor(
-        executorInfo,
-        taskGroup.isNone() ? task.get() : Option<TaskInfo>::none());
+    executor = framework->addExecutor(executorInfo);
+
+    if (secretGenerator) {
+      generateSecret(framework->id(), executor->id, executor->containerId)
+        .onAny(defer(
+            self(),
+            &Self::launchExecutor,
+            lambda::_1,
+            frameworkId,
+            executorId,
+            taskGroup.isNone() ? task.get() : Option<TaskInfo>::none()));
+    } else {
+      launchExecutor(
+          None(),
+          frameworkId,
+          executorId,
+          taskGroup.isNone() ? task.get() : Option<TaskInfo>::none());
+    }
   }
 
   CHECK_NOTNULL(executor);
@@ -2158,7 +2302,7 @@ void Slave::_run(
 
       containerizer->update(executor->containerId, resources)
         .onAny(defer(self(),
-                     &Self::__run,
+                     &Self::___run,
                      lambda::_1,
                      frameworkId,
                      executorId,
@@ -2177,13 +2321,13 @@ void Slave::_run(
   }
 
   // We don't perform the checks for 'removeFramework' here since
-  // we're guaranteed by 'launchExecutor' that 'framework->executors'
+  // we're guaranteed by 'addExecutor' that 'framework->executors'
   // will be non-empty.
   CHECK(!framework->executors.empty());
 }
 
 
-void Slave::__run(
+void Slave::___run(
     const Future<Nothing>& future,
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
@@ -2384,6 +2528,213 @@ void Slave::__run(
 
     executor->send(event);
   }
+}
+
+
+// Generates a secret for executor authentication.
+Future<Secret> Slave::generateSecret(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId,
+    const ContainerID& containerId)
+{
+  Principal principal(
+      Option<string>::none(),
+      {
+        {"fid", frameworkId.value()},
+        {"eid", executorId.value()},
+        {"cid", containerId.value()}
+      });
+
+  return secretGenerator->generate(principal)
+    .then([](const Secret& secret) -> Future<Secret> {
+      Option<Error> error = common::validation::validateSecret(secret);
+
+      if (error.isSome()) {
+        return Failure(
+            "Failed to validate generated secret: " + error->message);
+      } else if (secret.type() != Secret::VALUE) {
+        return Failure(
+            "Expecting generated secret to be of VALUE type instead of " +
+            stringify(secret.type()) + " type; " +
+            "only VALUE type secrets are supported at this time");
+      }
+
+      return secret;
+    });
+}
+
+
+// Launches an executor which was previously created.
+void Slave::launchExecutor(
+    const Option<Future<Secret>>& future,
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId,
+    const Option<TaskInfo>& taskInfo)
+{
+  Framework* framework = getFramework(frameworkId);
+  if (framework == nullptr) {
+    LOG(WARNING) << "Ignoring launching executor '" << executorId
+                 << "' because the framework " << frameworkId
+                 << " does not exist";
+    return;
+  }
+
+  if (framework->state == Framework::TERMINATING) {
+    LOG(WARNING) << "Ignoring launching executor '" << executorId
+                 << "' of framework " << frameworkId
+                 << " because the framework is terminating";
+    return;
+  }
+
+  Executor* executor = framework->getExecutor(executorId);
+  if (executor == nullptr) {
+    LOG(WARNING) << "Ignoring launching executor '" << executorId
+                 << "' of framework " << frameworkId
+                 << " because the executor does not exist";
+    return;
+  }
+
+  if (executor->state == Executor::TERMINATING ||
+      executor->state == Executor::TERMINATED) {
+    string executorState;
+    if (executor->state == Executor::TERMINATING) {
+      executorState = "terminating";
+    } else {
+      executorState = "terminated";
+    }
+
+    LOG(WARNING) << "Ignoring launching executor " << *executor
+                 << " in container " << executor->containerId
+                 << " because the executor is " << executorState;
+
+    // The framework may have shutdown this executor already, transitioning it
+    // to the TERMINATING/TERMINATED state. However, the executor still exists
+    // in the agent's map, so we must send status updates for any queued tasks
+    // and perform cleanup via `executorTerminated`.
+    ContainerTermination termination;
+    termination.set_state(TASK_FAILED);
+    termination.add_reasons(TaskStatus::REASON_CONTAINER_LAUNCH_FAILED);
+    termination.set_message("Executor " + executorState);
+
+    executorTerminated(frameworkId, executorId, termination);
+
+    return;
+  }
+
+  CHECK_EQ(Executor::REGISTERING, executor->state);
+
+  Option<Secret> authenticationToken;
+
+  if (future.isSome()) {
+    if (!future->isReady()) {
+      LOG(ERROR) << "Failed to launch executor " << *executor
+                 << " in container " << executor->containerId
+                 << " because secret generation failed: "
+                 << (future->isFailed() ? future->failure() : "discarded");
+
+      ContainerTermination termination;
+      termination.set_state(TASK_FAILED);
+      termination.add_reasons(TaskStatus::REASON_CONTAINER_LAUNCH_FAILED);
+      termination.set_message(
+          "Secret generation failed: " +
+          (future->isFailed() ? future->failure() : "discarded"));
+
+      executorTerminated(frameworkId, executorId, termination);
+
+      return;
+    }
+
+    authenticationToken = future->get();
+  }
+
+  // Tell the containerizer to launch the executor.
+  ExecutorInfo executorInfo_ = executor->info;
+
+  // Populate the command info for default executor. We modify the ExecutorInfo
+  // to avoid resetting command info upon re-registering with the master since
+  // the master doesn't store them; they are generated by the slave.
+  if (executorInfo_.has_type() &&
+      executorInfo_.type() == ExecutorInfo::DEFAULT) {
+    CHECK(!executorInfo_.has_command());
+
+    executorInfo_.mutable_command()->CopyFrom(
+        defaultExecutorCommandInfo(flags.launcher_dir, executor->user));
+  }
+
+  Resources resources = executorInfo_.resources();
+
+  // NOTE: We modify the ExecutorInfo to include the task's
+  // resources when launching the executor so that the containerizer
+  // has non-zero resources to work with when the executor has
+  // no resources. This should be revisited after MESOS-600.
+  if (taskInfo.isSome()) {
+    resources += taskInfo->resources();
+  }
+
+  executorInfo_.mutable_resources()->CopyFrom(resources);
+
+  // Prepare environment variables for the executor.
+  map<string, string> environment = executorEnvironment(
+      flags,
+      executorInfo_,
+      executor->directory,
+      info.id(),
+      self(),
+      authenticationToken,
+      framework->info.checkpoint());
+
+  // Launch the container.
+  Future<bool> launch;
+  if (!executor->isCommandExecutor()) {
+    // If the executor is _not_ a command executor, this means that
+    // the task will include the executor to run. The actual task to
+    // run will be enqueued and subsequently handled by the executor
+    // when it has registered to the slave.
+    launch = containerizer->launch(
+        executor->containerId,
+        None(),
+        executorInfo_,
+        executor->directory,
+        executor->user,
+        info.id(),
+        environment,
+        framework->info.checkpoint());
+  } else {
+    // An executor has _not_ been provided by the task and will
+    // instead define a command and/or container to run. Right now,
+    // these tasks will require an executor anyway and the slave
+    // creates a command executor. However, it is up to the
+    // containerizer how to execute those tasks and the generated
+    // executor info works as a placeholder.
+    // TODO(nnielsen): Obsolete the requirement for executors to run
+    // one-off tasks.
+    launch = containerizer->launch(
+        executor->containerId,
+        taskInfo,
+        executorInfo_,
+        executor->directory,
+        executor->user,
+        info.id(),
+        environment,
+        framework->info.checkpoint());
+  }
+
+  launch.onAny(defer(self(),
+                     &Self::executorLaunched,
+                     frameworkId,
+                     executor->id,
+                     executor->containerId,
+                     lambda::_1));
+
+  // Make sure the executor registers within the given timeout.
+  delay(flags.executor_registration_timeout,
+        self(),
+        &Self::registerExecutorTimeout,
+        frameworkId,
+        executor->id,
+        executor->containerId);
+
+  return;
 }
 
 
@@ -2803,13 +3154,14 @@ void Slave::schedulerMessage(
 
 
 void Slave::updateFramework(
-    const FrameworkID& frameworkId,
-    const UPID& pid,
-    const FrameworkInfo& frameworkInfo)
+    const UpdateFrameworkMessage& message)
 {
   CHECK(state == RECOVERING || state == DISCONNECTED ||
         state == RUNNING || state == TERMINATING)
     << state;
+
+  const FrameworkID& frameworkId = message.framework_id();
+  const UPID& pid = message.pid();
 
   if (state != RUNNING) {
     LOG(WARNING) << "Dropping updateFramework message for " << frameworkId
@@ -2835,8 +3187,12 @@ void Slave::updateFramework(
                 << (pid != UPID() ? "with pid updated to " + stringify(pid)
                                   : "");
 
-      framework->info.CopyFrom(frameworkInfo);
-      framework->capabilities = frameworkInfo.capabilities();
+      // The framework info was added in 1.3, so it will not be set
+      // if from a master older than 1.3.
+      if (message.has_framework_info()) {
+        framework->info.CopyFrom(message.framework_info());
+        framework->capabilities = message.framework_info().capabilities();
+      }
 
       if (pid == UPID()) {
         framework->pid = None();
@@ -3314,7 +3670,7 @@ void Slave::subscribe(
 
       containerizer->update(executor->containerId, resources)
         .onAny(defer(self(),
-                     &Self::__run,
+                     &Self::___run,
                      lambda::_1,
                      framework->id(),
                      executor->id,
@@ -3536,7 +3892,7 @@ void Slave::registerExecutor(
 
       containerizer->update(executor->containerId, resources)
         .onAny(defer(self(),
-                     &Self::__run,
+                     &Self::___run,
                      lambda::_1,
                      frameworkId,
                      executorId,
@@ -4725,7 +5081,8 @@ void Slave::executorLaunched(
 }
 
 
-// Called by the isolator when an executor process terminates.
+// Called by the isolator when an executor process terminates, and by
+// `Slave::launchExecutor` when executor secret generation fails.
 void Slave::executorTerminated(
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
@@ -6150,6 +6507,45 @@ double Slave::_executor_directory_max_allowed_age_secs()
 }
 
 
+// As a principle, we do not need to re-authorize actions that have already
+// been authorized by the master. However, we re-authorize the RUN_TASK action
+// on the agent even though the master has already authorized it because:
+// a) in cases where hosts have heterogeneous user-account configurations,
+//    it makes sense to set the ACL on the agent instead of on the master
+// b) compared to other actions such as killing a task and shutting down a
+//    framework, it's a greater security risk if malicious tasks are launched
+//    as a superuser on the agent.
+Future<bool> Slave::authorizeTask(
+    const TaskInfo& task,
+    const FrameworkInfo& frameworkInfo)
+{
+  if (authorizer.isNone()) {
+    return true;
+  }
+
+  // Authorize the task.
+  authorization::Request request;
+
+  if (frameworkInfo.has_principal()) {
+    request.mutable_subject()->set_value(frameworkInfo.principal());
+  }
+
+  request.set_action(authorization::RUN_TASK);
+
+  authorization::Object* object = request.mutable_object();
+
+  object->mutable_task_info()->CopyFrom(task);
+  object->mutable_framework_info()->CopyFrom(frameworkInfo);
+
+  LOG(INFO)
+    << "Authorizing framework principal '"
+    << (frameworkInfo.has_principal() ? frameworkInfo.principal() : "ANY")
+    << "' to launch task " << task.task_id();
+
+  return authorizer.get()->authorized(request);
+}
+
+
 Future<bool> Slave::authorizeLogAccess(const Option<Principal>& principal)
 {
   if (authorizer.isNone()) {
@@ -6423,10 +6819,7 @@ Framework::~Framework()
 }
 
 
-// Create and launch an executor.
-Executor* Framework::launchExecutor(
-    const ExecutorInfo& executorInfo,
-    const Option<TaskInfo>& taskInfo)
+Executor* Framework::addExecutor(const ExecutorInfo& executorInfo)
 {
   // Verify that Resource.AllocationInfo is set, if coming
   // from a MULTI_ROLE master this will be set, otherwise
@@ -6436,9 +6829,9 @@ Executor* Framework::launchExecutor(
   }
 
   // Generate an ID for the executor's container.
-  // TODO(idownes) This should be done by the containerizer but we
-  // need the ContainerID to create the executor's directory. Fix
-  // this when 'launchExecutor()' is handled asynchronously.
+  // TODO(idownes) This should be done by the containerizer but we need the
+  // ContainerID to create the executor's directory and generate the secret.
+  // Consider fixing this since 'launchExecutor()' is handled asynchronously.
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
 
@@ -6511,92 +6904,6 @@ Executor* Framework::launchExecutor(
   slave->files->attach(executor->directory, executor->directory, authorize)
     .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
 
-  // Tell the containerizer to launch the executor.
-  ExecutorInfo executorInfo_ = executor->info;
-
-  // Populate the command info for default executor. We modify the ExecutorInfo
-  // to avoid resetting command info upon re-registering with the master since
-  // the master doesn't store them; they are generated by the slave.
-  if (executorInfo_.has_type() &&
-      executorInfo_.type() == ExecutorInfo::DEFAULT) {
-    CHECK(!executorInfo_.has_command());
-
-    executorInfo_.mutable_command()->CopyFrom(
-        defaultExecutorCommandInfo(slave->flags.launcher_dir, user));
-  }
-
-  Resources resources = executorInfo_.resources();
-
-  // NOTE: We modify the ExecutorInfo to include the task's
-  // resources when launching the executor so that the containerizer
-  // has non-zero resources to work with when the executor has
-  // no resources. This should be revisited after MESOS-600.
-  if (taskInfo.isSome()) {
-    resources += taskInfo->resources();
-  }
-
-  executorInfo_.mutable_resources()->CopyFrom(resources);
-
-  // Prepare environment variables for the executor.
-  map<string, string> environment = executorEnvironment(
-      slave->flags,
-      executorInfo_,
-      executor->directory,
-      slave->info.id(),
-      slave->self(),
-      info.checkpoint());
-
-  // Launch the container.
-  Future<bool> launch;
-  if (!executor->isCommandExecutor()) {
-    // If the executor is _not_ a command executor, this means that
-    // the task will include the executor to run. The actual task to
-    // run will be enqueued and subsequently handled by the executor
-    // when it has registered to the slave.
-    launch = slave->containerizer->launch(
-        containerId,
-        None(),
-        executorInfo_,
-        executor->directory,
-        user,
-        slave->info.id(),
-        environment,
-        info.checkpoint());
-  } else {
-    // An executor has _not_ been provided by the task and will
-    // instead define a command and/or container to run. Right now,
-    // these tasks will require an executor anyway and the slave
-    // creates a command executor. However, it is up to the
-    // containerizer how to execute those tasks and the generated
-    // executor info works as a placeholder.
-    // TODO(nnielsen): Obsolete the requirement for executors to run
-    // one-off tasks.
-    launch = slave->containerizer->launch(
-        containerId,
-        taskInfo,
-        executorInfo_,
-        executor->directory,
-        user,
-        slave->info.id(),
-        environment,
-        info.checkpoint());
-  }
-
-  launch.onAny(defer(slave,
-                     &Slave::executorLaunched,
-                     id(),
-                     executor->id,
-                     containerId,
-                     lambda::_1));
-
-  // Make sure the executor registers within the given timeout.
-  delay(slave->flags.executor_registration_timeout,
-        slave,
-        &Slave::registerExecutorTimeout,
-        id(),
-        executor->id,
-        containerId);
-
   return executor;
 }
 
@@ -6633,6 +6940,27 @@ Executor* Framework::getExecutor(const TaskID& taskId) const
     }
   }
   return nullptr;
+}
+
+
+// Return `true` if `task` was a pending task of this framework
+// before the removal; `false` otherwise.
+bool Framework::removePendingTask(
+    const TaskInfo& task,
+    const ExecutorInfo& executorInfo)
+{
+  const ExecutorID executorId = executorInfo.executor_id();
+
+  if (pending.contains(executorId) &&
+      pending.at(executorId).contains(task.task_id())) {
+    pending.at(executorId).erase(task.task_id());
+    if (pending.at(executorId).empty()) {
+      pending.erase(executorId);
+    }
+    return true;
+  }
+
+  return false;
 }
 
 
@@ -7152,6 +7480,7 @@ map<string, string> executorEnvironment(
     const string& directory,
     const SlaveID& slaveId,
     const PID<Slave>& slavePid,
+    const Option<Secret>& authenticationToken,
     bool checkpoint)
 {
   map<string, string> environment;
@@ -7242,6 +7571,13 @@ map<string, string> executorEnvironment(
     // retries when disconnected.
     environment["MESOS_SUBSCRIPTION_BACKOFF_MAX"] =
       stringify(EXECUTOR_REREGISTER_TIMEOUT);
+  }
+
+  if (authenticationToken.isSome()) {
+    CHECK(authenticationToken->has_value());
+
+    environment["MESOS_EXECUTOR_AUTHENTICATION_TOKEN"] =
+      authenticationToken->value().data();
   }
 
   if (HookManager::hooksAvailable()) {

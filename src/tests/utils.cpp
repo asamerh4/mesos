@@ -35,6 +35,7 @@
 namespace http = process::http;
 namespace inet = process::network::inet;
 
+using std::set;
 using std::string;
 
 using process::Future;
@@ -102,6 +103,7 @@ string getModulePath(const string& name)
   return path::join(path, os::libraries::expandName(name));
 }
 
+
 string getLibMesosPath()
 {
   string path = path::join(
@@ -117,6 +119,7 @@ string getLibMesosPath()
   return path;
 }
 
+
 string getLauncherDir()
 {
   string path = path::join(tests::flags.build_dir, "src");
@@ -127,6 +130,7 @@ string getLauncherDir()
 
   return path;
 }
+
 
 string getTestHelperPath(const string& name)
 {
@@ -139,6 +143,7 @@ string getTestHelperPath(const string& name)
   return path;
 }
 
+
 string getTestHelperDir()
 {
   string path = path::join(tests::flags.build_dir, "src");
@@ -149,6 +154,7 @@ string getTestHelperDir()
 
   return path;
 }
+
 
 string getTestScriptPath(const string& name)
 {
@@ -161,6 +167,7 @@ string getTestScriptPath(const string& name)
   return path;
 }
 
+
 string getSbinDir()
 {
   string path = path::join(tests::flags.build_dir, "src");
@@ -172,6 +179,7 @@ string getSbinDir()
   return path;
 }
 
+
 string getWebUIDir()
 {
   string path = path::join(flags.source_dir, "src", "webui");
@@ -181,6 +189,35 @@ string getWebUIDir()
   }
 
   return path;
+}
+
+
+Try<net::IPNetwork> getNonLoopbackIP()
+{
+  Try<set<string>> links = net::links();
+  if (links.isError()) {
+    return Error(
+        "Unable to retrieve interfaces on this host: " +
+        links.error());
+  }
+
+  foreach (const string& link, links.get()) {
+    Result<net::IPNetwork> hostIPNetwork =
+      net::IPNetwork::fromLinkDevice(link, AF_INET);
+
+    if (hostIPNetwork.isError()) {
+      return Error(
+          "Unable to find a non-loopback address: " +
+          hostIPNetwork.error());
+    }
+
+    if (hostIPNetwork.isSome() &&
+        (hostIPNetwork.get() != net::IPNetwork::LOOPBACK_V4())) {
+      return hostIPNetwork.get();
+    }
+  }
+
+  return Error("No non-loopback addresses available on this host");
 }
 
 } // namespace tests {

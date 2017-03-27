@@ -17,6 +17,7 @@
 #ifndef __HEALTH_CHECKER_HPP__
 #define __HEALTH_CHECKER_HPP__
 
+#include <memory>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -51,6 +52,9 @@ public:
    * Attempts to create a `HealthChecker` object. In case of success, health
    * checking starts immediately after initialization.
    *
+   * If the check is a command health check, the checker will fork a process,
+   * enter the task's namespaces, and execute the commmand.
+   *
    * @param check The protobuf message definition of health check.
    * @param launcherDir A directory where Mesos helper binaries are located.
    * @param callback A callback HealthChecker uses to send health status
@@ -64,6 +68,9 @@ public:
    *
    * @todo A better approach would be to return a stream of updates, e.g.,
    * `process::Stream<TaskHealthStatus>` rather than invoking a callback.
+   *
+   * @todo Consider leveraging `checks::Checker` for checking functionality.
+   * This class will then focus on interpreting and acting on the result.
    */
   static Try<process::Owned<HealthChecker>> create(
       const HealthCheck& check,
@@ -73,12 +80,40 @@ public:
       const Option<pid_t>& taskPid,
       const std::vector<std::string>& namespaces);
 
+  /**
+   * Attempts to create a `HealthChecker` object. In case of success, health
+   * checking starts immediately after initialization.
+   *
+   * If the check is a command health check, the checker will delegate the
+   * execution of the check to the Mesos agent via the
+   * `LaunchNestedContainerSession` API call.
+   *
+   * @param check The protobuf message definition of health check.
+   * @param launcherDir A directory where Mesos helper binaries are located.
+   * @param callback A callback HealthChecker uses to send health status
+   *     updates to its owner (usually an executor).
+   * @param taskId The TaskID of the target task.
+   * @param taskContainerId The ContainerID of the target task.
+   * @param agentURL The URL of the agent.
+   * @return A `HealthChecker` object or an error if `create` fails.
+   *
+   * @todo A better approach would be to return a stream of updates, e.g.,
+   * `process::Stream<TaskHealthStatus>` rather than invoking a callback.
+   */
+  static Try<process::Owned<HealthChecker>> create(
+      const HealthCheck& check,
+      const std::string& launcherDir,
+      const lambda::function<void(const TaskHealthStatus&)>& callback,
+      const TaskID& taskId,
+      const ContainerID& taskContainerId,
+      const process::http::URL& agentURL);
+
+
   ~HealthChecker();
 
-  /**
-   * Immediately stops health checking. Any in-flight health checks are dropped.
-   */
-  void stop();
+  // Idempotent helpers for pausing and resuming health checking.
+  void pause();
+  void resume();
 
 private:
   explicit HealthChecker(process::Owned<HealthCheckerProcess> process);
@@ -96,9 +131,15 @@ public:
       const lambda::function<void(const TaskHealthStatus&)>& _callback,
       const TaskID& _taskId,
       const Option<pid_t>& _taskPid,
-      const std::vector<std::string>& _namespaces);
+      const std::vector<std::string>& _namespaces,
+      const Option<ContainerID>& _taskContainerId,
+      const Option<process::http::URL>& _agentURL,
+      bool _commandCheckViaAgent);
 
   virtual ~HealthCheckerProcess() {}
+
+  void pause();
+  void resume();
 
 protected:
   virtual void initialize() override;
@@ -113,6 +154,45 @@ private:
       const process::Future<Nothing>& future);
 
   process::Future<Nothing> commandHealthCheck();
+
+  process::Future<Nothing> nestedCommandHealthCheck();
+
+  void _nestedCommandHealthCheck(
+      std::shared_ptr<process::Promise<Nothing>> promise);
+
+  void __nestedCommandHealthCheck(
+      std::shared_ptr<process::Promise<Nothing>> promise,
+      process::http::Connection connection);
+
+  void ___nestedCommandHealthCheck(
+      std::shared_ptr<process::Promise<Nothing>> promise,
+      const ContainerID& checkContainerId,
+      const process::http::Response& launchResponse);
+
+  void nestedCommandHealthCheckFailure(
+      std::shared_ptr<process::Promise<Nothing>> promise,
+      process::http::Connection connection,
+      ContainerID checkContainerId,
+      std::shared_ptr<bool> checkTimedOut,
+      const std::string& failure);
+
+  /**
+   * Waits for a container to be terminated.
+   *
+   * Waits for a container to be terminated via the Agent's
+   * `WaitNestedContainer` API call.
+   *
+   * @param containerID The `ContainerID` of the container that we want
+   * to wait for.
+   *
+   * @return The exit status as returned by the Agent.
+   */
+  process::Future<Option<int>> waitNestedContainer(
+      const ContainerID& containerId);
+
+  process::Future<Option<int>> _waitNestedContainer(
+      const ContainerID& containerId,
+      const process::http::Response& httpResponse);
 
   process::Future<Nothing> httpHealthCheck();
 
@@ -145,11 +225,20 @@ private:
   const TaskID taskId;
   const Option<pid_t> taskPid;
   const std::vector<std::string> namespaces;
+  const Option<ContainerID> taskContainerId;
+  const Option<process::http::URL> agentURL;
+  const bool commandCheckViaAgent;
+
   Option<lambda::function<pid_t(const lambda::function<int()>&)>> clone;
 
   uint32_t consecutiveFailures;
   process::Time startTime;
   bool initializing;
+  bool paused;
+
+  // Contains the ID of the most recently terminated nested container
+  // that was used to perform a COMMAND health check.
+  Option<ContainerID> previousCheckContainerId;
 };
 
 

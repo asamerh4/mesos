@@ -131,6 +131,8 @@ public:
   void launchTask(ExecutorDriver* driver, const TaskInfo& task)
   {
     if (run.isSome()) {
+      // TODO(alexr): Use `protobuf::createTaskStatus()`
+      // instead of manually setting fields.
       TaskStatus status;
       status.mutable_task_id()->CopyFrom(task.task_id());
       status.set_state(TASK_FAILED);
@@ -169,6 +171,8 @@ public:
     );
 
     if (runOptions.isError()) {
+      // TODO(alexr): Use `protobuf::createTaskStatus()`
+      // instead of manually setting fields.
       TaskStatus status;
       status.mutable_task_id()->CopyFrom(task.task_id());
       status.set_state(TASK_FAILED);
@@ -204,6 +208,8 @@ public:
         if (!killed) {
           containerPid = container.pid;
 
+          // TODO(alexr): Use `protobuf::createTaskStatus()`
+          // instead of manually setting fields.
           TaskStatus status;
           status.mutable_task_id()->CopyFrom(taskId.get());
           status.set_state(TASK_RUNNING);
@@ -244,6 +250,8 @@ public:
       // Since we don't have a container id, we can only discard
       // the run future.
     }));
+
+    inspect.onReady(defer(self(), &Self::launchCheck, task));
 
     inspect.onReady(
         defer(self(), &Self::launchHealthCheck, containerName, task));
@@ -313,6 +321,8 @@ protected:
     cout << "Received task health update, healthy: "
          << stringify(healthStatus.healthy()) << endl;
 
+    // TODO(alexr): Use `protobuf::createTaskStatus()`
+    // instead of manually setting fields.
     TaskStatus status;
     status.mutable_task_id()->CopyFrom(healthStatus.task_id());
     status.set_healthy(healthStatus.healthy());
@@ -379,6 +389,8 @@ private:
       if (protobuf::frameworkHasCapability(
               frameworkInfo.get(),
               FrameworkInfo::Capability::TASK_KILLING_STATE)) {
+        // TODO(alexr): Use `protobuf::createTaskStatus()`
+        // instead of manually setting fields.
         TaskStatus status;
         status.mutable_task_id()->CopyFrom(taskId.get());
         status.set_state(TASK_KILLING);
@@ -387,7 +399,7 @@ private:
 
       // Stop health checking the task.
       if (checker.get() != nullptr) {
-        checker->stop();
+        checker->pause();
       }
 
       // TODO(bmahler): Replace this with 'docker kill' so
@@ -403,7 +415,7 @@ private:
 
     // Stop health checking the task.
     if (checker.get() != nullptr) {
-      checker->stop();
+      checker->pause();
     }
 
     // In case the stop is stuck, discard it.
@@ -463,6 +475,8 @@ private:
 
     CHECK_SOME(taskId);
 
+    // TODO(alexr): Use `protobuf::createTaskStatus()`
+    // instead of manually setting fields.
     TaskStatus taskStatus;
     taskStatus.mutable_task_id()->CopyFrom(taskId.get());
     taskStatus.set_state(state);
@@ -486,6 +500,12 @@ private:
     // an ack.
     os::sleep(Seconds(1));
     driver.get()->stop();
+  }
+
+  void launchCheck(const TaskInfo& task)
+  {
+    // TODO(alexr): Implement general checks support, see MESOS-7250.
+    CHECK(!task.has_check()) << "Docker executor does not support checks yet";
   }
 
   void launchHealthCheck(const string& containerName, const TaskInfo& task)
@@ -712,8 +732,6 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  std::cout << stringify(flags) << std::endl;
-
   mesos::internal::logging::initialize(argv[0], flags, true); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
@@ -721,12 +739,12 @@ int main(int argc, char** argv)
     LOG(WARNING) << warning.message;
   }
 
+  VLOG(1) << stringify(flags);
+
   if (flags.help) {
     cout << flags.usage() << endl;
     return EXIT_SUCCESS;
   }
-
-  std::cout << stringify(flags) << std::endl;
 
   if (flags.docker.isNone()) {
     cerr << flags.usage("Missing required option --docker") << endl;

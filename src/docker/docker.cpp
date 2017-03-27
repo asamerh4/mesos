@@ -27,6 +27,7 @@
 #include <stout/strings.hpp>
 #include <stout/stringify.hpp>
 
+#include <stout/os/constants.hpp>
 #include <stout/os/killtree.hpp>
 #include <stout/os/read.hpp>
 #include <stout/os/write.hpp>
@@ -156,7 +157,7 @@ Future<Version> Docker::version() const
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -804,42 +805,10 @@ Future<Option<int>> Docker::run(
     argv.push_back(stringify(options.memory->bytes()));
   }
 
-  string environmentVariables;
-
   foreachpair(const string& key, const string& value, options.env) {
-    environmentVariables += key + "=" + value + "\n";
+    argv.push_back("-e");
+    argv.push_back(key + "=" + value);
   }
-
-  Try<string> environmentFile_ = os::mktemp();
-  if (environmentFile_.isError()) {
-    return Failure("Failed to create temporary docker environment "
-                   "file: " + environmentFile_.error());
-  }
-
-  const string& environmentFile = environmentFile_.get();
-
-  Try<int_fd> fd = os::open(
-      environmentFile,
-      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-      S_IRUSR | S_IWUSR);
-
-  if (fd.isError()) {
-    return Failure(
-        "Failed to open file '" + environmentFile + "': " + fd.error());
-  }
-
-  Try<Nothing> write = os::write(fd.get(), environmentVariables);
-
-  os::close(fd.get());
-
-  if (write.isError()) {
-    return Failure(
-        "Failed to write docker environment file to '" + environmentFile +
-        "': " + write.error());
-  }
-
-  argv.push_back("--env-file");
-  argv.push_back(environmentFile);
 
   foreach(const string& volume, options.volumes) {
     argv.push_back("-v");
@@ -937,30 +906,21 @@ Future<Option<int>> Docker::run(
 
   string cmd = strings::join(" ", argv);
 
-  LOG(INFO) << "Running " << cmd;
+  VLOG(1) << "Running " << cmd;
 
   Try<Subprocess> s = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       _stdout,
       _stderr,
       nullptr);
 
   if (s.isError()) {
-    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
+    return Failure("Failed to create subprocess '" + path + "': " + s.error());
   }
 
-  s->status()
-    .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd))
-    .onAny([environmentFile]() {
-      Try<Nothing> rm = os::rm(environmentFile);
-
-      if (rm.isError()) {
-        LOG(WARNING) << "Failed to remove temporary docker environment file "
-                     << "'" << environmentFile << "': " << rm.error();
-      }
-    });
+  s->status().onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
 
   // Ideally we could capture the stderr when docker itself fails,
   // however due to the stderr redirection used here we cannot.
@@ -992,8 +952,8 @@ Future<Nothing> Docker::stop(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE());
 
   if (s.isError()) {
@@ -1040,8 +1000,8 @@ Future<Nothing> Docker::kill(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE());
 
   if (s.isError()) {
@@ -1065,8 +1025,8 @@ Future<Nothing> Docker::rm(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE());
 
   if (s.isError()) {
@@ -1104,7 +1064,7 @@ void Docker::_inspect(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -1223,7 +1183,7 @@ Future<list<Docker::Container>> Docker::ps(
 
   Try<Subprocess> s = subprocess(
       cmd,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE());
 
@@ -1392,7 +1352,7 @@ Future<Docker::Image> Docker::pull(
   Try<Subprocess> s = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       nullptr);
@@ -1528,7 +1488,7 @@ Future<Docker::Image> Docker::__pull(
   Try<Subprocess> s_ = subprocess(
       path,
       argv,
-      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       nullptr,

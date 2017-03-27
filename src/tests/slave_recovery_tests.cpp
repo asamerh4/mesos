@@ -1978,14 +1978,17 @@ TYPED_TEST(SlaveRecoveryTest, NonCheckpointingFramework)
   // Set the `FrameworkID` in `FrameworkInfo`.
   frameworkInfo.mutable_id()->CopyFrom(frameworkId);
 
+  UpdateFrameworkMessage updateFrameworkMessage;
+  updateFrameworkMessage.mutable_framework_id()->CopyFrom(frameworkId);
+  updateFrameworkMessage.set_pid("");
+  updateFrameworkMessage.mutable_framework_info()->CopyFrom(frameworkInfo);
+
   // Simulate a 'UpdateFrameworkMessage' to ensure framework pid is
   // not being checkpointed.
   process::dispatch(
       slave.get()->pid,
       &Slave::updateFramework,
-      frameworkId,
-      "",
-      frameworkInfo);
+      updateFrameworkMessage);
 
   AWAIT_READY(updateFramework);
 
@@ -3769,11 +3772,6 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
   // cgroups isolation is involved.
   flags1.isolation = "filesystem/posix,posix/mem,posix/cpu";
 
-#ifdef __linux__
-  // Disable putting slave into cgroup(s) because this is a multi-slave test.
-  flags1.agent_subsystems = None();
-#endif
-
   Fetcher fetcher;
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -3812,11 +3810,6 @@ TYPED_TEST(SlaveRecoveryTest, MultipleSlaves)
   // NOTE: We cannot run multiple slaves simultaneously on a host if
   // cgroups isolation is involved.
   flags2.isolation = "filesystem/posix,posix/mem,posix/cpu";
-
-#ifdef __linux__
-  // Disable putting slave into cgroup(s) because this is a multi-slave test.
-  flags2.agent_subsystems = None();
-#endif
 
   Try<TypeParam*> _containerizer2 = TypeParam::create(flags2, true, &fetcher);
   ASSERT_SOME(_containerizer2);
@@ -4125,7 +4118,6 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PidNamespaceForward)
   // isolation.
   slave::Flags flags = this->CreateSlaveFlags();
   flags.isolation = "cgroups/cpu,cgroups/mem";
-  flags.agent_subsystems = "";
 
   Fetcher fetcher;
 
@@ -4230,7 +4222,6 @@ TEST_F(MesosContainerizerSlaveRecoveryTest, CGROUPS_ROOT_PidNamespaceBackward)
   // Start a slave using a containerizer with pid namespace isolation.
   slave::Flags flags = this->CreateSlaveFlags();
   flags.isolation = "cgroups/cpu,cgroups/mem,filesystem/linux,namespaces/pid";
-  flags.agent_subsystems = "";
 
   Fetcher fetcher;
 

@@ -122,6 +122,8 @@ StatusUpdate createStatusUpdate(
     update.mutable_executor_id()->MergeFrom(executorId.get());
   }
 
+  // TODO(alexr): Use `createTaskStatus()` instead
+  // once `UUID` is required in this function.
   TaskStatus* status = update.mutable_status();
   status->mutable_task_id()->MergeFrom(taskId);
 
@@ -203,6 +205,85 @@ StatusUpdate createStatusUpdate(
   }
 
   return update;
+}
+
+
+TaskStatus createTaskStatus(
+    const TaskID& taskId,
+    const TaskState& state,
+    const UUID& uuid,
+    double timestamp)
+{
+  TaskStatus status;
+
+  status.set_uuid(uuid.toBytes());
+  status.set_timestamp(timestamp);
+  status.mutable_task_id()->CopyFrom(taskId);
+  status.set_state(state);
+
+  return status;
+}
+
+
+TaskStatus createTaskStatus(
+    TaskStatus status,
+    const UUID& uuid,
+    double timestamp,
+    const Option<TaskState>& state,
+    const Option<string>& message,
+    const Option<TaskStatus::Source>& source,
+    const Option<TaskStatus::Reason>& reason,
+    const Option<string>& data,
+    const Option<bool>& healthy,
+    const Option<CheckStatusInfo>& checkStatus,
+    const Option<Labels>& labels,
+    const Option<ContainerStatus>& containerStatus,
+    const Option<TimeInfo>& unreachableTime)
+{
+  status.set_uuid(uuid.toBytes());
+  status.set_timestamp(timestamp);
+
+  if (state.isSome()) {
+    status.set_state(state.get());
+  }
+
+  if (message.isSome()) {
+    status.set_message(message.get());
+  }
+
+  if (source.isSome()) {
+    status.set_source(source.get());
+  }
+
+  if (reason.isSome()) {
+    status.set_reason(reason.get());
+  }
+
+  if (data.isSome()) {
+    status.set_data(data.get());
+  }
+
+  if (healthy.isSome()) {
+    status.set_healthy(healthy.get());
+  }
+
+  if (checkStatus.isSome()) {
+    status.mutable_check_status()->CopyFrom(checkStatus.get());
+  }
+
+  if (labels.isSome()) {
+    status.mutable_labels()->CopyFrom(labels.get());
+  }
+
+  if (containerStatus.isSome()) {
+    status.mutable_container_status()->CopyFrom(containerStatus.get());
+  }
+
+  if (unreachableTime.isSome()) {
+    status.mutable_unreachable_time()->CopyFrom(unreachableTime.get());
+  }
+
+  return status;
 }
 
 
@@ -351,11 +432,11 @@ Label createLabel(const string& key, const Option<string>& value)
 }
 
 
-void adjustOfferOperation(
+void injectAllocationInfo(
     Offer::Operation* operation,
     const Resource::AllocationInfo& allocationInfo)
 {
-  auto adjustResources = [](
+  auto inject = [](
       RepeatedPtrField<Resource>* resources,
       const Resource::AllocationInfo& allocationInfo) {
     foreach (Resource& resource, *resources) {
@@ -370,10 +451,10 @@ void adjustOfferOperation(
       Offer::Operation::Launch* launch = operation->mutable_launch();
 
       foreach (TaskInfo& task, *launch->mutable_task_infos()) {
-        adjustResources(task.mutable_resources(), allocationInfo);
+        inject(task.mutable_resources(), allocationInfo);
 
         if (task.has_executor()) {
-          adjustResources(
+          inject(
               task.mutable_executor()->mutable_resources(),
               allocationInfo);
         }
@@ -386,7 +467,7 @@ void adjustOfferOperation(
         operation->mutable_launch_group();
 
       if (launchGroup->has_executor()) {
-        adjustResources(
+        inject(
             launchGroup->mutable_executor()->mutable_resources(),
             allocationInfo);
       }
@@ -394,10 +475,10 @@ void adjustOfferOperation(
       TaskGroupInfo* taskGroup = launchGroup->mutable_task_group();
 
       foreach (TaskInfo& task, *taskGroup->mutable_tasks()) {
-        adjustResources(task.mutable_resources(), allocationInfo);
+        inject(task.mutable_resources(), allocationInfo);
 
         if (task.has_executor()) {
-          adjustResources(
+          inject(
               task.mutable_executor()->mutable_resources(),
               allocationInfo);
         }
@@ -406,7 +487,7 @@ void adjustOfferOperation(
     }
 
     case Offer::Operation::RESERVE: {
-      adjustResources(
+      inject(
           operation->mutable_reserve()->mutable_resources(),
           allocationInfo);
 
@@ -414,7 +495,7 @@ void adjustOfferOperation(
     }
 
     case Offer::Operation::UNRESERVE: {
-      adjustResources(
+      inject(
           operation->mutable_unreserve()->mutable_resources(),
           allocationInfo);
 
@@ -422,7 +503,7 @@ void adjustOfferOperation(
     }
 
     case Offer::Operation::CREATE: {
-      adjustResources(
+      inject(
           operation->mutable_create()->mutable_volumes(),
           allocationInfo);
 
@@ -430,9 +511,83 @@ void adjustOfferOperation(
     }
 
     case Offer::Operation::DESTROY: {
-      adjustResources(
+      inject(
           operation->mutable_destroy()->mutable_volumes(),
           allocationInfo);
+
+      break;
+    }
+
+    case Offer::Operation::UNKNOWN:
+      break; // No-op.
+  }
+}
+
+
+void stripAllocationInfo(Offer::Operation* operation)
+{
+  auto strip = [](RepeatedPtrField<Resource>* resources) {
+    foreach (Resource& resource, *resources) {
+      if (resource.has_allocation_info()) {
+        resource.clear_allocation_info();
+      }
+    }
+  };
+
+  switch (operation->type()) {
+    case Offer::Operation::LAUNCH: {
+      Offer::Operation::Launch* launch = operation->mutable_launch();
+
+      foreach (TaskInfo& task, *launch->mutable_task_infos()) {
+        strip(task.mutable_resources());
+
+        if (task.has_executor()) {
+          strip(task.mutable_executor()->mutable_resources());
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::LAUNCH_GROUP: {
+      Offer::Operation::LaunchGroup* launchGroup =
+        operation->mutable_launch_group();
+
+      if (launchGroup->has_executor()) {
+        strip(launchGroup->mutable_executor()->mutable_resources());
+      }
+
+      TaskGroupInfo* taskGroup = launchGroup->mutable_task_group();
+
+      foreach (TaskInfo& task, *taskGroup->mutable_tasks()) {
+        strip(task.mutable_resources());
+
+        if (task.has_executor()) {
+          strip(task.mutable_executor()->mutable_resources());
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::RESERVE: {
+      strip(operation->mutable_reserve()->mutable_resources());
+
+      break;
+    }
+
+    case Offer::Operation::UNRESERVE: {
+      strip(operation->mutable_unreserve()->mutable_resources());
+
+      break;
+    }
+
+    case Offer::Operation::CREATE: {
+      strip(operation->mutable_create()->mutable_volumes());
+
+      break;
+    }
+
+    case Offer::Operation::DESTROY: {
+      strip(operation->mutable_destroy()->mutable_volumes());
 
       break;
     }
