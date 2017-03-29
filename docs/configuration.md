@@ -1627,7 +1627,7 @@ string `gpu/nvidia`.
   <td>
 Directory path of the CNI plugin binaries. The <code>network/cni</code>
 isolator will find CNI plugins under this directory so that it can execute
-the plugins to add/delete container from the CNI networks. It is the operator’s
+the plugins to add/delete container from the CNI networks. It is the operator's
 responsibility to install the CNI plugin binaries in the specified directory.
   </td>
 </tr>
@@ -2064,7 +2064,7 @@ quotas for container sandbox directories. Valid project IDs range from
     </td>
     <td>
       To enable the profiler, this variable must be set to 1. Note that this
-      variable will only work if mesos has been configured with
+      variable will only work if Mesos has been configured with
       <code>--enable-perftools</code>.
     </td>
   </tr>
