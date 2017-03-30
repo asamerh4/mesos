@@ -237,13 +237,13 @@ DockerContainerizer::~DockerContainerizer()
 //
 // NOTE: `taskEnvironment` is currently used to propagate environment variables
 // from a hook: `slavePreLaunchDockerEnvironmentDecorator`.
-docker::Flags dockerFlags(
+::mesos::internal::docker::Flags dockerFlags(
   const Flags& flags,
   const string& name,
   const string& directory,
   const Option<map<string, string>>& taskEnvironment)
 {
-  docker::Flags dockerFlags;
+  ::mesos::internal::docker::Flags dockerFlags;
   dockerFlags.container = name;
   dockerFlags.docker = flags.docker;
   dockerFlags.sandbox_directory = directory;
@@ -363,7 +363,7 @@ DockerContainerizerProcess::Container::create(
     // NOTE: We do not set the optional `taskEnvironment` here as
     // this field is currently used to propagate environment variables
     // from a hook. This hook is called after `Container::create`.
-    docker::Flags dockerExecutorFlags = dockerFlags(
+    ::mesos::internal::docker::Flags dockerExecutorFlags = dockerFlags(
       flags,
       Container::name(slaveId, stringify(id)),
       containerWorkdir,
@@ -1408,7 +1408,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
   // Prepare environment variables for the executor.
   map<string, string> environment = container->environment;
 
-  // Include any enviroment variables from ExecutorInfo.
+  // Include any environment variables from ExecutorInfo.
   foreach (const Environment::Variable& variable,
            container->executor.command().environment().variables()) {
     environment[variable.name()] = variable.value();
@@ -1499,7 +1499,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
 #endif // __linux__
 
     // Prepare the flags to pass to the mesos docker executor process.
-    docker::Flags launchFlags = dockerFlags(
+    ::mesos::internal::docker::Flags launchFlags = dockerFlags(
         flags,
         container->name(),
         container->directory,
@@ -2244,7 +2244,7 @@ void DockerContainerizerProcess::__destroy(
     // means it's possible that the container is still going to be
     // running after we return! We either need to have a periodic
     // "garbage collector", or we need to retry the Docker::kill
-    // indefinitely until it has been sucessful.
+    // indefinitely until it has been successful.
 
     string failure = "Failed to kill the Docker container: " +
                      (kill.isFailed() ? kill.failure() : "discarded future");

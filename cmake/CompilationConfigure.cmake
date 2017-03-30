@@ -26,6 +26,26 @@ endif (ENABLE_DEBUG)
 
 option(BUILD_SHARED_LIBS "Build shared libraries." OFF)
 
+option(ENABLE_PRECOMPILED_HEADERS
+  "Enable auto-generated precompiled headers using cotire" ${WIN32})
+
+if (NOT WIN32 AND ENABLE_PRECOMPILED_HEADERS)
+  message(
+    FATAL_ERROR
+    "Precompiled headers are only supported on Windows.  See MESOS-7322.")
+endif (NOT WIN32 AND ENABLE_PRECOMPILED_HEADERS)
+
+if (ENABLE_PRECOMPILED_HEADERS)
+  # By default Cotire generates both precompiled headers and a "unity" build.
+  # A unity build is where all the source files in a target are combined into
+  # a single source file to reduce the number of files that need to be opened
+  # and read. We disable "unity" builds for now.
+  set(COTIRE_ADD_UNITY_BUILD FALSE)
+
+  set(COTIRE_VERBOSE ${VERBOSE})
+endif (ENABLE_PRECOMPILED_HEADERS)
+
+# Enable optimization?
 option(ENABLE_OPTIMIZE "Enable optimization" TRUE)
 if (ENABLE_OPTIMIZE)
   if (WIN32)
@@ -54,6 +74,11 @@ if (WIN32)
         echo "ERROR: Environment variable 'PreferredToolArchitecture' must be set to 'x64', see MESOS-6720 for details" 1>&2 && EXIT 1
       )
     )
+
+  # Speed up incremental linking for the VS compiler/linker, for more info, see:
+  # https://blogs.msdn.microsoft.com/vcblog/2014/11/12/speeding-up-the-incremental-developer-build-scenario/
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:inline")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /debug:FASTLINK")
 endif (WIN32)
 
 

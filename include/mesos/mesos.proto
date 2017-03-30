@@ -96,6 +96,15 @@ message ContainerID {
 
 
 /**
+ * A unique ID assigned to a resource provider. Currently, a resource
+ * provider gets a new ID whenever it (re)registers with Mesos.
+ */
+message ResourceProviderID {
+  required string value = 1;
+}
+
+
+/**
  * Represents time since the epoch, in nanoseconds.
  */
 message TimeInfo {
@@ -983,6 +992,7 @@ message Resource {
     // TODO(jmlvanre): Add support for BLOCK devices.
     message Source {
       enum Type {
+        UNKNOWN = 0;
         PATH = 1;
         MOUNT = 2;
       }
