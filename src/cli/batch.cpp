@@ -612,6 +612,10 @@ protected:
       cout << "  healthy?: " << status.healthy() << endl;
     }
 
+    if (status.has_check_status()) {
+      cout << "  check status: " << status.check_status() << endl;
+    }
+
     if (status.has_uuid()) {
       Call call;
       call.set_type(Call::ACKNOWLEDGE);
