@@ -231,12 +231,21 @@ of the Docker image.
 If the `--switch_user` flag is set on the agent and the framework
 specifies a user (either `CommandInfo.user` or `FrameworkInfo.user`),
 we expect that user exists in the container image and its uid and gids
-matches that on the host. User namespace and capabilities are not
-supported yet.
+matches that on the host. User namespace is not supported yet. If the
+user is not specified, `root` will be used by default. The operator or
+the framework can limit the
+[capabilities](http://man7.org/linux/man-pages/man7/capabilities.7.html)
+of the container by using the
+[linux/capabilities](linux_capabilities.md) isolator.
 
-Only host network is supported. We will add bridge network support
-soon using CNI support in Mesos
-([MESOS-4641](https://issues.apache.org/jira/browse/MESOS-4641)).
+Currently, we support `host`, `bridge` and user defined networks
+([reference](https://docs.docker.com/engine/userguide/networking/)).
+`none` is not supported yet. We support the above networking modes in
+[Mesos Containerizer](mesos-containerizer.md) using the
+[CNI](https://github.com/containernetworking/cni) (Container Network
+Interface) standard. Please refer to the [network/cni](cni.md)
+isolator document for more details about how to configure the network
+for the container.
 
 ### More agent flags
 

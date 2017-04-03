@@ -14,14 +14,17 @@ This guide describes the process of doing an official release of Mesos.
 
 2. Add your GPG public key to the Apache Mesos dist repository in the KEYS file.
 
-   * Fetch the svn repository:<br>
-     `svn co https://dist.apache.org/repos/dist/release/mesos`
+   * Fetch the svn repository:
 
-   * Append your public key using one of methods described in KEYS, e.g.:<br>
-     `(gpg --list-sigs <your name> && gpg --armor --export <your name>) >> KEYS`.
+          $ svn co https://dist.apache.org/repos/dist/release/mesos
 
-   * Push the commit:<br>
-     `svn ci`
+   * Append your public key using one of methods described in KEYS, e.g.:
+
+          $ (gpg --list-sigs <your name> && gpg --armor --export <your name>) >> KEYS
+
+   * Push the commit:
+
+          $ svn ci
 
 3. Submit your GPG public key to a keyserver, e.g.,
    [MIT PGP Public Key Server](https://pgp.mit.edu).
@@ -51,7 +54,9 @@ This guide describes the process of doing an official release of Mesos.
           </servers>
         </settings>
 
-6. Use `gpg-agent` to avoid typing your passphrase repeatedly.
+6. Use `gpg-agent` to avoid typing your passphrase repeatedly:
+
+        $ export GPG_TTY="$(tty)" && eval $(gpg-agent --daemon)
 
 
 ## Preparation
@@ -111,7 +116,8 @@ This guide describes the process of doing an official release of Mesos.
    pick onto the release branch.
 
 4. Ensure version in `configure.ac` and `CMakeLists.txt` is correctly set for
-   the release.
+   the release. Do not forget to remove "(WIP)" suffix from the release notes'
+   title.
 
 5. Run `make && support/generate-endpoint-help.py` and commit any resulting
    changes.
