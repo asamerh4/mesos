@@ -54,25 +54,6 @@ Subprocess::ParentHook::ParentHook(
   : parent_setup(_parent_setup) {}
 
 
-#ifdef __WINDOWS__
-Subprocess::ParentHook Subprocess::ParentHook::CREATE_JOB()
-{
-  return Subprocess::ParentHook([](pid_t pid) -> Try<Nothing> {
-    // NOTE: The Job Object's handle is not closed here. Although it
-    // looks like we are leaking the handle, we can still retrieve and
-    // close the handle via the `OpenJobObject` Windows API.
-    Try<HANDLE> job = os::create_job(pid);
-
-    if (job.isError()) {
-      return Error(job.error());
-    }
-
-    return Nothing();
-  });
-}
-#endif // __WINDOWS__
-
-
 Subprocess::ChildHook::ChildHook(
     const lambda::function<Try<Nothing>()>& _child_setup)
   : child_setup(_child_setup) {}
@@ -291,7 +272,7 @@ static void cleanup(
 // NOTE: On Windows, components of the `path` and `argv` that need to be quoted
 // are expected to have been quoted before they are passed to `subprocess. For
 // example, either of these may contain paths with spaces in them, like
-// `C:\"Program Files"\foo.exe`, where notably the character sequence `\"` does
+// `C:\"Program Files"\foo.exe`, where notably the character sequence `\"`
 // is not escaped quote, but instead a path separator and the start of a path
 // component. Since the semantics of quoting are shell-dependent, it is not
 // practical to attempt to re-parse the command that is passed in and properly

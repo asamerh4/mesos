@@ -14,29 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LAUNCHER_POSIX_EXECUTOR_HPP__
-#define __LAUNCHER_POSIX_EXECUTOR_HPP__
+#ifndef __MESOS_RESOURCE_PROVIDER_HPP__
+#define __MESOS_RESOURCE_PROVIDER_HPP__
 
-#include <string>
+// ONLY USEFUL AFTER RUNNING PROTOC.
+#include <mesos/resource_provider/resource_provider.pb.h>
 
-#include <mesos/mesos.hpp>
-
-#include <stout/option.hpp>
-
-namespace mesos {
-namespace internal {
-
-pid_t launchTaskPosix(
-    const CommandInfo& command,
-    const std::string& launcherDir,
-    const mesos::Environment& environment,
-    const Option<std::string>& user,
-    const Option<std::string>& rootfs,
-    const Option<std::string>& sandboxDirectory,
-    const Option<std::string>& workingDirectory,
-    const Option<CapabilityInfo>& capabilities);
-
-} // namespace internal {
-} // namespace mesos {
-
-#endif // __LAUNCHER_POSIX_EXECUTOR_HPP__
+#endif // __MESOS_RESOURCE_PROVIDER_HPP__

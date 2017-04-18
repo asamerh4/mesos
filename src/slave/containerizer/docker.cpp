@@ -358,6 +358,24 @@ DockerContainerizerProcess::Container::create(
     ContainerInfo::DockerInfo dockerInfo;
     dockerInfo.set_image(flags.docker_mesos_image.get());
 
+    // `--pid=host` is required for `mesos-docker-executor` to find
+    // the pid of the task in `/proc` when running
+    // `mesos-docker-executor` in a separate docker container.
+    Parameter* pidParameter = dockerInfo.add_parameters();
+    pidParameter ->set_key("pid");
+    pidParameter->set_value("host");
+
+    // `--cap-add=SYS_ADMIN` and `--cap-add=SYS_PTRACE` are required
+    // for `mesos-docker-executor` to enter the namespaces of the task
+    // during health checking when running `mesos-docker-executor` in a
+    // separate docker container.
+    Parameter* capAddParameter = dockerInfo.add_parameters();
+    capAddParameter->set_key("cap-add");
+    capAddParameter->set_value("SYS_ADMIN");
+    capAddParameter = dockerInfo.add_parameters();
+    capAddParameter->set_key("cap-add");
+    capAddParameter->set_value("SYS_PTRACE");
+
     newContainerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
     // NOTE: We do not set the optional `taskEnvironment` here as
@@ -645,6 +663,8 @@ Try<Nothing> DockerContainerizerProcess::unmountPersistentVolumes(
     return Error("Failed to get mount table: " + table.error());
   }
 
+  vector<string> unmountErrors;
+
   foreach (const fs::MountInfoTable::Entry& entry,
            adaptor::reverse(table.get().entries)) {
     // TODO(tnachen): We assume there is only one docker container
@@ -666,12 +686,29 @@ Try<Nothing> DockerContainerizerProcess::unmountPersistentVolumes(
         strings::contains(entry.target, containerId.value())) {
       LOG(INFO) << "Unmounting volume for container '" << containerId << "'";
 
-      Try<Nothing> unmount = fs::unmount(entry.target);
+      // TODO(jieyu): Use MNT_DETACH here to workaround an issue of
+      // incorrect handling of container destroy failures. Currently,
+      // if unmount fails there, the containerizer will still treat
+      // the container as terminated, and the agent will schedule the
+      // cleanup of the container's sandbox. Since the mount hasn't
+      // been removed in the sandbox, that'll result in data in the
+      // persistent volume being incorrectly deleted. Use MNT_DETACH
+      // here so that the mount point in the sandbox will be removed
+      // immediately.  See MESOS-7366 for more details.
+      Try<Nothing> unmount = fs::unmount(entry.target, MNT_DETACH);
       if (unmount.isError()) {
-        return Error("Failed to unmount volume '" + entry.target +
-                     "': " + unmount.error());
+        // NOTE: Instead of short circuit, we try to perform as many
+        // unmount as possible. We'll accumulate the errors together
+        // in the end.
+        unmountErrors.push_back(
+            "Failed to unmount volume '" + entry.target +
+            "': " + unmount.error());
       }
     }
+  }
+
+  if (!unmountErrors.empty()) {
+    return Error(strings::join(", ", unmountErrors));
   }
 #endif // __linux__
   return Nothing();
@@ -768,7 +805,7 @@ Try<Nothing> DockerContainerizerProcess::checkpoint(
           container->executor.executor_id(),
           containerId);
 
-    LOG(INFO) << "Checkpointing pid " << pid << " to '" << path <<  "'";
+    LOG(INFO) << "Checkpointing pid " << pid << " to '" << path << "'";
 
     return slave::state::checkpoint(path, stringify(pid));
   }
@@ -1429,11 +1466,12 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
   // be overwritten if they are specified by the framework.  This might cause
   // applications to not work, but upon overriding system defaults, it becomes
   // the overidder's problem.
-  Option<map<string, string>> systemEnvironment =
+  Option<map<std::wstring, std::wstring>> systemEnvironment =
     process::internal::getSystemEnvironment();
-  foreachpair(const string& key, const string& value,
-    systemEnvironment.get()) {
-    environment[key] = value;
+  foreachpair(const std::wstring& key,
+              const std::wstring& value,
+              systemEnvironment.get()) {
+    environment[stringify(key)] = stringify(value);
   }
 #endif // __WINDOWS__
 

@@ -1157,7 +1157,7 @@ int PortMappingStatistics::execute()
           Try<int64_t> val = numify<int64_t>(tokens[i]);
 
           if (val.isError()) {
-            cerr << "Failed to parse the statistics in " <<  fields[0]
+            cerr << "Failed to parse the statistics in " << fields[0]
                  << val.error() << endl;
             return 1;
           }
@@ -1553,7 +1553,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
     // eth0 is not specified in the flag and we did not get a valid
     // eth0 from the library.
     return Error(
-        "Network Isolator failed to find a public interface: " + eth0.error());
+        "Network Isolator failed to find a public interface: " +
+        (eth0.isError() ? eth0.error() : "does not have a public interface"));
   }
 
   LOG(INFO) << "Using " << eth0.get() << " as the public interface";
@@ -1578,7 +1579,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
     // lo is not specified in the flag and we did not get a valid
     // lo from the library.
     return Error(
-        "Network Isolator failed to find a loopback interface: " + lo.error());
+        "Network Isolator failed to find a loopback interface: " +
+        (lo.isError() ? lo.error() : "does not have a loopback interface"));
   }
 
   LOG(INFO) << "Using " << lo.get() << " as the loopback interface";
@@ -2902,7 +2904,7 @@ Future<ContainerLimitation> PortMappingIsolatorProcess::watch(
   if (unmanaged.contains(containerId)) {
     LOG(WARNING) << "Ignoring watch for unmanaged container " << containerId;
   } else if (!infos.contains(containerId)) {
-    LOG(WARNING) << "Ignoring watch for unknown container "  << containerId;
+    LOG(WARNING) << "Ignoring watch for unknown container " << containerId;
   }
 
   // Currently, we always return a pending future because limitation

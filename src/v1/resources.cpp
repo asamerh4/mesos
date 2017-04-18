@@ -114,7 +114,15 @@ bool operator==(
     const Resource::DiskInfo::Source::Path& left,
     const Resource::DiskInfo::Source::Path& right)
 {
-  return left.root() == right.root();
+  if (left.has_root() != right.has_root()) {
+    return false;
+  }
+
+  if (left.has_root() && left.root() != right.root()) {
+    return false;
+  }
+
+  return true;
 }
 
 
@@ -122,6 +130,14 @@ bool operator==(
     const Resource::DiskInfo::Source::Mount& left,
     const Resource::DiskInfo::Source::Mount& right)
 {
+  if (left.has_root() != right.has_root()) {
+    return false;
+  }
+
+  if (left.has_root() && left.root() != right.root()) {
+    return false;
+  }
+
   return left.root() == right.root();
 }
 
@@ -338,6 +354,15 @@ static bool addable(const Resource& left, const Resource& right)
     return false;
   }
 
+  // Check ResourceProvider.
+  if (left.has_provider_id() != right.has_provider_id()) {
+    return false;
+  }
+
+  if (left.has_provider_id() && left.provider_id() != right.provider_id()) {
+    return false;
+  }
+
   return true;
 }
 
@@ -412,6 +437,15 @@ static bool subtractable(const Resource& left, const Resource& right)
 
   // Check RevocableInfo.
   if (left.has_revocable() != right.has_revocable()) {
+    return false;
+  }
+
+  // Check ResourceProvider.
+  if (left.has_provider_id() != right.has_provider_id()) {
+    return false;
+  }
+
+  if (left.has_provider_id() && left.provider_id() != right.provider_id()) {
     return false;
   }
 
@@ -781,18 +815,8 @@ Option<Error> Resources::validate(const Resource& resource)
 
       switch (source.type()) {
         case Resource::DiskInfo::Source::PATH:
-          if (!source.has_path()) {
-            return Error(
-                "DiskInfo::Source 'type' set to 'PATH' but missing 'path' "
-                "data");
-          }
-          break;
         case Resource::DiskInfo::Source::MOUNT:
-          if (!source.has_mount()) {
-            return Error(
-                "DiskInfo::Source 'type' set to 'MOUNT' but missing 'mount' "
-                "data");
-          }
+          // `PATH` and `MOUNT` contain only `optional` members.
           break;
         case Resource::DiskInfo::Source::UNKNOWN:
           return Error(
@@ -1857,9 +1881,13 @@ ostream& operator<<(ostream& stream, const Resource::DiskInfo::Source& source)
 {
   switch (source.type()) {
     case Resource::DiskInfo::Source::MOUNT:
-      return stream << "MOUNT:" + source.mount().root();
+      return stream << "MOUNT"
+                    << (source.mount().has_root() ? ":" + source.mount().root()
+                                                  : "");
     case Resource::DiskInfo::Source::PATH:
-      return stream << "PATH:" + source.path().root();
+      return stream << "PATH"
+                    << (source.path().has_root() ? ":" + source.path().root()
+                                                 : "");
     case Resource::DiskInfo::Source::UNKNOWN:
       return stream << "UNKNOWN";
   }

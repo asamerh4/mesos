@@ -14,24 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LAUNCHER_WINDOWS_EXECUTOR_HPP__
-#define __LAUNCHER_WINDOWS_EXECUTOR_HPP__
+#ifndef __MESOS_V1_RESOURCE_PROVIDER_HPP__
+#define __MESOS_V1_RESOURCE_PROVIDER_HPP__
 
-#include <string>
+// ONLY USEFUL AFTER RUNNING PROTOC.
+#include <mesos/v1/resource_provider/resource_provider.pb.h>
 
-#include <mesos/mesos.hpp>
-
-#include <stout/option.hpp>
-#include <stout/windows.hpp>
-
-namespace mesos {
-namespace internal {
-
-PROCESS_INFORMATION launchTaskWindows(
-    const CommandInfo& command,
-    Option<std::string>& rootfs);
-
-} // namespace internal {
-} // namespace mesos {
-
-#endif // __LAUNCHER_WINDOWS_EXECUTOR_HPP__
+#endif // __MESOS_V1_RESOURCE_PROVIDER_HPP__

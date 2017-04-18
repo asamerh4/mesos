@@ -172,7 +172,8 @@ public:
       const process::UPID& from,
       const KillTaskMessage& killTaskMessage);
 
-  void shutdownExecutor(
+  // Made 'virtual' for Slave mocking.
+  virtual void shutdownExecutor(
       const process::UPID& from,
       const FrameworkID& frameworkId,
       const ExecutorID& executorId);
@@ -504,10 +505,6 @@ private:
     explicit Http(Slave* _slave)
       : slave(_slave),
         statisticsLimiter(new process::RateLimiter(2, Seconds(1))) {}
-
-    // Logs the request, route handlers can compose this with the
-    // desired request handler to get consistent request logging.
-    static void log(const process::http::Request& request);
 
     // /api/v1
     process::Future<process::http::Response> api(

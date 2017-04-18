@@ -37,6 +37,9 @@ All Issues:
   * [MESOS-7263] - User supplied task environment variables cause warnings in sandbox stdout.
   * [MESOS-7264] - Possibly duplicate environment variables should not leak values to the sandbox.
   * [MESOS-7265] - Containerizer startup may cause sensitive data to leak into sandbox logs.
+  * [MESOS-7366] - Agent sandbox gc could accidentally delete the entire persistent volume content.
+  * [MESOS-7383] - Docker executor logs possibly sensitive parameters.
+  * [MESOS-7350] - Failed to pull image from Nexus Registry due to signature missing.
 
 
 Release Notes - Mesos - Version 1.2.0
@@ -482,6 +485,9 @@ All Issues:
 ** Bug
   * [MESOS-2537] - AC_ARG_ENABLED checks are broken.
   * [MESOS-7237] - Enabling cgroups_limit_swap can lead to "invalid argument" error.
+  * [MESOS-7366] - Agent sandbox gc could accidentally delete the entire persistent volume content.
+  * [MESOS-7383] - Docker executor logs possibly sensitive parameters.
+  * [MESOS-7350] - Failed to pull image from Nexus Registry due to signature missing.
 
 
 Release Notes - Mesos - Version 1.1.1
@@ -920,6 +926,19 @@ All Issues:
   * [MESOS-5929] - Total cluster resources on master Mesos UI should have better spacing.
 
 
+Release Notes - Mesos - Version 1.0.4 (WIP)
+-------------------------------------
+* This is a bug fix release.
+
+All Issues:
+** Bug
+    * [MESOS-2537] - AC_ARG_ENABLED checks are broken
+    * [MESOS-6606] - Reject optimized builds with libcxx before 3.9
+    * [MESOS-7008] - Quota not recovered from registry in empty cluster.
+    * [MESOS-7366] - Agent sandbox gc could accidentally delete the entire persistent volume content.
+    * [MESOS-7383] - Docker executor logs possibly sensitive parameters.
+
+
 Release Notes - Mesos - Version 1.0.3
 -------------------------------------
 * This is a bug fix release.
@@ -931,7 +950,6 @@ All Issues:
     * [MESOS-6621] - SSL downgrade path will CHECK-fail when using both temporary and persistent sockets
     * [MESOS-6676] - Always re-link with scheduler during re-registration.
     * [MESOS-6917] - Segfault when the executor sets an invalid UUID when sending a status update.
-    * [MESOS-7008] - Quota not recovered from registry in empty cluster.
 
 
 Release Notes - Mesos - Version 1.0.2

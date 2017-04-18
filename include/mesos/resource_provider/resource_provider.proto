@@ -14,16 +14,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LAUNCHER_EXECUTOR_HPP__
-#define __LAUNCHER_EXECUTOR_HPP__
+syntax = "proto2";
+
+package mesos.resource_provider;
+
+option java_package = "org.apache.mesos.resource_provider";
+option java_outer_classname = "Protos";
 
 
-// For readability, we minimize the number of #ifdef blocks in the code by
-// splitting platform specific system calls into separate directories.
-#ifdef __WINDOWS__
-#include "launcher/windows/executor.hpp"
-#else
-#include "launcher/posix/executor.hpp"
-#endif // __WINDOWS__
+message Event {
+  enum Type {
+    // This must be the first enum value in this list, to
+    // ensure that if 'type' is not set, the default value
+    // is UNKNOWN. This enables enum values to be added
+    // in a backwards-compatible way. See: MESOS-4997.
+    UNKNOWN = 0;
+  }
 
-#endif // __LAUNCHER_EXECUTOR_HPP__
+  optional Type type = 1;
+}
+
+
+message Call {
+  enum Type {
+    // This must be the first enum value in this list, to
+    // ensure that if 'type' is not set, the default value
+    // is UNKNOWN. This enables enum values to be added
+    // in a backwards-compatible way. See: MESOS-4997.
+    UNKNOWN = 0;
+  }
+
+  optional Type type = 1;
+}

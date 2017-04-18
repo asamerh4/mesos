@@ -323,24 +323,6 @@ struct FrameworkWriter
 };
 
 
-void Slave::Http::log(const Request& request)
-{
-  Option<string> userAgent = request.headers.get("User-Agent");
-  Option<string> forwardedFor = request.headers.get("X-Forwarded-For");
-
-  LOG(INFO) << "HTTP " << request.method << " for " << request.url.path
-            << (request.client.isSome()
-                ? " from " + stringify(request.client.get())
-                : "")
-            << (userAgent.isSome()
-                ? " with User-Agent='" + userAgent.get() + "'"
-                : "")
-            << (forwardedFor.isSome()
-                ? " with X-Forwarded-For='" + forwardedFor.get() + "'"
-                : "");
-}
-
-
 string Slave::Http::API_HELP()
 {
   return HELP(
@@ -539,7 +521,7 @@ Future<Response> Slave::Http::_api(
              call.type() == mesos::agent::Call::ATTACH_CONTAINER_INPUT) {
     return UnsupportedMediaType(
         string("Expecting 'Content-Type' to be ") + APPLICATION_RECORDIO +
-        " for "  + stringify(call.type()) + " call");
+        " for " + stringify(call.type()) + " call");
   }
 
   LOG(INFO) << "Processing call " << call.type();
@@ -625,10 +607,12 @@ string Slave::Http::EXECUTOR_HELP() {
     DESCRIPTION(
         "This endpoint is used by the executors to interact with the",
         "agent via Call/Event messages.",
+        "",
         "Returns 200 OK iff the initial SUBSCRIBE Call is successful.",
-        "This would result in a streaming response via chunked",
+        "This will result in a streaming response via chunked",
         "transfer encoding. The executors can process the response",
         "incrementally.",
+        "",
         "Returns 202 Accepted for all other Call messages iff the",
         "request is accepted."),
     AUTHENTICATION(false));
