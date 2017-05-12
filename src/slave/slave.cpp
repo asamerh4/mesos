@@ -463,7 +463,7 @@ void Slave::initialize()
 
         if (!foundEntry) {
           EXIT(EXIT_FAILURE)
-            << "Failed to found mount '" << realpath.get()
+            << "Failed to find mount '" << realpath.get()
             << "' in /proc/mounts";
         }
 #else // __linux__
@@ -520,7 +520,7 @@ void Slave::initialize()
 
   // Initialize `totalResources` with `info.resources`, checkpointed
   // resources will be applied later during recovery.
-  totalResources = resources.get();
+  totalResources = info.resources();
 
   LOG(INFO) << "Agent resources: " << info.resources();
 
@@ -4994,21 +4994,28 @@ ExecutorInfo Slave::getExecutorInfo(
       "cpus:" + stringify(DEFAULT_EXECUTOR_CPUS) + ";" +
       "mem:" + stringify(DEFAULT_EXECUTOR_MEM.megabytes())).get();
 
-  // Inject the task's allocation role into the executor's resources.
+  // If the task has an allocation role, we inject it into
+  // the executor as well. Note that old masters will not
+  // ensure the allocation info is set, and the agent will
+  // inject this later, when storing the task/executor.
   Option<string> role = None();
   foreach (const Resource& resource, task.resources()) {
-    CHECK(resource.has_allocation_info());
-
-    if (role.isNone()) {
+    if (role.isNone() && resource.has_allocation_info()) {
       role = resource.allocation_info().role();
     }
 
-    CHECK_EQ(role.get(), resource.allocation_info().role());
+    // Check that the roles are consistent.
+    Option<string> otherRole = resource.has_allocation_info()
+        ? Option<string>(resource.allocation_info().role()) : None();
+
+    CHECK(role == otherRole)
+      << (role.isSome() ? role.get() : "None")
+      << " vs " << (otherRole.isSome() ? otherRole.get() : "None");
   }
 
-  CHECK_SOME(role);
-
-  executorOverhead.allocate(role.get());
+  if (role.isSome()) {
+    executorOverhead.allocate(role.get());
+  }
 
   executor.mutable_resources()->CopyFrom(executorOverhead);
 
@@ -6740,19 +6747,17 @@ double Slave::_resources_total(const string& name)
 
 double Slave::_resources_used(const string& name)
 {
-  double used = 0.0;
+  // We use `Resources` arithmetic to accummulate the resources since the
+  // `+=` operator de-duplicates the same shared resources across executors.
+  Resources used;
 
   foreachvalue (Framework* framework, frameworks) {
     foreachvalue (Executor* executor, framework->executors) {
-      foreach (const Resource& resource, executor->resources.nonRevocable()) {
-        if (resource.name() == name && resource.type() == Value::SCALAR) {
-          used += resource.scalar().value();
-        }
-      }
+      used += executor->resources.nonRevocable();
     }
   }
 
-  return used;
+  return used.get<Value::Scalar>(name).getOrElse(Value::Scalar()).value();
 }
 
 
@@ -6786,19 +6791,17 @@ double Slave::_resources_revocable_total(const string& name)
 
 double Slave::_resources_revocable_used(const string& name)
 {
-  double used = 0.0;
+  // We use `Resources` arithmetic to accummulate the resources since the
+  // `+=` operator de-duplicates the same shared resources across executors.
+  Resources used;
 
   foreachvalue (Framework* framework, frameworks) {
     foreachvalue (Executor* executor, framework->executors) {
-      foreach (const Resource& resource, executor->resources.revocable()) {
-        if (resource.name() == name && resource.type() == Value::SCALAR) {
-          used += resource.scalar().value();
-        }
-      }
+      used += executor->resources.revocable();
     }
   }
 
-  return used;
+  return used.get<Value::Scalar>(name).getOrElse(Value::Scalar()).value();
 }
 
 

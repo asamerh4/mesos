@@ -120,7 +120,7 @@ mesos::internal::slave::Flags::Flags()
       "launcher if it's running as root on Linux.",
 #ifdef __linux__
       LinuxLauncher::available() ? "linux" : "posix"
-#elif __WINDOWS__
+#elif defined(__WINDOWS__)
       "windows"
 #else
       "posix"
@@ -453,6 +453,41 @@ mesos::internal::slave::Flags::Flags()
       "A range of the form 0xAAAA,0xBBBB, specifying the valid secondary\n"
       "handles that can be used with the primary handle. This will take\n"
       "effect only when the `--cgroups_net_cls_primary_handle is set.");
+
+  add(&Flags::allowed_devices,
+      "allowed_devices",
+      "JSON array representing the devices that will be additionally\n"
+      "whitelisted by cgroups devices subsystem. Noted that the following\n"
+      "devices always be whitelisted by default:\n"
+      "  * /dev/console\n"
+      "  * /dev/tty0\n"
+      "  * /dev/tty1\n"
+      "  * /dev/pts/*\n"
+      "  * /dev/ptmx\n"
+      "  * /dev/net/tun\n"
+      "  * /dev/null\n"
+      "  * /dev/zero\n"
+      "  * /dev/full\n"
+      "  * /dev/tty\n"
+      "  * /dev/urandom\n"
+      "  * /dev/random\n"
+      "This flag will take effect only when `cgroups/devices` is set in\n"
+      "`--isolation` flag.\n"
+      "Example:\n"
+      "{\n"
+      "  \"allowed_devices\": [\n"
+      "    {\n"
+      "      \"device\": {\n"
+      "        \"path\": \"/path/to/device\"\n"
+      "      },\n"
+      "      \"access\": {\n"
+      "        \"read\": true,\n"
+      "        \"write\": false,\n"
+      "        \"mknod\": false\n"
+      "      }\n"
+      "    }\n"
+      "  ]\n"
+      "}\n");
 
   add(&Flags::agent_subsystems,
       "agent_subsystems",

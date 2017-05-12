@@ -1120,7 +1120,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   tests/containerizer.hpp						\
   tests/environment.hpp							\
   tests/flags.hpp							\
-  tests/health_check_test_helper.hpp					\
+  tests/http_server_test_helper.hpp					\
   tests/kill_policy_test_helper.hpp					\
   tests/limiter.hpp							\
   tests/mesos.hpp							\
@@ -1623,7 +1623,8 @@ nobase_dist_pkgdata_DATA +=						\
   webui/master/static/fonts/glyphicons-halflings-regular.eot		\
   webui/master/static/fonts/glyphicons-halflings-regular.svg		\
   webui/master/static/fonts/glyphicons-halflings-regular.ttf		\
-  webui/master/static/fonts/glyphicons-halflings-regular.woff
+  webui/master/static/fonts/glyphicons-halflings-regular.woff		\
+  webui/master/static/fonts/glyphicons-halflings-regular.woff2
 
 # Need to distribute/install third-party javascript.
 nobase_dist_pkgdata_DATA +=						\
@@ -2096,7 +2097,7 @@ check_PROGRAMS += test-helper
 test_helper_SOURCES =						\
   tests/active_user_test_helper.cpp				\
   tests/flags.cpp						\
-  tests/health_check_test_helper.cpp				\
+  tests/http_server_test_helper.cpp				\
   tests/kill_policy_test_helper.cpp				\
   tests/resources_utils.cpp					\
   tests/test_helper_main.cpp					\
@@ -2269,11 +2270,11 @@ mesos_tests_SOURCES =						\
   tests/gc_tests.cpp						\
   tests/hdfs_tests.cpp						\
   tests/health_check_tests.cpp					\
-  tests/health_check_test_helper.cpp				\
   tests/hierarchical_allocator_tests.cpp			\
   tests/hook_tests.cpp						\
   tests/http_authentication_tests.cpp				\
   tests/http_fault_tolerance_tests.cpp				\
+  tests/http_server_test_helper.cpp				\
   tests/kill_policy_test_helper.cpp				\
   tests/log_tests.cpp						\
   tests/logging_tests.cpp					\

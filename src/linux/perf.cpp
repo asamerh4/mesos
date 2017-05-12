@@ -300,35 +300,24 @@ Future<hashmap<string, mesos::PerfStatistics>> sample(
   Future<string> output = perf->output();
   spawn(perf, true);
 
-  auto parse = [start, duration](
-      const tuple<Version, string> values) ->
-      Future<hashmap<string, mesos::PerfStatistics>> {
-    const Version& version = std::get<0>(values);
-    const string& output = std::get<1>(values);
-
-    // Check that the version is supported.
-    if (!supported(version)) {
-      return Failure("Perf " + stringify(version) + " is not supported");
-    }
-
-    Try<hashmap<string, mesos::PerfStatistics>> result =
-      perf::parse(output, version);
-
-    if (result.isError()) {
-      return Failure("Failed to parse perf sample: " + result.error());
-    }
-
-    foreachvalue (mesos::PerfStatistics& statistics, result.get()) {
-      statistics.set_timestamp(start.secs());
-      statistics.set_duration(duration.secs());
-    }
-
-    return result.get();
-  };
-
   // TODO(pbrett): Don't wait for these forever!
-  return process::collect(perf::version(), output)
-    .then(parse);
+  return output
+    .then([start, duration](const string output)
+        -> Future<hashmap<string, mesos::PerfStatistics>> {
+      Try<hashmap<string, mesos::PerfStatistics>> result =
+        perf::parse(output);
+
+      if (result.isError()) {
+        return Failure("Failed to parse perf sample: " + result.error());
+      }
+
+      foreachvalue (mesos::PerfStatistics& statistics, result.get()) {
+        statistics.set_timestamp(start.secs());
+        statistics.set_duration(duration.secs());
+      }
+
+      return result.get();
+    });
 }
 
 
@@ -362,43 +351,48 @@ struct Sample
 
   // Convert a single line of perf output in CSV format (using
   // PERF_DELIMITER as a separator) to a sample.
-  static Try<Sample> parse(const string& line, const Version& version)
+  static Try<Sample> parse(const string& line)
   {
     // We use strings::split to separate the tokens
     // because the unit field can be empty.
     vector<string> tokens = strings::split(line, PERF_DELIMITER);
 
-    // The following formats are possible:
-    //   (1) value,event,cgroup (since Linux v2.6.39)
-    //   (2) value,unit,event,cgroup (since Linux v3.14)
-    //   (3) value,unit,event,cgroup,running,ratio (since Linux v4.1)
-    //
-    // Note that we do not use the kernel version when parsing
-    // because OS vendors often backport perf tool functionality
-    // into older kernel versions.
+    // A number of CSV formats are possible.  Note that we do not
+    // use the kernel version when parsing because OS vendors often
+    // backport perf tool functionality into older kernel versions.
 
-    if (tokens.size() == 3) {
-      return Sample({tokens[0], internal::normalize(tokens[1]), tokens[2]});
+    switch (tokens.size()) {
+      // value,event,cgroup (since Linux v2.6.39)
+      case 3:
+        return Sample({tokens[0], internal::normalize(tokens[1]), tokens[2]});
+
+      // value,unit,event,cgroup (since Linux v3.14)
+      case 4:
+
+      // value,unit,event,cgroup,running,measurement-ratio (since Linux v4.1)
+      case 6:
+
+      // value,unit,event,cgroup,running,measurement-ratio,
+      // aggregate-value,aggregate-unit (since Linux v4.6)
+      case 8:
+        return Sample({tokens[0], internal::normalize(tokens[2]), tokens[3]});
+
+      // Bail out if the format is not recognized.
+      default:
+        return Error(
+            "Unexpected number of fields (" + stringify(tokens.size()) + ")");
     }
-
-    if (tokens.size() == 4 || tokens.size() == 6) {
-      return Sample({tokens[0], internal::normalize(tokens[2]), tokens[3]});
-    }
-
-    // Bail out if the format is not recognized.
-    return Error("Unexpected number of fields");
   }
 };
 
 
 Try<hashmap<string, mesos::PerfStatistics>> parse(
-    const string& output,
-    const Version& version)
+    const string& output)
 {
   hashmap<string, mesos::PerfStatistics> statistics;
 
   foreach (const string& line, strings::tokenize(output, "\n")) {
-    Try<Sample> sample = Sample::parse(line, version);
+    Try<Sample> sample = Sample::parse(line);
 
     if (sample.isError()) {
       return Error("Failed to parse perf sample line '" + line + "': " +

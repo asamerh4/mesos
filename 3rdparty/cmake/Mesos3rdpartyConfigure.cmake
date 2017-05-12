@@ -20,13 +20,11 @@ set(MESOS_3RDPARTY_SRC ${CMAKE_SOURCE_DIR}/3rdparty)
 set(MESOS_3RDPARTY_BIN ${CMAKE_BINARY_DIR}/3rdparty)
 
 if (NOT WIN32)
-  EXTERNAL("leveldb"   ${LEVELDB_VERSION}   "${MESOS_3RDPARTY_BIN}")
-  EXTERNAL("zookeeper" ${ZOOKEEPER_VERSION} "${MESOS_3RDPARTY_BIN}")
-elseif (WIN32)
-  # The latest release of ZK, 3.4.7, does not compile on Windows. Therefore, we
-  # pick a recent commit that does until the next release stabilizes.
-  EXTERNAL("zookeeper" "06d3f3f" "${MESOS_3RDPARTY_BIN}")
+  # LevelDB does not build on Windows.
+  EXTERNAL("leveldb" ${LEVELDB_VERSION} "${MESOS_3RDPARTY_BIN}")
 endif (NOT WIN32)
+
+EXTERNAL("zookeeper" ${ZOOKEEPER_VERSION} "${MESOS_3RDPARTY_BIN}")
 
 # Intermediate convenience variables for oddly-structured directories.
 set(ZOOKEEPER_C_ROOT ${ZOOKEEPER_ROOT}/src/c)
@@ -41,7 +39,7 @@ set(ZOOKEEPER_INCLUDE_DIR ${ZOOKEEPER_C_ROOT}/include)
 if (NOT WIN32)
   set(ZOOKEEPER_LIB_DIR ${ZOOKEEPER_LIB})
 else (NOT WIN32)
-  set(ZOOKEEPER_LIB_DIR ${ZOOKEEPER_LIB}/x64/${CMAKE_BUILD_TYPE})
+  set(ZOOKEEPER_LIB_DIR ${ZOOKEEPER_ROOT}-build/${CMAKE_BUILD_TYPE})
 endif (NOT WIN32)
 
 # Convenience variables for "lflags", the symbols we pass to CMake to generate
@@ -50,7 +48,7 @@ if (NOT WIN32)
   set(LEVELDB_LFLAG   ${LEVELDB_ROOT}/out-static/libleveldb.a)
   set(ZOOKEEPER_LFLAG ${ZOOKEEPER_LIB}/lib/libzookeeper_mt.a)
 else (NOT WIN32)
-  set(ZOOKEEPER_LFLAG zookeeper)
+  set(ZOOKEEPER_LFLAG zookeeper hashtable)
 endif (NOT WIN32)
 
 # Configure Windows use of the GNU patch utility;

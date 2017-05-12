@@ -19,12 +19,12 @@
 if (NOT WIN32)
   cmake_minimum_required(VERSION 2.8.10)
 else (NOT WIN32)
-  cmake_minimum_required(VERSION 3.6.0)
+  cmake_minimum_required(VERSION 3.7.0)
 endif (NOT WIN32)
 
 project(Mesos)
 set(MESOS_MAJOR_VERSION 1)
-set(MESOS_MINOR_VERSION 3)
+set(MESOS_MINOR_VERSION 4)
 set(MESOS_PATCH_VERSION 0)
 set(PACKAGE_VERSION
   ${MESOS_MAJOR_VERSION}.${MESOS_MINOR_VERSION}.${MESOS_PATCH_VERSION})

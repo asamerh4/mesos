@@ -399,8 +399,6 @@ void Framework::trackUnderRole(const string& role)
 
   CHECK(!isTrackedUnderRole(role));
 
-  CHECK(roles.count(role) > 0);
-
   if (!master->roles.contains(role)) {
     master->roles[role] = new Role(role);
   }
@@ -823,7 +821,7 @@ void Master::initialize()
   install<ReviveOffersMessage>(
       &Master::reviveOffers,
       &ReviveOffersMessage::framework_id,
-      &ReviveOffersMessage::role);
+      &ReviveOffersMessage::roles);
 
   install<KillTaskMessage>(
       &Master::killTask,
@@ -1311,10 +1309,7 @@ void Master::exited(const UPID& pid)
     }
   }
 
-  if (slaves.registered.contains(pid)) {
-    Slave* slave = slaves.registered.get(pid);
-    CHECK_NOTNULL(slave);
-
+  if (Slave* slave = slaves.registered.get(pid)) {
     LOG(INFO) << "Agent " << *slave << " disconnected";
 
     if (slave->connected) {
@@ -3306,34 +3301,33 @@ void Master::suppress(
 
   ++metrics->messages_suppress_offers;
 
-  const Option<string> role =
-    suppress.has_role() ? Option<string>(suppress.role()) : None();
+  set<string> roles;
 
-  // Validate role if it is set. We need to make sure the role is valid
-  // and also one of the framework roles.
-  if (role.isSome()) {
-    // There maybe cases that the framework developer set an invalid role
-    // when constructing `scheduler::Call::Suppress`.
-    Option<Error> roleError = roles::validate(role.get());
+  // Validate the roles, if provided. We need to make sure the
+  // roles is valid and also contained within the framework roles.
+  // Note that if a single role is invalid, we drop the entire
+  // call and do not suppress the valid roles.
+  foreach (const string& role, suppress.roles()) {
+    Option<Error> roleError = roles::validate(role);
     if (roleError.isSome()) {
       drop(framework,
            suppress,
-           "suppression role is invalid: " + roleError->message);
-
+           "suppression role '" + role + "' is invalid: " + roleError->message);
       return;
     }
 
-    if (framework->roles.count(role.get()) == 0) {
+    if (framework->roles.count(role) == 0) {
       drop(framework,
            suppress,
-           "suppression role " + role.get() + " is not one"
+           "suppression role '" + role + "' is not one"
            " of the frameworks's subscribed roles");
-
       return;
     }
+
+    roles.insert(role);
   }
 
-  allocator->suppressOffers(framework->id(), role);
+  allocator->suppressOffers(framework->id(), roles);
 }
 
 
@@ -3653,6 +3647,31 @@ Future<bool> Master::authorizeDestroyVolume(
         }
         return true;
       });
+}
+
+
+Future<bool> Master::authorizeSlave(const Option<string>& principal)
+{
+  if (authorizer.isNone()) {
+    return true;
+  }
+
+  LOG(INFO) << "Authorizing agent "
+            << (principal.isSome()
+                ? "with principal '" + principal.get() + "'"
+                : "without a principal");
+
+  authorization::Request request;
+  request.set_action(authorization::REGISTER_AGENT);
+
+  if (principal.isSome()) {
+    request.mutable_subject()->set_value(principal.get());
+  }
+
+  // No need to set the request's object as it is implicitly set to
+  // ANY by the authorizer.
+
+  return authorizer.get()->authorized(request);
 }
 
 
@@ -4320,15 +4339,21 @@ void Master::_accept(
         // rescind those offers.
         foreach (Offer* offer, utils::copy(slave->offers)) {
           const Resources& offered = offer->resources();
+
           foreach (const Resource& volume, operation.destroy().volumes()) {
             if (offered.contains(volume)) {
               allocator->recoverResources(
                   offer->framework_id(),
                   offer->slave_id(),
-                  offer->resources(),
+                  offered,
                   None());
 
               removeOffer(offer, true);
+
+              // This offer may contain other volumes that are being destroyed.
+              // However, we have already rescinded it, so we should move on
+              // to the next offer.
+              break;
             }
           }
         }
@@ -4880,7 +4905,7 @@ void Master::declineInverseOffers(
 void Master::reviveOffers(
     const UPID& from,
     const FrameworkID& frameworkId,
-    const string& role)
+    const vector<string>& roles)
 {
   Framework* framework = getFramework(frameworkId);
 
@@ -4899,8 +4924,8 @@ void Master::reviveOffers(
   }
 
   scheduler::Call::Revive call;
-  if (!role.empty()) {
-    call.set_role(role);
+  foreach (const string& role, roles) {
+    call.add_roles(role);
   }
 
   revive(framework, call);
@@ -4917,32 +4942,33 @@ void Master::revive(
 
   ++metrics->messages_revive_offers;
 
-  const Option<string> role =
-    revive.has_role() ? Option<string>(revive.role()) : None();
+  set<string> roles;
 
-  // Validate role if it is set. We need to make sure the role is valid
-  // and also one of the framework roles.
-  if (role.isSome()) {
-    Option<Error> roleError = roles::validate(role.get());
+  // Validate the roles, if provided. We need to make sure the
+  // roles is valid and also contained within the framework roles.
+  // Note that if a single role is invalid, we drop the entire
+  // call and do not suppress the valid roles.
+  foreach (const string& role, revive.roles()) {
+    Option<Error> roleError = roles::validate(role);
     if (roleError.isSome()) {
       drop(framework,
            revive,
-           "revive role is invalid: " + roleError->message);
-
+           "revive role '" + role + "' is invalid: " + roleError->message);
       return;
     }
 
-    if (framework->roles.count(role.get()) == 0) {
+    if (framework->roles.count(role) == 0) {
       drop(framework,
            revive,
-           "revive role " + role.get() + " is not one"
+           "revive role '" + role + "' is not one"
            " of the frameworks's subscribed roles");
-
       return;
     }
+
+    roles.insert(role);
   }
 
-  allocator->reviveOffers(framework->id(), role);
+  allocator->reviveOffers(framework->id(), roles);
 }
 
 
@@ -5272,7 +5298,9 @@ void Master::executorMessage(
 
   // The slave should (re-)register with the master before
   // forwarding executor messages.
-  if (!slaves.registered.contains(slaveId)) {
+  Slave* slave = slaves.registered.get(slaveId);
+
+  if (slave == nullptr) {
     LOG(WARNING) << "Ignoring executor message"
                  << " from executor '" << executorId << "'"
                  << " of framework " << frameworkId
@@ -5280,9 +5308,6 @@ void Master::executorMessage(
     metrics->invalid_executor_to_framework_messages++;
     return;
   }
-
-  Slave* slave = slaves.registered.get(slaveId);
-  CHECK_NOTNULL(slave);
 
   Framework* framework = getFramework(frameworkId);
 
@@ -5384,29 +5409,122 @@ void Master::registerSlave(
     return;
   }
 
+  Option<Error> error = validation::master::message::registerSlave(
+      slaveInfo, checkpointedResources);
+
+  if (error.isSome()) {
+    LOG(WARNING) << "Dropping registration of agent at " << from
+                 << " because it sent an invalid registration: "
+                 << error->message;
+    return;
+  }
+
+  if (slaves.registering.contains(from)) {
+    LOG(INFO) << "Ignoring register agent message from " << from
+              << " (" << slaveInfo.hostname() << ") as registration"
+              << " is already in progress";
+    return;
+  }
+
+  LOG(INFO) << "Received register agent message from "
+            << from << " (" << slaveInfo.hostname() << ")";
+
+  slaves.registering.insert(from);
+
+  // Note that the principal may be empty if authentication is not
+  // required. Also it is passed along because it may be removed from
+  // `authenticated` while the authorization is pending.
+  Option<string> principal = authenticated.get(from);
+
+  authorizeSlave(principal)
+    .onAny(defer(self(),
+                 &Self::_registerSlave,
+                 slaveInfo,
+                 from,
+                 principal,
+                 checkpointedResources,
+                 version,
+                 agentCapabilities,
+                 lambda::_1));
+}
+
+
+void Master::_registerSlave(
+    const SlaveInfo& slaveInfo,
+    const UPID& pid,
+    const Option<string>& principal,
+    const vector<Resource>& checkpointedResources,
+    const string& version,
+    const vector<SlaveInfo::Capability>& agentCapabilities,
+    const Future<bool>& authorized)
+{
+  CHECK(!authorized.isDiscarded());
+  CHECK(slaves.registering.contains(pid));
+
+  Option<string> authorizationError = None();
+
+  if (authorized.isFailed()) {
+    authorizationError = "Authorization failure: " + authorized.failure();
+  } else if (!authorized.get()) {
+    authorizationError =
+      "Not authorized to register as agent " +
+      (principal.isSome()
+       ? "with principal '" + principal.get() + "'"
+       : "without a principal");
+  }
+
+  if (authorizationError.isSome()) {
+    LOG(WARNING) << "Refusing registration of agent at " << pid
+                 << ": " << authorizationError.get();
+
+    ShutdownMessage message;
+    message.set_message(authorizationError.get());
+    send(pid, message);
+
+    slaves.registering.erase(pid);
+    return;
+  }
+
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
-  machineId.set_ip(stringify(from.address.ip));
+  machineId.set_ip(stringify(pid.address.ip));
 
   // Slaves are not allowed to register while the machine they are on is in
   // `DOWN` mode.
   if (machines.contains(machineId) &&
       machines[machineId].info.mode() == MachineInfo::DOWN) {
-    LOG(WARNING) << "Refusing registration of agent at " << from
+    LOG(WARNING) << "Refusing registration of agent at " << pid
                  << " because the machine '" << machineId << "' that it is "
                  << "running on is `DOWN`";
 
     ShutdownMessage message;
     message.set_message("Machine is `DOWN`");
-    send(from, message);
+    send(pid, message);
+
+    slaves.registering.erase(pid);
+    return;
+  }
+
+  // Ignore registration attempts by agents running old Mesos versions.
+  // We expect that the agent's version is in SemVer format; if the
+  // version cannot be parsed, the registration attempt is ignored.
+  Try<Version> parsedVersion = Version::parse(version);
+
+  if (parsedVersion.isError()) {
+    LOG(WARNING) << "Failed to parse version '" << version << "'"
+                 << " of agent at " << pid << ": " << parsedVersion.error()
+                 << "; ignoring agent registration attempt";
+    return;
+  } else if (parsedVersion.get() < MINIMUM_AGENT_VERSION) {
+    LOG(WARNING) << "Ignoring registration attempt from old agent at "
+                 << pid << ": agent version is " << parsedVersion.get()
+                 << ", minimum supported agent version is "
+                 << MINIMUM_AGENT_VERSION;
     return;
   }
 
   // Check if this slave is already registered (because it retries).
-  if (slaves.registered.contains(from)) {
-    Slave* slave = slaves.registered.get(from);
-    CHECK_NOTNULL(slave);
-
+  if (Slave* slave = slaves.registered.get(pid)) {
     if (!slave->connected) {
       // The slave was previously disconnected but it is now trying
       // to register as a new slave. This could happen if the slave
@@ -5432,33 +5550,25 @@ void Master::registerSlave(
       SlaveRegisteredMessage message;
       message.mutable_slave_id()->CopyFrom(slave->id);
       message.mutable_connection()->CopyFrom(connection);
-      send(from, message);
+      send(pid, message);
+
+      slaves.registering.erase(pid);
       return;
     }
   }
-
-  // We need to generate a SlaveID and admit this slave only *once*.
-  if (slaves.registering.contains(from)) {
-    LOG(INFO) << "Ignoring register agent message from " << from
-              << " (" << slaveInfo.hostname() << ") as admission is"
-              << " already in progress";
-    return;
-  }
-
-  slaves.registering.insert(from);
 
   // Create and add the slave id.
   SlaveInfo slaveInfo_ = slaveInfo;
   slaveInfo_.mutable_id()->CopyFrom(newSlaveId());
 
-  LOG(INFO) << "Registering agent at " << from << " ("
+  LOG(INFO) << "Registering agent at " << pid << " ("
             << slaveInfo.hostname() << ") with id " << slaveInfo_.id();
 
   registrar->apply(Owned<Operation>(new AdmitSlave(slaveInfo_)))
     .onAny(defer(self(),
-                 &Self::_registerSlave,
+                 &Self::__registerSlave,
                  slaveInfo_,
-                 from,
+                 pid,
                  checkpointedResources,
                  version,
                  agentCapabilities,
@@ -5466,7 +5576,7 @@ void Master::registerSlave(
 }
 
 
-void Master::_registerSlave(
+void Master::__registerSlave(
     const SlaveInfo& slaveInfo,
     const UPID& pid,
     const vector<Resource>& checkpointedResources,
@@ -5475,7 +5585,6 @@ void Master::_registerSlave(
     const Future<bool>& admit)
 {
   CHECK(slaves.registering.contains(pid));
-  slaves.registering.erase(pid);
 
   CHECK(!admit.isDiscarded());
 
@@ -5494,6 +5603,8 @@ void Master::_registerSlave(
                  << " (" << slaveInfo.hostname() << ") was assigned"
                  << " an agent ID that already appears in the registry;"
                  << " ignoring registration attempt";
+
+    slaves.registering.erase(pid);
     return;
   }
 
@@ -5527,6 +5638,8 @@ void Master::_registerSlave(
 
   LOG(INFO) << "Registered agent " << *slave
             << " with " << slave->info.resources();
+
+  slaves.registering.erase(pid);
 }
 
 
@@ -5574,27 +5687,131 @@ void Master::reregisterSlave(
     return;
   }
 
+  Option<Error> error = validation::master::message::reregisterSlave(
+      slaveInfo, tasks, checkpointedResources, executorInfos, frameworks);
+
+  if (error.isSome()) {
+    LOG(WARNING) << "Dropping re-registration of agent at " << from
+                 << " because it sent an invalid re-registration: "
+                 << error->message;
+    return;
+  }
+
+  if (slaves.reregistering.contains(slaveInfo.id())) {
+    LOG(INFO)
+      << "Ignoring re-register agent message from agent "
+      << slaveInfo.id() << " at " << from << " ("
+      << slaveInfo.hostname() << ") as re-registration is already in progress";
+    return;
+  }
+
+  LOG(INFO) << "Received re-register agent message from agent "
+            << slaveInfo.id() << " at " << from << " ("
+            << slaveInfo.hostname() << ")";
+
+  slaves.reregistering.insert(slaveInfo.id());
+
+  // Note that the principal may be empty if authentication is not
+  // required. Also it is passed along because it may be removed from
+  // `authenticated` while the authorization is pending.
+  Option<string> principal = authenticated.get(from);
+
+  authorizeSlave(principal)
+    .onAny(defer(self(),
+                 &Self::_reregisterSlave,
+                 slaveInfo,
+                 from,
+                 principal,
+                 checkpointedResources,
+                 executorInfos,
+                 tasks,
+                 frameworks,
+                 completedFrameworks,
+                 version,
+                 agentCapabilities,
+                 lambda::_1));
+}
+
+
+void Master::_reregisterSlave(
+    const SlaveInfo& slaveInfo,
+    const UPID& pid,
+    const Option<string>& principal,
+    const vector<Resource>& checkpointedResources,
+    const vector<ExecutorInfo>& executorInfos,
+    const vector<Task>& tasks,
+    const vector<FrameworkInfo>& frameworks,
+    const vector<Archive::Framework>& completedFrameworks,
+    const string& version,
+    const vector<SlaveInfo::Capability>& agentCapabilities,
+    const Future<bool>& authorized)
+{
+  CHECK(!authorized.isDiscarded());
+  CHECK(slaves.reregistering.contains(slaveInfo.id()));
+
+  Option<string> authorizationError = None();
+
+  if (authorized.isFailed()) {
+    authorizationError = "Authorization failure: " + authorized.failure();
+  } else if (!authorized.get()) {
+    authorizationError =
+      "Not authorized to re-register as agent with principal " +
+      (principal.isSome()
+       ? "with principal '" + principal.get() + "'"
+       : "without a principal");
+  }
+
+  if (authorizationError.isSome()) {
+    LOG(WARNING) << "Refusing re-registration of agent at " << pid
+                 << ": " << authorizationError.get();
+
+    ShutdownMessage message;
+    message.set_message(authorizationError.get());
+    send(pid, message);
+
+    slaves.reregistering.erase(slaveInfo.id());
+    return;
+  }
+
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
-  machineId.set_ip(stringify(from.address.ip));
+  machineId.set_ip(stringify(pid.address.ip));
 
-  // Slaves are not allowed to register while the machine they are on is in
+  // Slaves are not allowed to re-register while the machine they are on is in
   // 'DOWN` mode.
   if (machines.contains(machineId) &&
       machines[machineId].info.mode() == MachineInfo::DOWN) {
-    LOG(WARNING) << "Refusing re-registration of agent at " << from
+    LOG(WARNING) << "Refusing re-registration of agent at " << pid
                  << " because the machine '" << machineId << "' that it is "
                  << "running on is `DOWN`";
 
     ShutdownMessage message;
     message.set_message("Machine is `DOWN`");
-    send(from, message);
+    send(pid, message);
+
+    slaves.reregistering.erase(slaveInfo.id());
     return;
   }
 
-  Slave* slave = slaves.registered.get(slaveInfo.id());
+  // Ignore re-registration attempts by agents running old Mesos versions.
+  // We expect that the agent's version is in SemVer format; if the
+  // version cannot be parsed, the re-registration attempt is ignored.
+  Try<Version> parsedVersion = Version::parse(version);
 
-  if (slave != nullptr) {
+  if (parsedVersion.isError()) {
+    LOG(WARNING) << "Failed to parse version '" << version << "'"
+                 << " of agent at " << pid << ": " << parsedVersion.error()
+                 << "; ignoring agent re-registration attempt";
+    return;
+  } else if (parsedVersion.get() < MINIMUM_AGENT_VERSION) {
+    LOG(WARNING) << "Ignoring re-registration attempt from old agent at "
+                 << pid << ": agent version is " << parsedVersion.get()
+                 << ", minimum supported agent version is "
+                 << MINIMUM_AGENT_VERSION;
+    return;
+  }
+
+  if (Slave* slave = slaves.registered.get(slaveInfo.id())) {
     CHECK(!slaves.recovered.contains(slaveInfo.id()));
 
     // NOTE: This handles the case where a slave tries to
@@ -5610,9 +5827,9 @@ void Master::reregisterSlave(
     // hostname. This is because maintenance is scheduled at the
     // machine level; so we would need to re-validate the slave's
     // unavailability if the machine it is running on changed.
-    if (slave->pid.address.ip != from.address.ip ||
+    if (slave->pid.address.ip != pid.address.ip ||
         slave->info.hostname() != slaveInfo.hostname()) {
-      LOG(WARNING) << "Agent " << slaveInfo.id() << " at " << from
+      LOG(WARNING) << "Agent " << slaveInfo.id() << " at " << pid
                    << " (" << slaveInfo.hostname() << ") attempted to "
                    << "re-register with different IP / hostname; expected "
                    << slave->pid.address.ip << " (" << slave->info.hostname()
@@ -5622,7 +5839,9 @@ void Master::reregisterSlave(
       message.set_message(
           "Agent attempted to re-register with different IP / hostname");
 
-      send(from, message);
+      send(pid, message);
+
+      slaves.reregistering.erase(slaveInfo.id());
       return;
     }
 
@@ -5632,7 +5851,7 @@ void Master::reregisterSlave(
     // in succession for a disconnected slave. As a result, we
     // ignore duplicate exited events for disconnected slaves.
     // See: https://issues.apache.org/jira/browse/MESOS-675
-    slave->pid = from;
+    slave->pid = pid;
     link(slave->pid);
 
     // Update slave's version, re-registration timestamp and
@@ -5667,25 +5886,14 @@ void Master::reregisterSlave(
 
     // Inform the agent of the master's version of its checkpointed
     // resources and the new framework pids for its tasks.
-    __reregisterSlave(slave, tasks, frameworks);
+    ___reregisterSlave(slave, tasks, frameworks);
 
+    slaves.reregistering.erase(slaveInfo.id());
     return;
   }
 
-  // If we're already re-registering this slave, then no need to ask
-  // the registrar again.
-  if (slaves.reregistering.contains(slaveInfo.id())) {
-    LOG(INFO)
-      << "Ignoring re-register agent message from agent "
-      << slaveInfo.id() << " at " << from << " ("
-      << slaveInfo.hostname() << ") as readmission is already in progress";
-    return;
-  }
-
-  LOG(INFO) << "Re-registering agent " << slaveInfo.id() << " at " << from
+  LOG(INFO) << "Re-registering agent " << slaveInfo.id() << " at " << pid
             << " (" << slaveInfo.hostname() << ")";
-
-  slaves.reregistering.insert(slaveInfo.id());
 
   // Consult the registry to determine whether to readmit the
   // slave. In the common case, the slave has been marked unreachable
@@ -5695,9 +5903,9 @@ void Master::reregisterSlave(
   // GC'd), we admit the slave anyway.
   registrar->apply(Owned<Operation>(new MarkSlaveReachable(slaveInfo)))
     .onAny(defer(self(),
-                 &Self::_reregisterSlave,
+                 &Self::__reregisterSlave,
                  slaveInfo,
-                 from,
+                 pid,
                  checkpointedResources,
                  executorInfos,
                  tasks,
@@ -5709,7 +5917,7 @@ void Master::reregisterSlave(
 }
 
 
-void Master::_reregisterSlave(
+void Master::__reregisterSlave(
     const SlaveInfo& slaveInfo,
     const UPID& pid,
     const vector<Resource>& checkpointedResources,
@@ -5722,7 +5930,6 @@ void Master::_reregisterSlave(
     const Future<bool>& readmit)
 {
   CHECK(slaves.reregistering.contains(slaveInfo.id()));
-  slaves.reregistering.erase(slaveInfo.id());
 
   if (readmit.isFailed()) {
     LOG(FATAL) << "Failed to readmit agent " << slaveInfo.id() << " at " << pid
@@ -5944,7 +6151,7 @@ void Master::_reregisterSlave(
       send(slave->pid, message);
 
       // The framework's tasks should not be stored in the master's
-      // in-memory state, because they were not re-added filtered above.
+      // in-memory state, because they were not re-added above.
       CHECK(!slave->tasks.contains(framework.id()));
     } else if (isCompletedFramework(framework.id())) {
       LOG(INFO) << "Shutting down framework " << framework.id()
@@ -5957,11 +6164,13 @@ void Master::_reregisterSlave(
     }
   }
 
-  __reregisterSlave(slave, tasks, frameworks);
+  ___reregisterSlave(slave, tasks, frameworks);
+
+  slaves.reregistering.erase(slaveInfo.id());
 }
 
 
-void Master::__reregisterSlave(
+void Master::___reregisterSlave(
     Slave* slave,
     const vector<Task>& tasks,
     const vector<FrameworkInfo>& frameworks)
@@ -6103,14 +6312,14 @@ void Master::updateSlave(
     return;
   }
 
-  if (!slaves.registered.contains(slaveId)) {
+  Slave* slave = slaves.registered.get(slaveId);
+
+  if (slave == nullptr) {
     LOG(WARNING)
       << "Ignoring update of agent with total oversubscribed resources "
       << oversubscribedResources << " on unknown agent " << slaveId;
     return;
   }
-
-  Slave* slave = CHECK_NOTNULL(slaves.registered.get(slaveId));
 
   LOG(INFO) << "Received update of agent " << *slave << " with total"
             << " oversubscribed resources " << oversubscribedResources;
@@ -6170,7 +6379,7 @@ void Master::updateUnavailability(
       // The slave should be registered if it is in the machines mapping.
       CHECK(slaves.registered.contains(slaveId));
 
-      Slave* slave = CHECK_NOTNULL(slaves.registered.get(slaveId));
+      Slave* slave = slaves.registered.get(slaveId);
 
       if (unavailability.isSome()) {
         // TODO(jmlvanre): Add stream operator for unavailability.
@@ -6367,7 +6576,9 @@ void Master::exitedExecutor(
     return;
   }
 
-  if (!slaves.registered.contains(slaveId)) {
+  Slave* slave = slaves.registered.get(slaveId);
+
+  if (slave == nullptr) {
     LOG(WARNING) << "Ignoring exited executor '" << executorId
                  << "' of framework " << frameworkId
                  << " on unknown agent " << slaveId;
@@ -6376,9 +6587,6 @@ void Master::exitedExecutor(
 
   // Only update master's internal data structures here for proper
   // accounting. The TASK_LOST updates are handled by the slave.
-
-  Slave* slave = slaves.registered.get(slaveId);
-  CHECK_NOTNULL(slave);
 
   if (!slave->hasExecutor(frameworkId, executorId)) {
     LOG(WARNING) << "Ignoring unknown exited executor '" << executorId
@@ -6425,25 +6633,25 @@ void Master::shutdown(
 
   // TODO(vinod): Add a metric for executor shutdowns.
 
-  if (!slaves.registered.contains(shutdown.slave_id())) {
-    LOG(WARNING) << "Unable to shutdown executor '" << shutdown.executor_id()
-                 << "' of framework " << framework->id()
-                 << " of unknown agent " << shutdown.slave_id();
-    return;
-  }
-
   const SlaveID& slaveId = shutdown.slave_id();
   const ExecutorID& executorId = shutdown.executor_id();
+  const FrameworkID& frameworkId = framework->id();
 
   Slave* slave = slaves.registered.get(slaveId);
-  CHECK_NOTNULL(slave);
+
+  if (slave == nullptr) {
+    LOG(WARNING) << "Unable to shutdown executor '" << executorId
+                 << "' of framework " << frameworkId
+                 << " of unknown agent " << slaveId;
+    return;
+  }
 
   LOG(INFO) << "Processing SHUTDOWN call for executor '" << executorId
             << "' of framework " << *framework << " on agent " << slaveId;
 
   ShutdownExecutorMessage message;
   message.mutable_executor_id()->CopyFrom(executorId);
-  message.mutable_framework_id()->CopyFrom(framework->id());
+  message.mutable_framework_id()->CopyFrom(frameworkId);
   send(slave->pid, message);
 }
 
@@ -6973,7 +7181,9 @@ void Master::offer(
     foreachpair (const SlaveID& slaveId,
                  const Resources& offered,
                  resources.at(role)) {
-      if (!slaves.registered.contains(slaveId)) {
+      Slave* slave = slaves.registered.get(slaveId);
+
+      if (slave == nullptr) {
         LOG(WARNING)
           << "Master returning resources offered to framework " << *framework
           << " because agent " << slaveId << " is not valid";
@@ -6981,9 +7191,6 @@ void Master::offer(
         allocator->recoverResources(frameworkId, slaveId, offered, None());
         continue;
       }
-
-      Slave* slave = slaves.registered.get(slaveId);
-      CHECK_NOTNULL(slave);
 
       // This could happen if the allocator dispatched 'Master::offer' before
       // the slave was deactivated in the allocator.
@@ -7120,15 +7327,14 @@ void Master::inverseOffer(
   foreachpair (const SlaveID& slaveId,
                const UnavailableResources& unavailableResources,
                resources) {
-    if (!slaves.registered.contains(slaveId)) {
+    Slave* slave = slaves.registered.get(slaveId);
+
+    if (slave == nullptr) {
       LOG(INFO)
         << "Master ignoring inverse offers to framework " << *framework
         << " because agent " << slaveId << " is not valid";
       continue;
     }
-
-    Slave* slave = slaves.registered.get(slaveId);
-    CHECK_NOTNULL(slave);
 
     // This could happen if the allocator dispatched 'Master::inverseOffer'
     // before the slave was deactivated in the allocator.
@@ -8909,13 +9115,16 @@ double Master::_resources_used(const string& name)
   double used = 0.0;
 
   foreachvalue (Slave* slave, slaves.registered) {
+    // We use `Resources` arithmetic to accummulate the resources since the
+    // `+=` operator de-duplicates the same shared resources across frameworks.
+    Resources slaveUsed;
+
     foreachvalue (const Resources& resources, slave->usedResources) {
-      foreach (const Resource& resource, resources.nonRevocable()) {
-        if (resource.name() == name && resource.type() == Value::SCALAR) {
-          used += resource.scalar().value();
-        }
-      }
+      slaveUsed += resources.nonRevocable();
     }
+
+    used +=
+      slaveUsed.get<Value::Scalar>(name).getOrElse(Value::Scalar()).value();
   }
 
   return used;
@@ -8955,13 +9164,16 @@ double Master::_resources_revocable_used(const string& name)
   double used = 0.0;
 
   foreachvalue (Slave* slave, slaves.registered) {
+    // We use `Resources` arithmetic to accummulate the resources since the
+    // `+=` operator de-duplicates the same shared resources across frameworks.
+    Resources slaveUsed;
+
     foreachvalue (const Resources& resources, slave->usedResources) {
-      foreach (const Resource& resource, resources.revocable()) {
-        if (resource.name() == name && resource.type() == Value::SCALAR) {
-          used += resource.scalar().value();
-        }
-      }
+      slaveUsed += resources.revocable();
     }
+
+    used +=
+      slaveUsed.get<Value::Scalar>(name).getOrElse(Value::Scalar()).value();
   }
 
   return used;

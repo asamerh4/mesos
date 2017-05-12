@@ -31,9 +31,11 @@
 
 #include <mesos/authentication/http/basic_authenticator_factory.hpp>
 
+
 #include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
+#include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/reap.hpp>
@@ -48,6 +50,10 @@
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
+
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
 
 #include "common/build.hpp"
 #include "common/http.hpp"
@@ -78,6 +84,10 @@
 
 using namespace mesos::internal::slave;
 
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
+
 using mesos::internal::master::Master;
 
 using mesos::internal::protobuf::createLabel;
@@ -106,6 +116,8 @@ using process::http::OK;
 using process::http::Response;
 using process::http::ServiceUnavailable;
 using process::http::Unauthorized;
+
+using process::http::authentication::Principal;
 
 using std::map;
 using std::shared_ptr;
@@ -1850,6 +1862,202 @@ TEST_F(SlaveTest, ReadonlyHTTPEndpointsNoAuthentication)
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
+
+
+// Since executor authentication currently has SSL as a dependency, we cannot
+// test executor authentication when Mesos has not been built with SSL.
+#ifdef USE_SSL_SOCKET
+// This test verifies that HTTP executor SUBSCRIBE and LAUNCH_NESTED_CONTAINER
+// calls fail if the executor provides an incorrectly-signed authentication
+// token with valid claims.
+TEST_F(SlaveTest, HTTPExecutorBadAuthentication)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
+
+  v1::Resources resources =
+    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+
+  v1::ExecutorInfo executorInfo;
+  executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
+  executorInfo.mutable_executor_id()->CopyFrom(v1::DEFAULT_EXECUTOR_ID);
+  executorInfo.mutable_resources()->CopyFrom(resources);
+
+  Owned<TestContainerizer> containerizer(
+      new TestContainerizer(devolve(executorInfo.executor_id()), executor));
+
+  // This pointer is passed to the agent, which will perform the cleanup.
+  MockSecretGenerator* mockSecretGenerator = new MockSecretGenerator();
+
+  MockSlave slave(
+      CreateSlaveFlags(),
+      detector.get(),
+      containerizer.get(),
+      None(),
+      None(),
+      mockSecretGenerator);
+  process::PID<Slave> slavePid = spawn(slave);
+
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  Future<Nothing> connected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected));
+
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
+
+  AWAIT_READY(connected);
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  Future<v1::scheduler::Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  {
+    v1::scheduler::Call call;
+    call.set_type(v1::scheduler::Call::SUBSCRIBE);
+    v1::scheduler::Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(subscribed);
+  v1::FrameworkID frameworkId(subscribed->framework_id());
+
+  executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
+
+  Future<v1::executor::Mesos*> executorLib;
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(FutureArg<0>(&executorLib));
+
+  Promise<Secret> secret;
+  Future<Principal> principal;
+  EXPECT_CALL(*mockSecretGenerator, generate(_))
+    .WillOnce(DoAll(FutureArg<0>(&principal),
+                    Return(secret.future())));
+
+  const v1::Offer& offer = offers->offers(0);
+  const v1::AgentID& agentId = offer.agent_id();
+
+  {
+    v1::TaskInfo taskInfo =
+      v1::createTask(agentId, resources, SLEEP_COMMAND(1000));
+
+    v1::TaskGroupInfo taskGroup;
+    taskGroup.add_tasks()->CopyFrom(taskInfo);
+
+    v1::scheduler::Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(v1::scheduler::Call::ACCEPT);
+
+    v1::scheduler::Call::Accept* accept = call.mutable_accept();
+    accept->add_offer_ids()->CopyFrom(offer.id());
+
+    v1::Offer::Operation* operation = accept->add_operations();
+    operation->set_type(v1::Offer::Operation::LAUNCH_GROUP);
+
+    v1::Offer::Operation::LaunchGroup* launchGroup =
+      operation->mutable_launch_group();
+
+    launchGroup->mutable_executor()->CopyFrom(executorInfo);
+    launchGroup->mutable_task_group()->CopyFrom(taskGroup);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(principal);
+
+  // Create a secret generator initialized with an incorrect key.
+  Owned<JWTSecretGenerator> jwtSecretGenerator(
+      new JWTSecretGenerator("incorrect_key"));
+
+  Future<Secret> authenticationToken =
+    jwtSecretGenerator->generate(principal.get());
+
+  AWAIT_READY(authenticationToken);
+
+  secret.set(authenticationToken.get());
+
+  {
+    AWAIT_READY(executorLib);
+
+    v1::executor::Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.mutable_executor_id()->CopyFrom(v1::DEFAULT_EXECUTOR_ID);
+
+    call.set_type(v1::executor::Call::SUBSCRIBE);
+
+    call.mutable_subscribe();
+
+    executorLib.get()->send(call);
+
+    Future<v1::executor::Event::Error> error;
+    EXPECT_CALL(*executor, error(_, _))
+      .WillOnce(FutureArg<1>(&error));
+
+    AWAIT_READY(error);
+    EXPECT_EQ(
+        error->message(),
+        "Received unexpected '401 Unauthorized' () for SUBSCRIBE");
+  }
+
+  {
+    ASSERT_TRUE(principal->claims.contains("cid"));
+
+    v1::ContainerID parentContainerId;
+    parentContainerId.set_value(principal->claims.at("cid"));
+
+    v1::ContainerID containerId;
+    containerId.set_value(UUID::random().toString());
+    containerId.mutable_parent()->CopyFrom(parentContainerId);
+
+    v1::agent::Call call;
+    call.set_type(v1::agent::Call::LAUNCH_NESTED_CONTAINER);
+
+    call.mutable_launch_nested_container()->mutable_container_id()
+      ->CopyFrom(containerId);
+
+    process::http::Headers headers;
+    headers["Authorization"] =
+      "Bearer " + authenticationToken.get().value().data();
+
+    Future<Response> response = process::http::post(
+      slavePid,
+      "api/v1",
+      headers,
+      serialize(ContentType::PROTOBUF, call),
+      stringify(ContentType::PROTOBUF));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+
+    ASSERT_TRUE(response->headers.contains("WWW-Authenticate"));
+    ASSERT_TRUE(strings::contains(
+        response->headers.at("WWW-Authenticate"),
+        "Invalid JWT: Token signature does not match"));
+  }
+
+  terminate(slave);
+  wait(slave);
+}
+#endif // USE_SSL_SOCKET
 
 
 // This test verifies correct handling of statistics endpoint when
@@ -5191,7 +5399,7 @@ TEST_F(SlaveTest, RunTaskGroupFailedSecretGeneration)
   ASSERT_NE(0, offers->offers().size());
 
   const v1::Offer& offer = offers->offers(0);
-  const v1::AgentID agentId = offer.agent_id();
+  const v1::AgentID& agentId = offer.agent_id();
 
   v1::TaskInfo taskInfo1 = v1::createTask(agentId, resources, "");
 
@@ -5392,7 +5600,7 @@ TEST_F(SlaveTest, RunTaskGroupInvalidExecutorSecret)
   ASSERT_NE(0, offers->offers().size());
 
   const v1::Offer& offer = offers->offers(0);
-  const v1::AgentID agentId = offer.agent_id();
+  const v1::AgentID& agentId = offer.agent_id();
 
   v1::TaskInfo taskInfo1 = v1::createTask(agentId, resources, "");
 
@@ -5602,7 +5810,7 @@ TEST_F(SlaveTest, RunTaskGroupReferenceTypeSecret)
   ASSERT_NE(0, offers->offers().size());
 
   const v1::Offer& offer = offers->offers(0);
-  const v1::AgentID agentId = offer.agent_id();
+  const v1::AgentID& agentId = offer.agent_id();
 
   v1::TaskInfo taskInfo1 = v1::createTask(agentId, resources, "");
 
@@ -5812,7 +6020,7 @@ TEST_F(SlaveTest, RunTaskGroupGenerateSecretAfterShutdown)
   ASSERT_NE(0, offers->offers().size());
 
   const v1::Offer& offer = offers->offers(0);
-  const v1::AgentID agentId = offer.agent_id();
+  const v1::AgentID& agentId = offer.agent_id();
 
   v1::TaskInfo taskInfo1 = v1::createTask(agentId, resources, "");
 
@@ -5965,6 +6173,186 @@ TEST_F(SlaveTest, RunTaskGroupGenerateSecretAfterShutdown)
   terminate(slave);
   wait(slave);
 }
+
+
+#ifdef USE_SSL_SOCKET
+// This test verifies that a default executor which is launched when secret
+// generation is enabled and HTTP executor authentication is not required will
+// be able to re-subscribe successfully when the agent is restarted with
+// required HTTP executor authentication.
+TEST_F(SlaveTest, RestartSlaveRequireExecutorAuthentication)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.authenticate_http_executors = false;
+  flags.authenticate_http_readwrite = false;
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  // Start the agent with a static process ID. This allows the executor to
+  // reconnect with the agent upon a process restart.
+  const string id("agent");
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), id, flags);
+  ASSERT_SOME(slave);
+
+  Future<Nothing> connected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected));
+
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
+
+  AWAIT_READY(connected);
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  Future<v1::scheduler::Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_checkpoint(true);
+
+  {
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(frameworkInfo);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(subscribed);
+
+  v1::FrameworkID frameworkId(subscribed->framework_id());
+
+  AWAIT_READY(offers);
+  ASSERT_NE(0, offers->offers().size());
+
+  Future<v1::scheduler::Event::Update> update;
+
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update));
+
+  const v1::Offer offer = offers->offers(0);
+  const v1::AgentID& agentId = offer.agent_id();
+
+  v1::Resources resources =
+    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+
+  // Create a task which should run indefinitely.
+  v1::TaskInfo taskInfo = v1::createTask(agentId, resources, "cat");
+
+  v1::TaskGroupInfo taskGroup;
+  taskGroup.add_tasks()->CopyFrom(taskInfo);
+
+  v1::ExecutorInfo executorInfo = v1::DEFAULT_EXECUTOR_INFO;
+  executorInfo.clear_command();
+  executorInfo.mutable_framework_id()->CopyFrom(subscribed->framework_id());
+  executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
+  executorInfo.mutable_resources()->CopyFrom(resources);
+
+  {
+    Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(Call::ACCEPT);
+
+    Call::Accept* accept = call.mutable_accept();
+    accept->add_offer_ids()->CopyFrom(offer.id());
+
+    v1::Offer::Operation* operation = accept->add_operations();
+    operation->set_type(v1::Offer::Operation::LAUNCH_GROUP);
+
+    v1::Offer::Operation::LaunchGroup* launchGroup =
+      operation->mutable_launch_group();
+
+    launchGroup->mutable_executor()->CopyFrom(executorInfo);
+    launchGroup->mutable_task_group()->CopyFrom(taskGroup);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(update);
+
+  ASSERT_EQ(TASK_RUNNING, update->status().state());
+  ASSERT_EQ(taskInfo.task_id(), update->status().task_id());
+
+  Future<Nothing> _statusUpdateAcknowledgement =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
+
+  {
+    Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(Call::ACKNOWLEDGE);
+
+    Call::Acknowledge* acknowledge = call.mutable_acknowledge();
+    acknowledge->mutable_task_id()->CopyFrom(update->status().task_id());
+    acknowledge->mutable_agent_id()->CopyFrom(offer.agent_id());
+    acknowledge->set_uuid(update->status().uuid());
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(_statusUpdateAcknowledgement);
+
+  // Restart the agent.
+  slave.get()->terminate();
+
+  // Enable authentication.
+  flags.authenticate_http_executors = true;
+  flags.authenticate_http_readwrite = true;
+
+  // Confirm that the executor does not fail.
+  EXPECT_CALL(*scheduler, failure(_, _))
+    .Times(0);
+
+  Future<Nothing> __recover =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::__recover);
+
+  slave = StartSlave(detector.get(), id, flags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(__recover);
+
+  Future<Response> response = process::http::get(
+      slave.get()->pid,
+      "containers",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_READY(response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+  Try<JSON::Value> value = JSON::parse(response->body);
+  ASSERT_SOME(value);
+
+  Try<JSON::Value> expected = JSON::parse(
+      "[{"
+          "\"executor_id\":\"" + stringify(executorInfo.executor_id()) + "\""
+      "}]");
+
+  ASSERT_SOME(expected);
+  EXPECT_TRUE(value->contains(expected.get()));
+
+  // Settle the clock to ensure that an executor failure would be detected.
+  Clock::pause();
+  Clock::settle();
+  Clock::resume();
+}
+#endif // USE_SSL_SOCKET
 
 
 // This test ensures that a `killTask()` can happen between `runTask()`

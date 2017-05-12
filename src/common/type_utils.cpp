@@ -350,6 +350,34 @@ bool operator==(const MasterInfo& left, const MasterInfo& right)
 
 
 bool operator==(
+    const ResourceProviderInfo& left,
+    const ResourceProviderInfo& right)
+{
+  if (left.id() != right.id()) {
+    return false;
+  }
+
+  if (Attributes(left.attributes()) != Attributes(right.attributes())) {
+    return false;
+  }
+
+  if (Resources(left.resources()) != Resources(right.resources())) {
+    return false;
+  }
+
+  return true;
+}
+
+
+bool operator!=(
+    const ResourceProviderInfo& left,
+    const ResourceProviderInfo& right)
+{
+  return !(left == right);
+}
+
+
+bool operator==(
     const ResourceStatistics& left,
     const ResourceStatistics& right)
 {
@@ -468,6 +496,12 @@ ostream& operator<<(ostream& stream, const CapabilityInfo& capabilityInfo)
 }
 
 
+ostream& operator<<(ostream& stream, const DeviceWhitelist& deviceWhitelist)
+{
+  return stream << JSON::protobuf(deviceWhitelist);
+}
+
+
 ostream& operator<<(ostream& stream, const CheckStatusInfo& checkStatusInfo)
 {
   switch (checkStatusInfo.type()) {
@@ -484,6 +518,15 @@ ostream& operator<<(ostream& stream, const CheckStatusInfo& checkStatusInfo)
         stream << "HTTP";
         if (checkStatusInfo.http().has_status_code()) {
           stream << " status code " << checkStatusInfo.http().status_code();
+        }
+      }
+      break;
+    case CheckInfo::TCP:
+      if (checkStatusInfo.has_tcp()) {
+        stream << "TCP";
+        if (checkStatusInfo.tcp().has_succeeded()) {
+          stream << (checkStatusInfo.tcp().succeeded() ? " connection success"
+                                                       : " connection failure");
         }
       }
       break;

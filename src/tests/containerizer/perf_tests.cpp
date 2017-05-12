@@ -71,14 +71,16 @@ TEST_F(PerfTest, Parse)
 {
   // Parse multiple cgroups with uint64 and floats.
   Try<hashmap<string, mesos::PerfStatistics>> parse =
-    perf::parse("123,cycles,cgroup1\n"
-                "456,cycles,cgroup2\n"
-                "0.456,task-clock,cgroup2\n"
-                "0.123,task-clock,cgroup1",
-                Version(3, 12, 0));
+    perf::parse(
+        "123,cycles,cgroup1\n"
+        "456,cycles,cgroup2\n"
+        "0.456,task-clock,cgroup2\n"
+        "0.123,task-clock,cgroup1\n"
+        "5812843447,,cycles,cgroup3,3560494814,100.00,0.097,GHz\n"
+        "60011.034108,,task-clock,cgroup3,60011034108,100.00,11.999,CPUs utilized"); // NOLINT(whitespace/line_length)
 
   ASSERT_SOME(parse);
-  EXPECT_EQ(2u, parse->size());
+  EXPECT_EQ(3u, parse->size());
 
   ASSERT_TRUE(parse->contains("cgroup1"));
   mesos::PerfStatistics statistics = parse->get("cgroup1").get();
@@ -97,7 +99,7 @@ TEST_F(PerfTest, Parse)
   EXPECT_EQ(0.456, statistics.task_clock());
 
   // Statistics reporting <not supported> should not appear.
-  parse = perf::parse("<not supported>,cycles,cgroup1", Version(3, 12, 0));
+  parse = perf::parse("<not supported>,cycles,cgroup1");
   ASSERT_SOME(parse);
 
   ASSERT_TRUE(parse->contains("cgroup1"));
@@ -106,8 +108,7 @@ TEST_F(PerfTest, Parse)
 
   // Statistics reporting <not counted> should be zero.
   parse = perf::parse("<not counted>,cycles,cgroup1\n"
-                      "<not counted>,task-clock,cgroup1",
-                      Version(3, 12, 0));
+                      "<not counted>,task-clock,cgroup1");
   ASSERT_SOME(parse);
 
   ASSERT_TRUE(parse->contains("cgroup1"));
@@ -119,10 +120,10 @@ TEST_F(PerfTest, Parse)
   EXPECT_EQ(0.0, statistics.task_clock());
 
   // Check parsing fails.
-  parse = perf::parse("1,cycles\ngarbage", Version(3, 12, 0));
+  parse = perf::parse("1,cycles\ngarbage");
   EXPECT_ERROR(parse);
 
-  parse = perf::parse("1,unknown-field", Version(3, 12, 0));
+  parse = perf::parse("1,unknown-field");
   EXPECT_ERROR(parse);
 }
 

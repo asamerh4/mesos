@@ -319,6 +319,11 @@ private:
 
     // Sandbox directory for the container. It is optional here because
     // we don't keep track of sandbox directory for orphan containers.
+    // It is not checkpointed explicitly; on recovery, it is reconstructed
+    // from executor's directory and hierarchy of containers.
+    //
+    // NOTE: This holds the sandbox path in the host mount namespace,
+    // while MESOS_SANDBOX is the path in the container mount namespace.
     Option<std::string> directory;
 
     // We keep track of the future exit status for the container if it
@@ -357,6 +362,17 @@ private:
     // The configuration for the container to be launched. This field
     // is only used during the launch of a container.
     mesos::slave::ContainerConfig config;
+
+    // Container's information at the moment it was launched. For example,
+    // used to bootstrap the launch information of future child DEBUG
+    // containers. Checkpointed and restored on recovery. Optional because
+    // it is not set for orphan containers.
+    //
+    // NOTE: Some of these data, may change during the container lifetime,
+    // e.g., the working directory. Such changes are not be captured here,
+    // which might be problematic, e.g., for DEBUG containers relying on
+    // some data in parent working directory.
+    Option<mesos::slave::ContainerLaunchInfo> launchInfo;
 
     State state;
 

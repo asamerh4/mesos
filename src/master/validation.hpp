@@ -17,6 +17,8 @@
 #ifndef __MASTER_VALIDATION_HPP__
 #define __MASTER_VALIDATION_HPP__
 
+#include <vector>
+
 #include <google/protobuf/repeated_field.h>
 
 #include <mesos/mesos.hpp>
@@ -52,6 +54,28 @@ Option<Error> validate(
     const Option<process::http::authentication::Principal>& principal = None());
 
 } // namespace call {
+
+namespace message {
+
+// Validation helpers for internal Mesos protocol messages. This is a
+// best-effort validation, intended to prevent trivial attacks on the
+// protocol in deployments where the network between master and agents
+// is not secured. The longer term remedy for this is to make security
+// guarantees at the libprocess level that would prevent arbitrary UPID
+// impersonation (MESOS-7424).
+
+Option<Error> registerSlave(
+    const SlaveInfo& slaveInfo,
+    const std::vector<Resource>& checkpointedResources);
+
+Option<Error> reregisterSlave(
+    const SlaveInfo& slaveInfo,
+    const std::vector<Task>& tasks,
+    const std::vector<Resource>& resources,
+    const std::vector<ExecutorInfo>& executorInfos,
+    const std::vector<FrameworkInfo>& frameworkInfos);
+
+} // namespace message {
 } // namespace master {
 
 
@@ -130,6 +154,9 @@ Option<Error> validateType(const ExecutorInfo& executor);
 Option<Error> validateResources(const ExecutorInfo& executor);
 
 } // namespace internal {
+
+Option<Error> validate(const ExecutorInfo& executor);
+
 } // namespace executor {
 
 

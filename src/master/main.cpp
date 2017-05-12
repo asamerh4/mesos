@@ -37,7 +37,7 @@
 #ifndef __WINDOWS__
 #include <mesos/state/log.hpp>
 #endif // __WINDOWS__
-#include <mesos/state/protobuf.hpp>
+#include <mesos/state/state.hpp>
 #include <mesos/state/storage.hpp>
 
 #include <mesos/zookeeper/detector.hpp>
@@ -57,6 +57,7 @@
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
+#include <stout/version.hpp>
 
 #include "common/build.hpp"
 #include "common/http.hpp"
@@ -173,6 +174,16 @@ int main(int argc, char** argv)
   if (load.isError()) {
     cerr << flags.usage(load.error()) << endl;
     return EXIT_FAILURE;
+  }
+
+  // Check that master's version has the expected format (SemVer).
+  {
+    Try<Version> version = Version::parse(MESOS_VERSION);
+    if (version.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to parse Mesos version '" << MESOS_VERSION << "': "
+        << version.error();
+    }
   }
 
   if (flags.ip_discovery_command.isSome() && flags.ip.isSome()) {
@@ -392,8 +403,7 @@ int main(int argc, char** argv)
 
   CHECK_NOTNULL(storage);
 
-  mesos::state::protobuf::State* state =
-    new mesos::state::protobuf::State(storage);
+  mesos::state::State* state = new mesos::state::State(storage);
   Registrar* registrar =
     new Registrar(flags, state, READONLY_HTTP_AUTHENTICATION_REALM);
 
@@ -401,7 +411,7 @@ int main(int argc, char** argv)
   MasterDetector* detector;
 
   Try<MasterContender*> contender_ = MasterContender::create(
-      flags.zk, flags.master_contender);
+      flags.zk, flags.master_contender, flags.zk_session_timeout);
 
   if (contender_.isError()) {
     EXIT(EXIT_FAILURE)
@@ -411,7 +421,7 @@ int main(int argc, char** argv)
   contender = contender_.get();
 
   Try<MasterDetector*> detector_ = MasterDetector::create(
-      flags.zk, flags.master_detector);
+      flags.zk, flags.master_detector, flags.zk_session_timeout);
 
   if (detector_.isError()) {
     EXIT(EXIT_FAILURE)

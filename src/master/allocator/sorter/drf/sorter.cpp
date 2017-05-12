@@ -30,6 +30,7 @@
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/option.hpp>
+#include <stout/strings.hpp>
 
 using std::set;
 using std::string;
@@ -42,22 +43,22 @@ namespace internal {
 namespace master {
 namespace allocator {
 
-bool DRFComparator::operator()(const Client& client1, const Client& client2)
-{
-  if (client1.share == client2.share) {
-    if (client1.allocations == client2.allocations) {
-      return client1.name < client2.name;
-    }
-    return client1.allocations < client2.allocations;
-  }
-  return client1.share < client2.share;
-}
+
+DRFSorter::DRFSorter()
+  : root(new Node("", nullptr)) {}
 
 
 DRFSorter::DRFSorter(
     const UPID& allocator,
     const string& metricsPrefix)
-  : metrics(Metrics(allocator, *this, metricsPrefix)) {}
+  : root(new Node("", nullptr)),
+    metrics(Metrics(allocator, *this, metricsPrefix)) {}
+
+
+DRFSorter::~DRFSorter()
+{
+  delete root;
+}
 
 
 void DRFSorter::initialize(
@@ -67,166 +68,247 @@ void DRFSorter::initialize(
 }
 
 
-void DRFSorter::add(const string& name, double weight)
+void DRFSorter::add(const string& clientPath)
 {
-  CHECK(!contains(name));
+  vector<string> pathElements = strings::tokenize(clientPath, "/");
+  CHECK(!pathElements.empty());
 
-  Client client(name, 0, 0);
-  clients.insert(client);
+  Node* current = root;
+  Node* lastCreatedNode = nullptr;
 
-  allocations[name] = Allocation();
-  weights[name] = weight;
+  // Traverse the tree to add new nodes for each element of the path,
+  // if that node doesn't already exist (similar to `mkdir -p`).
+  foreach (const string& element, pathElements) {
+    Node* node = nullptr;
+
+    foreach (Node* child, current->children) {
+      if (child->name == element) {
+        node = child;
+        break;
+      }
+    }
+
+    if (node != nullptr) {
+      current = node;
+      continue;
+    }
+
+    // We didn't find `element`, so add a new child to `current`.
+    //
+    // If adding this child would result in turning `current` from a
+    // leaf node into an internal node, we need to create an
+    // additional child node: `current` must have been associated with
+    // a client and clients must always be associated with leaf nodes.
+    //
+    // There are two exceptions: if `current` is the root node or it
+    // was just created by the current `add()` call, it does not
+    // correspond to a client, so we don't create an extra child.
+    if (current->children.empty() &&
+        current != root &&
+        current != lastCreatedNode) {
+      Node* parent = CHECK_NOTNULL(current->parent);
+
+      parent->removeChild(current);
+
+      // Create a node under `parent`. This internal node will take
+      // the place of `current` in the tree.
+      Node* internal = new Node(current->name, parent);
+      parent->addChild(internal);
+      internal->allocation = current->allocation;
+
+      CHECK_EQ(current->path, internal->path);
+
+      // Update `current` to become a virtual leaf node and a child of
+      // `internal`.
+      current->name = ".";
+      current->parent = internal;
+      internal->addChild(current);
+      current->path = strings::join("/", parent->path, current->name);
+
+      CHECK_EQ(internal->path, current->clientPath());
+
+      current = internal;
+    }
+
+    // Now actually add a new child to `current`.
+    Node* newChild = new Node(element, current);
+    current->addChild(newChild);
+
+    current = newChild;
+    lastCreatedNode = newChild;
+  }
+
+  // `current` is the node associated with the last element of the
+  // path. If we didn't add `current` to the tree above, create a leaf
+  // node now. For example, if the tree contains "a/b" and we add a
+  // new client "a", we want to create a new leaf node "a/." here.
+  if (current != lastCreatedNode) {
+    Node* newChild = new Node(".", current);
+    current->addChild(newChild);
+    current = newChild;
+  }
+
+  // `current` is the newly created node associated with the last
+  // element of the path. `current` should be an inactive node with no
+  // children.
+  CHECK(current->children.empty());
+  CHECK(!current->active);
+
+  // Add a new entry to the lookup table. The full path of the newly
+  // added client should not already exist in `clients`.
+  CHECK_EQ(clientPath, current->clientPath());
+  CHECK(!clients.contains(clientPath));
+
+  clients[clientPath] = current;
+
+  // TODO(neilc): Avoid dirtying the tree in some circumstances.
+  dirty = true;
 
   if (metrics.isSome()) {
-    metrics->add(name);
+    metrics->add(clientPath);
   }
 }
 
 
-void DRFSorter::update(const string& name, double weight)
+void DRFSorter::remove(const string& clientPath)
 {
-  CHECK(weights.contains(name));
-  weights[name] = weight;
+  Node* current = CHECK_NOTNULL(find(clientPath));
 
-  // If the total resources have changed, we're going to
-  // recalculate all the shares, so don't bother just
-  // updating this client.
-  if (!dirty) {
-    updateShare(name);
+  // Save a copy of the leaf node's allocated resources, because we
+  // destroy the leaf node below.
+  const hashmap<SlaveID, Resources> leafAllocation =
+    current->allocation.resources;
+
+  // Remove the lookup table entry for the client.
+  CHECK(clients.contains(clientPath));
+  clients.erase(clientPath);
+
+  // To remove a client from the tree, we have to do two things:
+  //
+  //   (1) Update the tree structure to reflect the removal of the
+  //       client. This means removing the client's leaf node, then
+  //       walking back up the tree to remove any internal nodes that
+  //       are now unnecessary.
+  //
+  //   (2) Update allocations of ancestor nodes to reflect the removal
+  //       of the client.
+  //
+  // We do both things at once: find the leaf node, remove it, and
+  // walk up the tree, updating ancestor allocations and removing
+  // ancestors when possible.
+  while (current != root) {
+    Node* parent = CHECK_NOTNULL(current->parent);
+
+    // Update `parent` to reflect the fact that the resources in the
+    // leaf node are no longer allocated to the subtree rooted at
+    // `parent`. We skip `root`, because we never update the
+    // allocation made to the root node.
+    if (parent != root) {
+      foreachpair (const SlaveID& slaveId,
+                   const Resources& resources,
+                   leafAllocation) {
+        parent->allocation.subtract(slaveId, resources);
+      }
+    }
+
+    if (current->children.empty()) {
+      parent->removeChild(current);
+      delete current;
+    } else if (current->children.size() == 1) {
+      // If `current` has only one child that was created to
+      // accommodate inserting `clientPath` (see `DRFSorter::add()`),
+      // we can remove the child node and turn `current` back into a
+      // leaf node.
+      Node* child = *(current->children.begin());
+
+      if (child->name == ".") {
+        CHECK(child->children.empty());
+        CHECK(clients.contains(current->path));
+        CHECK_EQ(child, clients.at(current->path));
+
+        current->active = child->active;
+        current->removeChild(child);
+
+        clients[current->path] = current;
+
+        delete child;
+      }
+    }
+
+    current = parent;
   }
-}
 
-
-void DRFSorter::remove(const string& name)
-{
-  CHECK(contains(name));
-
-  set<Client, DRFComparator>::iterator it = find(name);
-
-  if (it != clients.end()) {
-    clients.erase(it);
-  }
-
-  allocations.erase(name);
-  weights.erase(name);
+  // TODO(neilc): Avoid dirtying the tree in some circumstances.
+  dirty = true;
 
   if (metrics.isSome()) {
-    metrics->remove(name);
+    metrics->remove(clientPath);
   }
 }
 
 
-void DRFSorter::activate(const string& name)
+void DRFSorter::activate(const string& clientPath)
 {
-  CHECK(contains(name));
-
-  set<Client, DRFComparator>::iterator it = find(name);
-  if (it == clients.end()) {
-    Client client(name, calculateShare(name), 0);
-    clients.insert(client);
-  }
+  Node* client = CHECK_NOTNULL(find(clientPath));
+  client->active = true;
 }
 
 
-void DRFSorter::deactivate(const string& name)
+void DRFSorter::deactivate(const string& clientPath)
 {
-  CHECK(contains(name));
+  Node* client = CHECK_NOTNULL(find(clientPath));
+  client->active = false;
+}
 
-  set<Client, DRFComparator>::iterator it = find(name);
 
-  if (it != clients.end()) {
-    // TODO(benh): Removing the client is an unfortunate strategy
-    // because we lose information such as the number of allocations
-    // for this client which means the fairness can be gamed by a
-    // framework disconnecting and reconnecting.
-    clients.erase(it);
-  }
+void DRFSorter::updateWeight(const string& path, double weight)
+{
+  weights[path] = weight;
+
+  // TODO(neilc): Avoid dirtying the tree in some circumstances.
+  dirty = true;
 }
 
 
 void DRFSorter::allocated(
-    const string& name,
+    const string& clientPath,
     const SlaveID& slaveId,
     const Resources& resources)
 {
-  CHECK(contains(name));
+  Node* current = CHECK_NOTNULL(find(clientPath));
 
-  set<Client, DRFComparator>::iterator it = find(name);
-
-  // The allocator might notify us about an allocation that has been
-  // made to an inactive sorter client. For example, this happens when
-  // an agent re-registers that is running tasks for a framework that
-  // has not yet re-registered.
-  if (it != clients.end()) {
-    // TODO(benh): Refactor 'updateShare' to be able to reuse it here.
-    Client client(*it);
-
-    // Update the 'allocations' to reflect the allocator decision.
-    client.allocations++;
-
-    // Remove and reinsert it to update the ordering appropriately.
-    clients.erase(it);
-    clients.insert(client);
+  // NOTE: We don't currently update the `allocation` for the root
+  // node. This is debatable, but the current implementation doesn't
+  // require looking at the allocation of the root node.
+  while (current != root) {
+    current->allocation.add(slaveId, resources);
+    current = CHECK_NOTNULL(current->parent);
   }
 
-  // Add shared resources to the allocated quantities when the same
-  // resources don't already exist in the allocation.
-  const Resources newShared = resources.shared()
-    .filter([this, name, slaveId](const Resource& resource) {
-      return !allocations[name].resources[slaveId].contains(resource);
-    });
-
-  const Resources scalarQuantities =
-    (resources.nonShared() + newShared).createStrippedScalarQuantity();
-
-  allocations[name].resources[slaveId] += resources;
-  allocations[name].scalarQuantities += scalarQuantities;
-
-  foreach (const Resource& resource, scalarQuantities) {
-    allocations[name].totals[resource.name()] += resource.scalar();
-  }
-
-  // If the total resources have changed, we're going to recalculate
-  // all the shares, so don't bother just updating this client.
-  if (!dirty) {
-    updateShare(name);
-  }
+  // TODO(neilc): Avoid dirtying the tree in some circumstances.
+  dirty = true;
 }
 
 
 void DRFSorter::update(
-    const string& name,
+    const string& clientPath,
     const SlaveID& slaveId,
     const Resources& oldAllocation,
     const Resources& newAllocation)
 {
-  CHECK(contains(name));
-
   // TODO(bmahler): Check invariants between old and new allocations.
   // Namely, the roles and quantities of resources should be the same!
   // Otherwise, we need to ensure we re-calculate the shares, as
   // is being currently done, for safety.
 
-  const Resources oldAllocationQuantity =
-    oldAllocation.createStrippedScalarQuantity();
-  const Resources newAllocationQuantity =
-    newAllocation.createStrippedScalarQuantity();
+  Node* current = CHECK_NOTNULL(find(clientPath));
 
-  CHECK(allocations[name].resources[slaveId].contains(oldAllocation));
-  CHECK(allocations[name].scalarQuantities.contains(oldAllocationQuantity));
-
-  allocations[name].resources[slaveId] -= oldAllocation;
-  allocations[name].resources[slaveId] += newAllocation;
-
-  allocations[name].scalarQuantities -= oldAllocationQuantity;
-  allocations[name].scalarQuantities += newAllocationQuantity;
-
-  foreach (const Resource& resource, oldAllocationQuantity) {
-    allocations[name].totals[resource.name()] -= resource.scalar();
-  }
-
-  foreach (const Resource& resource, newAllocationQuantity) {
-    allocations[name].totals[resource.name()] += resource.scalar();
+  // NOTE: We don't currently update the `allocation` for the root
+  // node. This is debatable, but the current implementation doesn't
+  // require looking at the allocation of the root node.
+  while (current != root) {
+    current->allocation.update(slaveId, oldAllocation, newAllocation);
+    current = CHECK_NOTNULL(current->parent);
   }
 
   // Just assume the total has changed, per the TODO above.
@@ -234,37 +316,61 @@ void DRFSorter::update(
 }
 
 
-const hashmap<SlaveID, Resources>& DRFSorter::allocation(
-    const string& name) const
+void DRFSorter::unallocated(
+    const string& clientPath,
+    const SlaveID& slaveId,
+    const Resources& resources)
 {
-  CHECK(contains(name));
+  Node* current = CHECK_NOTNULL(find(clientPath));
 
-  return allocations.at(name).resources;
+  // NOTE: We don't currently update the `allocation` for the root
+  // node. This is debatable, but the current implementation doesn't
+  // require looking at the allocation of the root node.
+  while (current != root) {
+    current->allocation.subtract(slaveId, resources);
+    current = CHECK_NOTNULL(current->parent);
+  }
+
+  // TODO(neilc): Avoid dirtying the tree in some circumstances.
+  dirty = true;
+}
+
+
+const hashmap<SlaveID, Resources>& DRFSorter::allocation(
+    const string& clientPath) const
+{
+  const Node* client = CHECK_NOTNULL(find(clientPath));
+  return client->allocation.resources;
 }
 
 
 const Resources& DRFSorter::allocationScalarQuantities(
-    const string& name) const
+    const string& clientPath) const
 {
-  CHECK(contains(name));
-
-  return allocations.at(name).scalarQuantities;
+  const Node* client = CHECK_NOTNULL(find(clientPath));
+  return client->allocation.scalarQuantities;
 }
 
 
 hashmap<string, Resources> DRFSorter::allocation(const SlaveID& slaveId) const
 {
-  // TODO(jmlvanre): We can index the allocation by slaveId to make this faster.
-  // It is a tradeoff between speed vs. memory. For now we use existing data
-  // structures.
-
   hashmap<string, Resources> result;
 
-  foreachpair (const string& name, const Allocation& allocation, allocations) {
-    if (allocation.resources.contains(slaveId)) {
-      // It is safe to use `at()` here because we've just checked the existence
-      // of the key. This avoid un-necessary copies.
-      result.emplace(name, allocation.resources.at(slaveId));
+  // We want to find the allocation that has been made to each client
+  // on a particular `slaveId`. Rather than traversing the tree
+  // looking for leaf nodes (clients), we can instead just iterate
+  // over the `clients` hashmap.
+  //
+  // TODO(jmlvanre): We can index the allocation by slaveId to make
+  // this faster.  It is a tradeoff between speed vs. memory. For now
+  // we use existing data structures.
+  foreachvalue (const Node* client, clients) {
+    if (client->allocation.resources.contains(slaveId)) {
+      // It is safe to use `at()` here because we've just checked the
+      // existence of the key. This avoids unnecessary copies.
+      string path = client->clientPath();
+      CHECK(!result.contains(path));
+      result.emplace(path, client->allocation.resources.at(slaveId));
     }
   }
 
@@ -273,13 +379,13 @@ hashmap<string, Resources> DRFSorter::allocation(const SlaveID& slaveId) const
 
 
 Resources DRFSorter::allocation(
-    const string& name,
+    const string& clientPath,
     const SlaveID& slaveId) const
 {
-  CHECK(contains(name));
+  const Node* client = CHECK_NOTNULL(find(clientPath));
 
-  if (allocations.at(name).resources.contains(slaveId)) {
-    return allocations.at(name).resources.at(slaveId);
+  if (client->allocation.resources.contains(slaveId)) {
+    return client->allocation.resources.at(slaveId);
   }
 
   return Resources();
@@ -289,44 +395,6 @@ Resources DRFSorter::allocation(
 const Resources& DRFSorter::totalScalarQuantities() const
 {
   return total_.scalarQuantities;
-}
-
-
-void DRFSorter::unallocated(
-    const string& name,
-    const SlaveID& slaveId,
-    const Resources& resources)
-{
-  CHECK(contains(name));
-  CHECK(allocations.at(name).resources.contains(slaveId));
-  CHECK(allocations.at(name).resources.at(slaveId).contains(resources));
-
-  allocations[name].resources[slaveId] -= resources;
-
-  // Remove shared resources from the allocated quantities when there
-  // are no instances of same resources left in the allocation.
-  const Resources absentShared = resources.shared()
-    .filter([this, name, slaveId](const Resource& resource) {
-      return !allocations[name].resources[slaveId].contains(resource);
-    });
-
-  const Resources scalarQuantities =
-    (resources.nonShared() + absentShared).createStrippedScalarQuantity();
-
-  foreach (const Resource& resource, scalarQuantities) {
-    allocations[name].totals[resource.name()] -= resource.scalar();
-  }
-
-  CHECK(allocations[name].scalarQuantities.contains(scalarQuantities));
-  allocations[name].scalarQuantities -= scalarQuantities;
-
-  if (allocations[name].resources[slaveId].empty()) {
-    allocations[name].resources.erase(slaveId);
-  }
-
-  if (!dirty) {
-    updateShare(name);
-  }
 }
 
 
@@ -352,7 +420,7 @@ void DRFSorter::add(const SlaveID& slaveId, const Resources& resources)
     }
 
     // We have to recalculate all shares when the total resources
-    // change, but we put it off until sort is called so that if
+    // change, but we put it off until `sort` is called so that if
     // something else changes before the next allocation we don't
     // recalculate everything twice.
     dirty = true;
@@ -398,66 +466,60 @@ void DRFSorter::remove(const SlaveID& slaveId, const Resources& resources)
 vector<string> DRFSorter::sort()
 {
   if (dirty) {
-    set<Client, DRFComparator> temp;
+    std::function<void (Node*)> sortTree = [this, &sortTree](Node* node) {
+      foreach (Node* child, node->children) {
+        child->share = calculateShare(child);
+      }
 
-    foreach (Client client, clients) {
-      // Update the 'share' to get proper sorting.
-      client.share = calculateShare(client.name);
+      std::sort(node->children.begin(),
+                node->children.end(),
+                DRFSorter::Node::compareDRF);
 
-      temp.insert(client);
-    }
+      foreach (Node* child, node->children) {
+        sortTree(child);
+      }
+    };
 
-    clients = temp;
+    sortTree(root);
 
-    // Reset dirty to false so as not to re-calculate *all*
-    // shares unless another dirtying operation occurs.
     dirty = false;
   }
 
+  // Return the leaf nodes in the tree. The children of each node are
+  // already sorted in DRF order.
   vector<string> result;
-  result.reserve(clients.size());
 
-  foreach (const Client& client, clients) {
-    result.push_back(client.name);
-  }
+  std::function<void (const Node*)> listClients =
+      [&listClients, &result](const Node* node) {
+    if (node->active) {
+      result.push_back(node->clientPath());
+    }
+
+    foreach (Node* child, node->children) {
+      listClients(child);
+    }
+  };
+
+  listClients(root);
 
   return result;
 }
 
 
-bool DRFSorter::contains(const string& name) const
+bool DRFSorter::contains(const string& clientPath) const
 {
-  return allocations.contains(name);
+  return find(clientPath) != nullptr;
 }
 
 
 int DRFSorter::count() const
 {
-  return allocations.size();
+  return clients.size();
 }
 
 
-void DRFSorter::updateShare(const string& name)
+double DRFSorter::calculateShare(const Node* node) const
 {
-  set<Client, DRFComparator>::iterator it = find(name);
-
-  if (it != clients.end()) {
-    Client client(*it);
-
-    // Update the 'share' to get proper sorting.
-    client.share = calculateShare(client.name);
-
-    // Remove and reinsert it to update the ordering appropriately.
-    clients.erase(it);
-    clients.insert(client);
-  }
-}
-
-
-double DRFSorter::calculateShare(const string& name) const
-{
-  CHECK(contains(name));
-
   double share = 0.0;
 
   // TODO(benh): This implementation of "dominant resource fairness"
@@ -474,28 +536,39 @@ double DRFSorter::calculateShare(const string& name) const
     }
 
     if (scalar.value() > 0.0 &&
-        allocations.at(name).totals.contains(resourceName)) {
+        node->allocation.totals.contains(resourceName)) {
       const double allocation =
-        allocations.at(name).totals.at(resourceName).value();
+        node->allocation.totals.at(resourceName).value();
 
       share = std::max(share, allocation / scalar.value());
     }
   }
 
-  return share / weights.at(name);
+  return share / findWeight(node);
 }
 
 
-set<Client, DRFComparator>::iterator DRFSorter::find(const string& name)
+double DRFSorter::findWeight(const Node* node) const
 {
-  set<Client, DRFComparator>::iterator it;
-  for (it = clients.begin(); it != clients.end(); it++) {
-    if (name == it->name) {
-      break;
-    }
+  Option<double> weight = weights.get(node->path);
+
+  if (weight.isNone()) {
+    return 1.0;
   }
 
-  return it;
+  return weight.get();
+}
+
+
+DRFSorter::Node* DRFSorter::find(const string& clientPath) const
+{
+  Option<Node*> client = clients.get(clientPath);
+
+  if (client.isNone()) {
+    return nullptr;
+  }
+
+  return client.get();
 }
 
 } // namespace allocator {

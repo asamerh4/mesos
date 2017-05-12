@@ -344,7 +344,15 @@ TEST_F(DockerTest, ROOT_DOCKER_Version)
       false);
   ASSERT_SOME(docker);
 
-  AWAIT_EXPECT_EQ(Version(1, 7, 1), docker.get()->version());
+  AWAIT_EXPECT_EQ(Version(1, 7, 1, {"fc22"}), docker.get()->version());
+
+  docker = Docker::create(
+      "echo Docker version 17.05.0-ce, build 89658bed64",
+      tests::flags.docker_socket,
+      false);
+  ASSERT_SOME(docker);
+
+  AWAIT_EXPECT_EQ(Version(17, 05, 0, {"ce"}), docker.get()->version());
 }
 
 

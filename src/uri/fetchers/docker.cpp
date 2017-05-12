@@ -329,6 +329,7 @@ private:
       const URI& uri,
       const string& directory,
       const URI& manifestUri,
+      const http::Headers& manifestHeaders,
       const http::Response& response);
 
   Future<Nothing> __fetch(
@@ -469,12 +470,22 @@ Future<Nothing> DockerFetcherPluginProcess::fetch(
 
   URI manifestUri = getManifestUri(uri);
 
-  return curl(manifestUri)
+  // Request a Version 2 Schema 1 manifest. The MIME type of a Schema 1
+  // manifest is described in the following link:
+  // https://docs.docker.com/registry/spec/manifest-v2-1/
+  // Note: The 'Accept' header is required for Amazon ECR. See:
+  // https://forums.aws.amazon.com/message.jspa?messageID=780440
+  http::Headers manifestHeaders = {
+    {"Accept", "application/vnd.docker.distribution.manifest.v1+json"}
+  };
+
+  return curl(manifestUri, manifestHeaders)
     .then(defer(self(),
                 &Self::_fetch,
                 uri,
                 directory,
                 manifestUri,
+                manifestHeaders,
                 lambda::_1));
 }
 
@@ -483,13 +494,14 @@ Future<Nothing> DockerFetcherPluginProcess::_fetch(
     const URI& uri,
     const string& directory,
     const URI& manifestUri,
+    const http::Headers& manifestHeaders,
     const http::Response& response)
 {
   if (response.code == http::Status::UNAUTHORIZED) {
     return getAuthHeader(manifestUri, response)
       .then(defer(self(), [=](
           const http::Headers& authHeaders) -> Future<Nothing> {
-        return curl(manifestUri, authHeaders)
+        return curl(manifestUri, manifestHeaders + authHeaders)
           .then(defer(self(),
                       &Self::__fetch,
                       uri,
@@ -522,12 +534,25 @@ Future<Nothing> DockerFetcherPluginProcess::__fetch(
   // digests for pulling images that were pushed with Docker 1.10+ to
   // Registry 2.3+.
   Option<string> contentType = response.headers.get("Content-Type");
-  if (contentType.isSome() &&
-      !strings::startsWith(
+  if (contentType.isSome()) {
+    // NOTE: Docker support the following three media type for V2
+    // schema 1 manifest:
+    // 1. application/vnd.docker.distribution.manifest.v1+json
+    // 2. application/vnd.docker.distribution.manifest.v1+prettyjws
+    // 3. application/json
+    // For more details, see:
+    // https://docs.docker.com/registry/spec/manifest-v2-1/
+    bool isV2Schema1 =
+      strings::startsWith(
           contentType.get(),
-          "application/vnd.docker.distribution.manifest.v1")) {
-    return Failure(
-        "Unsupported manifest MIME type: " + contentType.get());
+          "application/vnd.docker.distribution.manifest.v1") ||
+      strings::startsWith(
+          contentType.get(),
+          "application/json");
+
+    if (!isV2Schema1) {
+      return Failure("Unsupported manifest MIME type: " + contentType.get());
+    }
   }
 
   Try<spec::v2::ImageManifest> manifest = spec::v2::parse(response.body);

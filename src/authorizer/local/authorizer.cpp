@@ -199,8 +199,6 @@ public:
       aclObject.set_type(mesos::ACL::Entity::ANY);
     } else {
       switch (action_) {
-        // All actions using `object.value` for authorization.
-        case authorization::VIEW_ROLE:
         case authorization::GET_ENDPOINT_WITH_PATH:
           // Check object has the required types set.
           CHECK_NOTNULL(object->value);
@@ -209,41 +207,10 @@ public:
           aclObject.set_type(mesos::ACL::Entity::SOME);
 
           break;
-        case authorization::REGISTER_FRAMEWORK:
-          aclObject.set_type(mesos::ACL::Entity::SOME);
-          if (object->framework_info) {
-            foreach (
-                const string& role,
-                protobuf::framework::getRoles(*object->framework_info)) {
-              aclObject.add_values(role);
-            }
-          } else if (object->value) {
-            // We also update the deprecated `value` field to support custom
-            // authorizers not yet modified to examine `framework_info`.
-            //
-            // TODO(bbannier): Clean up use of `value` here, see MESOS-7091.
-            aclObject.add_values(*(object->value));
-          } else {
-            aclObject.set_type(mesos::ACL::Entity::ANY);
-          }
-
-          break;
         case authorization::TEARDOWN_FRAMEWORK:
           aclObject.set_type(mesos::ACL::Entity::SOME);
           if (object->framework_info) {
             aclObject.add_values(object->framework_info->principal());
-          } else if (object->value) {
-            aclObject.add_values(*(object->value));
-          } else {
-            aclObject.set_type(mesos::ACL::Entity::ANY);
-          }
-
-          break;
-        case authorization::CREATE_VOLUME:
-        case authorization::RESERVE_RESOURCES:
-          aclObject.set_type(mesos::ACL::Entity::SOME);
-          if (object->resource) {
-            aclObject.add_values(object->resource->role());
           } else if (object->value) {
             aclObject.add_values(*(object->value));
           } else {
@@ -267,28 +234,6 @@ public:
           aclObject.set_type(mesos::ACL::Entity::SOME);
           if (object->resource) {
             aclObject.add_values(object->resource->reservation().principal());
-          } else if (object->value) {
-            aclObject.add_values(*(object->value));
-          } else {
-            aclObject.set_type(mesos::ACL::Entity::ANY);
-          }
-
-          break;
-        case authorization::GET_QUOTA:
-          aclObject.set_type(mesos::ACL::Entity::SOME);
-          if (object->quota_info) {
-            aclObject.add_values(object->quota_info->role());
-          } else if (object->value) {
-            aclObject.add_values(*(object->value));
-          } else {
-            aclObject.set_type(mesos::ACL::Entity::ANY);
-          }
-
-          break;
-        case authorization::UPDATE_WEIGHT:
-          aclObject.set_type(mesos::ACL::Entity::SOME);
-          if (object->weight_info) {
-            aclObject.add_values(object->weight_info->role());
           } else if (object->value) {
             aclObject.add_values(*(object->value));
           } else {
@@ -335,6 +280,9 @@ public:
                      object->framework_info->has_user()) {
             aclObject.add_values(object->framework_info->user());
             aclObject.set_type(mesos::ACL::Entity::SOME);
+          } else if (object->container_id != nullptr) {
+            aclObject.add_values(object->container_id->value());
+            aclObject.set_type(mesos::ACL::Entity::SOME);
           }
 
           break;
@@ -349,14 +297,6 @@ public:
             aclObject.add_values(object->framework_info->user());
             aclObject.set_type(mesos::ACL::Entity::SOME);
           }
-
-          break;
-        case authorization::UPDATE_QUOTA:
-          // Check object has the required types set.
-          CHECK_NOTNULL(object->quota_info);
-
-          aclObject.add_values(object->quota_info->role());
-          aclObject.set_type(mesos::ACL::Entity::SOME);
 
           break;
         case authorization::VIEW_FRAMEWORK:
@@ -452,11 +392,23 @@ public:
           aclObject.set_type(mesos::ACL::Entity::ANY);
 
           break;
+        case authorization::REGISTER_AGENT:
+          aclObject.set_type(mesos::ACL::Entity::ANY);
+
+          break;
+        case authorization::CREATE_VOLUME:
+        case authorization::GET_QUOTA:
+        case authorization::RESERVE_RESOURCES:
+        case authorization::UPDATE_QUOTA:
+        case authorization::UPDATE_WEIGHT:
+        case authorization::VIEW_ROLE:
+        case authorization::REGISTER_FRAMEWORK:
+          return Error("Authorization for action " + stringify(action_) +
+                       " requires a specialized approver object.");
         case authorization::UNKNOWN:
           LOG(WARNING) << "Authorization for action '" << action_
                        << "' is not defined and therefore not authorized";
           return false;
-          break;
       }
     }
 
@@ -538,42 +490,256 @@ private:
 };
 
 
+class LocalImplicitExecutorObjectApprover : public ObjectApprover
+{
+public:
+  LocalImplicitExecutorObjectApprover(const ContainerID& subject)
+    : subject_(subject) {}
+
+  // Executors are permitted to perform an action when the root ContainerID in
+  // the object is equal to the ContainerID that was extracted from the
+  // subject's claims.
+  virtual Try<bool> approved(
+      const Option<ObjectApprover::Object>& object) const noexcept override
+  {
+    return object.isSome() &&
+           object->container_id != nullptr &&
+           subject_ == protobuf::getRootContainerId(*object->container_id);
+  }
+
+private:
+  const ContainerID subject_;
+};
+
+
+// Implementation of the ObjectApprover interface denying all objects.
+class RejectingObjectApprover : public ObjectApprover
+{
+public:
+  virtual Try<bool> approved(
+      const Option<ObjectApprover::Object>& object) const noexcept override
+  {
+    return false;
+  }
+};
+
+
+class LocalHierarchicalRoleApprover : public ObjectApprover
+{
+public:
+  LocalHierarchicalRoleApprover(
+      const vector<GenericACL>& acls,
+      const Option<authorization::Subject>& subject,
+      const authorization::Action& action,
+      bool permissive)
+    : acls_(acls), subject_(subject), action_(action), permissive_(permissive)
+  {
+    if (subject_.isSome()) {
+      entitySubject_.set_type(ACL::Entity::SOME);
+      entitySubject_.add_values(subject_->value());
+    } else {
+      entitySubject_.set_type(ACL::Entity::ANY);
+    }
+  }
+
+  virtual Try<bool> approved(const Option<ObjectApprover::Object>& object) const
+      noexcept override
+  {
+    ACL::Entity entityObject;
+
+    if (object.isNone()) {
+      entityObject.set_type(ACL::Entity::ANY);
+    } else {
+      switch (action_) {
+        case authorization::CREATE_VOLUME:
+        case authorization::RESERVE_RESOURCES: {
+          entityObject.set_type(ACL::Entity::SOME);
+          if (object->resource) {
+            entityObject.add_values(object->resource->role());
+          } else if (object->value) {
+            entityObject.add_values(*(object->value));
+          } else {
+            entityObject.set_type(ACL::Entity::ANY);
+          }
+          break;
+        }
+        case authorization::UPDATE_WEIGHT: {
+          entityObject.set_type(mesos::ACL::Entity::SOME);
+          if (object->weight_info) {
+            entityObject.add_values(object->weight_info->role());
+          } else if (object->value) {
+            entityObject.add_values(*(object->value));
+          } else {
+            entityObject.set_type(mesos::ACL::Entity::ANY);
+          }
+
+          break;
+        }
+        case authorization::VIEW_ROLE: {
+          // Check object has the required types set.
+          CHECK_NOTNULL(object->value);
+
+          entityObject.add_values(*(object->value));
+          entityObject.set_type(mesos::ACL::Entity::SOME);
+
+          break;
+        }
+        case authorization::GET_QUOTA: {
+          entityObject.set_type(mesos::ACL::Entity::SOME);
+          if (object->quota_info) {
+            entityObject.add_values(object->quota_info->role());
+          } else if (object->value) {
+            entityObject.add_values(*(object->value));
+          } else {
+            entityObject.set_type(mesos::ACL::Entity::ANY);
+          }
+
+          break;
+        }
+        case authorization::UPDATE_QUOTA: {
+          // Check object has the required types set.
+          CHECK_NOTNULL(object->quota_info);
+
+          entityObject.add_values(object->quota_info->role());
+          entityObject.set_type(mesos::ACL::Entity::SOME);
+
+          break;
+        }
+        case authorization::REGISTER_FRAMEWORK: {
+          vector<ACL::Entity> objects;
+          if (object->framework_info) {
+            foreach (
+                const string& role,
+                protobuf::framework::getRoles(*(object->framework_info))) {
+              objects.emplace_back();
+              objects.back().set_type(mesos::ACL::Entity::SOME);
+              objects.back().add_values(role);
+            }
+          } else if (object->value) {
+            // We also update the deprecated `value` field to support custom
+            // authorizers not yet modified to examine `framework_info`.
+            //
+            // TODO(bbannier): Clean up use of `value` here, see MESOS-7091.
+            objects.emplace_back();
+            objects.back().set_type(mesos::ACL::Entity::SOME);
+            objects.back().add_values(*(object->value));
+          } else {
+            objects.emplace_back();
+            objects.back().set_type(mesos::ACL::Entity::ANY);
+          }
+
+          // The framework needs to be allowed to register under
+          // all the roles it requests.
+          foreach (const ACL::Entity& entity, objects) {
+            if (!approved(acls_, entitySubject_, entity)) {
+              return false;
+            }
+          }
+
+          return objects.empty() ? permissive_ : true;
+        }
+        case authorization::ACCESS_MESOS_LOG:
+        case authorization::ACCESS_SANDBOX:
+        case authorization::ATTACH_CONTAINER_INPUT:
+        case authorization::ATTACH_CONTAINER_OUTPUT:
+        case authorization::DESTROY_VOLUME:
+        case authorization::GET_ENDPOINT_WITH_PATH:
+        case authorization::KILL_NESTED_CONTAINER:
+        case authorization::LAUNCH_NESTED_CONTAINER:
+        case authorization::LAUNCH_NESTED_CONTAINER_SESSION:
+        case authorization::REMOVE_NESTED_CONTAINER:
+        case authorization::RUN_TASK:
+        case authorization::SET_LOG_LEVEL:
+        case authorization::TEARDOWN_FRAMEWORK:
+        case authorization::UNRESERVE_RESOURCES:
+        case authorization::VIEW_CONTAINER:
+        case authorization::VIEW_EXECUTOR:
+        case authorization::VIEW_FLAGS:
+        case authorization::VIEW_FRAMEWORK:
+        case authorization::VIEW_TASK:
+        case authorization::WAIT_NESTED_CONTAINER:
+        case authorization::REGISTER_AGENT:
+        case authorization::UNKNOWN:
+          UNREACHABLE();
+      }
+    }
+
+    CHECK(
+        entityObject.type() == ACL::Entity::ANY ||
+        entityObject.values_size() == 1);
+
+    return approved(acls_, entitySubject_, entityObject);
+  }
+
+private:
+  bool approved(
+      const vector<GenericACL>& acls,
+      const ACL::Entity& subject,
+      const ACL::Entity& object) const
+  {
+    // This entity is used for recursive hierarchies where we already
+    // validated that the object role is a nested hierarchy of the
+    // acl role.
+    ACL::Entity aclAny;
+    aclAny.set_type(ACL::Entity::ANY);
+
+    foreach (const GenericACL& acl, acls) {
+      if (!isRecursiveACL(acl)) {
+        // If `acl` is not recursive, treat it as a normal acl.
+        if (matches(subject, acl.subjects) && matches(object, acl.objects)) {
+          return allows(subject, acl.subjects) && allows(object, acl.objects);
+        }
+      } else if (object.type() == ACL::Entity::SOME &&
+          isNestedHierarchy(acl.objects.values(0), object.values(0))) {
+        // Partial validation was done when verifying that the object is
+        // a nested hierarchy.
+        if (matches(subject, acl.subjects) && matches(object, aclAny)) {
+          return allows(subject, acl.subjects) && allows(object, aclAny);
+        }
+      }
+    }
+
+    return permissive_;
+  }
+
+  static bool isRecursiveACL(const GenericACL& acl)
+  {
+    return acl.objects.values_size() == 1 &&
+           strings::endsWith(acl.objects.values(0), "/%");
+  }
+
+  // Returns true if child is a nested hierarchy of parent, i.e. child has more
+  // levels of nesting and all the levels of parent are a prefix of the levels
+  // of child.
+  static bool isNestedHierarchy(const string& parent, const string& child)
+  {
+    // Requires that parent ends with `/%`.
+    CHECK(strings::endsWith(parent, "/%"));
+    return strings::startsWith(child, parent.substr(0, parent.size() - 1));
+  }
+
+  vector<GenericACL> acls_;
+  Option<authorization::Subject> subject_;
+  authorization::Action action_;
+  bool permissive_;
+  ACL::Entity entitySubject_;
+};
+
+
 class LocalAuthorizerProcess : public ProtobufProcess<LocalAuthorizerProcess>
 {
 public:
   LocalAuthorizerProcess(const ACLs& _acls)
     : ProcessBase(process::ID::generate("local-authorizer")), acls(_acls) {}
 
-  virtual void initialize()
-  {
-    // TODO(arojas): Remove the following two if blocks once
-    // ShutdownFramework reaches the end of deprecation cycle
-    // which started with 0.27.0.
-    if (acls.shutdown_frameworks_size() > 0 &&
-        acls.teardown_frameworks_size() > 0) {
-      LOG(WARNING) << "ACLs defined for both ShutdownFramework and "
-                   << "TeardownFramework; only the latter will be used";
-      return;
-    }
-
-    // Move contents of `acls.shutdown_frameworks` to
-    // `acls.teardown_frameworks`
-    if (acls.shutdown_frameworks_size() > 0) {
-      LOG(WARNING) << "ShutdownFramework ACL is deprecated; please use "
-                   << "TeardownFramework";
-      foreach (const ACL::ShutdownFramework& acl, acls.shutdown_frameworks()) {
-        ACL::TeardownFramework* teardown = acls.add_teardown_frameworks();
-        teardown->mutable_principals()->CopyFrom(acl.principals());
-        teardown->mutable_framework_principals()->CopyFrom(
-            acl.framework_principals());
-      }
-    }
-    acls.clear_shutdown_frameworks();
-  }
-
   Future<bool> authorized(const authorization::Request& request)
   {
-    return getObjectApprover(request.subject(), request.action())
+    Option<authorization::Subject> subject;
+    if (request.has_subject()) {
+      subject = request.subject();
+    }
+
+    return getObjectApprover(subject, request.action())
       .then([=](const Owned<ObjectApprover>& objectApprover) -> Future<bool> {
         Option<ObjectApprover::Object> object = None();
         if (request.has_object()) {
@@ -588,9 +754,128 @@ public:
       });
   }
 
+  template <typename SomeACL>
+  static vector<GenericACL> createHierarchicalRoleACLs(
+      SomeACL&& someACL)
+  {
+    vector<GenericACL> acls;
+
+    // This may split an ACL into several. This does not change semantics
+    // since the split rules appear consecutively and if an object
+    // matches any of the split ACLs in any order, it will yield the same
+    // results.
+    foreach (auto&& acl, someACL) {
+      switch (acl.roles().type()) {
+        case ACL::Entity::SOME: {
+          ACL::Entity roles;
+          foreach (const string& value, acl.roles().values()) {
+            if (strings::endsWith(value, "/%")) {
+              // Recursive ACLs only have one value in their object list.
+              GenericACL acl_;
+              acl_.subjects = acl.principals();
+              acl_.objects.add_values(value);
+              acls.push_back(acl_);
+            } else {
+              roles.add_values(value);
+            }
+          }
+
+          if (!roles.values().empty()) {
+            GenericACL acl_;
+            acl_.subjects = acl.principals();
+            acl_.objects = roles;
+            acls.push_back(acl_);
+          }
+          break;
+        }
+        case ACL::Entity::ANY:
+        case ACL::Entity::NONE: {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.roles();
+          acls.push_back(acl_);
+          break;
+        }
+      }
+    }
+
+    return acls;
+  }
+
+  Future<Owned<ObjectApprover>> getHierarchicalRoleApprover(
+      const Option<authorization::Subject>& subject,
+      const authorization::Action& action) const
+  {
+    vector<GenericACL> hierarchicalRoleACLs;
+    switch (action) {
+      case authorization::CREATE_VOLUME: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.create_volumes());
+        break;
+      }
+      case authorization::RESERVE_RESOURCES: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.reserve_resources());
+        break;
+      }
+      case authorization::UPDATE_WEIGHT: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.update_weights());
+        break;
+      }
+      case authorization::VIEW_ROLE: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.view_roles());
+        break;
+      }
+      case authorization::GET_QUOTA: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.get_quotas());
+        break;
+      }
+      case authorization::REGISTER_FRAMEWORK: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.register_frameworks());
+        break;
+      }
+      case authorization::UPDATE_QUOTA: {
+        hierarchicalRoleACLs =
+            createHierarchicalRoleACLs(acls.update_quotas());
+        break;
+      }
+      case authorization::ACCESS_MESOS_LOG:
+      case authorization::ACCESS_SANDBOX:
+      case authorization::ATTACH_CONTAINER_INPUT:
+      case authorization::ATTACH_CONTAINER_OUTPUT:
+      case authorization::DESTROY_VOLUME:
+      case authorization::GET_ENDPOINT_WITH_PATH:
+      case authorization::KILL_NESTED_CONTAINER:
+      case authorization::LAUNCH_NESTED_CONTAINER:
+      case authorization::LAUNCH_NESTED_CONTAINER_SESSION:
+      case authorization::RUN_TASK:
+      case authorization::SET_LOG_LEVEL:
+      case authorization::TEARDOWN_FRAMEWORK:
+      case authorization::UNKNOWN:
+      case authorization::UNRESERVE_RESOURCES:
+      case authorization::VIEW_CONTAINER:
+      case authorization::VIEW_EXECUTOR:
+      case authorization::VIEW_FLAGS:
+      case authorization::VIEW_FRAMEWORK:
+      case authorization::VIEW_TASK:
+      case authorization::WAIT_NESTED_CONTAINER:
+      case authorization::REMOVE_NESTED_CONTAINER:
+      case authorization::REGISTER_AGENT:
+        UNREACHABLE();
+    }
+
+    return Owned<ObjectApprover>(
+        new LocalHierarchicalRoleApprover(
+            hierarchicalRoleACLs, subject, action, acls.permissive()));
+  }
+
   Future<Owned<ObjectApprover>> getNestedContainerObjectApprover(
       const Option<authorization::Subject>& subject,
-      const authorization::Action& action)
+      const authorization::Action& action) const
   {
     CHECK(action == authorization::LAUNCH_NESTED_CONTAINER ||
           action == authorization::LAUNCH_NESTED_CONTAINER_SESSION);
@@ -645,39 +930,117 @@ public:
         acls.permissive()));
   }
 
+  Future<Owned<ObjectApprover>> getImplicitExecutorObjectApprover(
+      const Option<authorization::Subject>& subject,
+      const authorization::Action& action)
+  {
+    CHECK(subject.isSome() &&
+          subject->has_claims() &&
+          !subject->has_value() &&
+          (action == authorization::LAUNCH_NESTED_CONTAINER ||
+           action == authorization::WAIT_NESTED_CONTAINER ||
+           action == authorization::KILL_NESTED_CONTAINER ||
+           action == authorization::LAUNCH_NESTED_CONTAINER_SESSION ||
+           action == authorization::REMOVE_NESTED_CONTAINER ||
+           action == authorization::ATTACH_CONTAINER_OUTPUT));
+
+    Option<ContainerID> subjectContainerId;
+    foreach (const Label& claim, subject->claims().labels()) {
+      if (claim.key() == "cid" && claim.has_value()) {
+        subjectContainerId = ContainerID();
+        subjectContainerId->set_value(claim.value());
+        break;
+      }
+    }
+
+    if (subjectContainerId.isNone()) {
+      // If the subject's claims do not include a ContainerID,
+      // we deny all objects.
+      return Owned<ObjectApprover>(new RejectingObjectApprover());
+    }
+
+    return Owned<ObjectApprover>(new LocalImplicitExecutorObjectApprover(
+        subjectContainerId.get()));
+  }
+
   Future<Owned<ObjectApprover>> getObjectApprover(
       const Option<authorization::Subject>& subject,
       const authorization::Action& action)
   {
-    // Implementation of the ObjectApprover interface denying all objects.
-    class RejectingObjectApprover : public ObjectApprover
-    {
-    public:
-      virtual Try<bool> approved(
-          const Option<ObjectApprover::Object>& object) const noexcept override
-      {
-        return false;
-      }
-    };
-
-    if (action == authorization::LAUNCH_NESTED_CONTAINER ||
-        action == authorization::LAUNCH_NESTED_CONTAINER_SESSION) {
-      return getNestedContainerObjectApprover(subject, action);
+    // We return the `LocalImplicitExecutorObjectApprover` only for subjects and
+    // actions which it knows how to handle. This means the subject should have
+    // claims but no value, and the action should be one of the actions used by
+    // the default executor.
+    if (subject.isSome() &&
+        subject->has_claims() &&
+        !subject->has_value() &&
+        (action == authorization::LAUNCH_NESTED_CONTAINER ||
+         action == authorization::WAIT_NESTED_CONTAINER ||
+         action == authorization::KILL_NESTED_CONTAINER ||
+         action == authorization::LAUNCH_NESTED_CONTAINER_SESSION ||
+         action == authorization::REMOVE_NESTED_CONTAINER ||
+         action == authorization::ATTACH_CONTAINER_OUTPUT)) {
+      return getImplicitExecutorObjectApprover(subject, action);
     }
 
-    Result<vector<GenericACL>> genericACLs = createGenericACLs(action, acls);
-    if (genericACLs.isError()) {
-      return Failure(genericACLs.error());
-    }
-
-    if (genericACLs.isNone()) {
-      // If we could not create acls, we deny all objects.
+    // Currently, implicit executor authorization is the only case which handles
+    // subjects that do not have the `value` field set. If the previous case was
+    // not true and `value` is not set, then we should fail all requests.
+    if (subject.isSome() && !subject->has_value()) {
       return Owned<ObjectApprover>(new RejectingObjectApprover());
     }
 
-    return Owned<ObjectApprover>(
-        new LocalAuthorizerObjectApprover(
-            genericACLs.get(), subject, action, acls.permissive()));
+    switch (action) {
+      case authorization::LAUNCH_NESTED_CONTAINER:
+      case authorization::LAUNCH_NESTED_CONTAINER_SESSION: {
+        return getNestedContainerObjectApprover(subject, action);
+      }
+      case authorization::CREATE_VOLUME:
+      case authorization::RESERVE_RESOURCES:
+      case authorization::UPDATE_WEIGHT:
+      case authorization::VIEW_ROLE:
+      case authorization::GET_QUOTA:
+      case authorization::REGISTER_FRAMEWORK:
+      case authorization::UPDATE_QUOTA: {
+        return getHierarchicalRoleApprover(subject, action);
+      }
+      case authorization::ACCESS_MESOS_LOG:
+      case authorization::ACCESS_SANDBOX:
+      case authorization::ATTACH_CONTAINER_INPUT:
+      case authorization::ATTACH_CONTAINER_OUTPUT:
+      case authorization::DESTROY_VOLUME:
+      case authorization::GET_ENDPOINT_WITH_PATH:
+      case authorization::KILL_NESTED_CONTAINER:
+      case authorization::RUN_TASK:
+      case authorization::SET_LOG_LEVEL:
+      case authorization::TEARDOWN_FRAMEWORK:
+      case authorization::UNRESERVE_RESOURCES:
+      case authorization::VIEW_CONTAINER:
+      case authorization::VIEW_EXECUTOR:
+      case authorization::VIEW_FLAGS:
+      case authorization::VIEW_FRAMEWORK:
+      case authorization::VIEW_TASK:
+      case authorization::WAIT_NESTED_CONTAINER:
+      case authorization::REMOVE_NESTED_CONTAINER:
+      case authorization::REGISTER_AGENT:
+      case authorization::UNKNOWN: {
+        Result<vector<GenericACL>> genericACLs =
+          createGenericACLs(action, acls);
+        if (genericACLs.isError()) {
+          return Failure(genericACLs.error());
+        }
+        if (genericACLs.isNone()) {
+          // If we could not create acls, we deny all objects.
+          return Owned<ObjectApprover>(new RejectingObjectApprover());
+        }
+
+        return Owned<ObjectApprover>(
+            new LocalAuthorizerObjectApprover(
+                genericACLs.get(), subject, action, acls.permissive()));
+      }
+    }
+
+    UNREACHABLE();
   }
 
 private:
@@ -688,17 +1051,6 @@ private:
     vector<GenericACL> acls_;
 
     switch (action) {
-      case authorization::REGISTER_FRAMEWORK:
-        foreach (
-            const ACL::RegisterFramework& acl, acls.register_frameworks()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
       case authorization::TEARDOWN_FRAMEWORK:
         foreach (
             const ACL::TeardownFramework& acl, acls.teardown_frameworks()) {
@@ -720,16 +1072,6 @@ private:
         }
 
         return acls_;
-      case authorization::RESERVE_RESOURCES:
-        foreach (const ACL::ReserveResources& acl, acls.reserve_resources()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
       case authorization::UNRESERVE_RESOURCES:
         foreach (
             const ACL::UnreserveResources& acl, acls.unreserve_resources()) {
@@ -741,62 +1083,11 @@ private:
         }
 
         return acls_;
-      case authorization::CREATE_VOLUME:
-        foreach (const ACL::CreateVolume& acl, acls.create_volumes()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
       case authorization::DESTROY_VOLUME:
         foreach (const ACL::DestroyVolume& acl, acls.destroy_volumes()) {
           GenericACL acl_;
           acl_.subjects = acl.principals();
           acl_.objects = acl.creator_principals();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
-      case authorization::GET_QUOTA:
-        foreach (const ACL::GetQuota& acl, acls.get_quotas()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
-      case authorization::UPDATE_QUOTA: {
-        foreach (const ACL::UpdateQuota& acl, acls.update_quotas()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
-      }
-      case authorization::VIEW_ROLE:
-        foreach (const ACL::ViewRole& acl, acls.view_roles()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
-
-          acls_.push_back(acl_);
-        }
-
-        return acls_;
-      case authorization::UPDATE_WEIGHT:
-        foreach (const ACL::UpdateWeight& acl, acls.update_weights()) {
-          GenericACL acl_;
-          acl_.subjects = acl.principals();
-          acl_.objects = acl.roles();
 
           acls_.push_back(acl_);
         }
@@ -947,9 +1238,26 @@ private:
         }
 
         return acls_;
+      case authorization::REGISTER_AGENT:
+        foreach (const ACL::RegisterAgent& acl, acls.register_agents()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.agent();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::REGISTER_FRAMEWORK:
+      case authorization::CREATE_VOLUME:
+      case authorization::RESERVE_RESOURCES:
+      case authorization::UPDATE_WEIGHT:
+      case authorization::VIEW_ROLE:
+      case authorization::GET_QUOTA:
+      case authorization::UPDATE_QUOTA:
       case authorization::LAUNCH_NESTED_CONTAINER_SESSION:
       case authorization::LAUNCH_NESTED_CONTAINER:
-        return Error("Extracting ACLs for launching nested containers requires "
+        return Error("Extracting ACLs for " + stringify(action) + " requires "
                      "a specialized function");
       case authorization::UNKNOWN:
         // Cannot generate acls for an unknown action.
@@ -1028,6 +1336,13 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
     }
   }
 
+  foreach (const ACL::RegisterAgent& acl, acls.register_agents()) {
+    if (acl.agent().type() == ACL::Entity::SOME) {
+      return Error(
+          "acls.register_agents.agent type must be either NONE or ANY");
+    }
+  }
+
   // TODO(alexr): Consider validating not only protobuf, but also the original
   // JSON in order to spot misspelled names. A misspelled action may affect
   // authorization result and hence lead to a security issue (e.g. when there
@@ -1058,10 +1373,11 @@ process::Future<bool> LocalAuthorizer::authorized(
   const authorization::Request& request)
 {
   // Request sanity checks.
-  // A set `subject` should always come with a set `value`.
+  // A set `subject` should always come with a set `value` or `claims`.
   CHECK(
     !request.has_subject() ||
-    (request.has_subject() && request.subject().has_value()));
+    request.subject().has_value() ||
+    request.subject().has_claims());
 
   // A set `action` is mandatory.
   CHECK(request.has_action());
@@ -1078,6 +1394,7 @@ process::Future<bool> LocalAuthorizer::authorized(
       request.object().has_executor_info() ||
       request.object().has_quota_info() ||
       request.object().has_weight_info() ||
+      request.object().has_container_id() ||
       request.object().has_resource())));
 
   typedef Future<bool> (LocalAuthorizerProcess::*F)(

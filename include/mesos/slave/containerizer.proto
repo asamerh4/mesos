@@ -161,6 +161,8 @@ message ContainerLaunchInfo {
   // The additional preparation commands to execute before
   // executing the command.
   repeated CommandInfo pre_exec_commands = 1;
+
+  // The environment set for the container.
   optional Environment environment = 2;
 
   // (Linux only) The root filesystem for the container.
@@ -182,8 +184,14 @@ message ContainerLaunchInfo {
   // a command task.
   optional CommandInfo command = 5;
 
-  // The working directory for the container.
-  // NOTE: This is different than Mesos sandbox.
+  // The working directory for the container. For non-DEBUG containers,
+  // it is set to container sandbox, i.e., Mesos sandbox, unless one of
+  // the isolators overrides it *and* the container defines an image.
+  // DEBUG containers inherit working directory from their parent.
+  //
+  // NOTE: For the command executor case, this points to the executor
+  // working directory in the host filesystem, which may be different
+  // from the task working directory when task defines an image.
   optional string working_directory = 6;
 
   // (Linux only) The capabilities requested for the container.
@@ -196,6 +204,12 @@ message ContainerLaunchInfo {
 
   // (POSIX only) The slave path of the pseudo terminal.
   optional string tty_slave_path = 14;
+
+  // The environment specific for command tasks. Gets merged with
+  // 'environment' and the 'command' `Environment`.
+  // TODO(tillt): Remove this once we no longer support the old style
+  // command task (i.e., that uses mesos-execute).
+  optional Environment task_environment = 15;
 }
 
 

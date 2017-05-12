@@ -112,28 +112,27 @@ if (WIN32 AND HAS_AUTHENTICATION)
     "`-DHAS_AUTHENTICATION=0` as an argument when you run CMake.")
 endif (WIN32 AND HAS_AUTHENTICATION)
 
-# If 'REBUNDLED' is set to FALSE, this will cause Mesos to build against
-# the specified dependency repository.  This is especially useful for
-# Windows builds, because building on MSVC 1900 requires newer versions
-# of ZK, glog, and libevent, than the ones bundled in the Mesos repository.
+# If 'REBUNDLED' is set to FALSE, this will cause Mesos to build against the
+# specified dependency repository. This is especially useful for Windows
+# builds, because building on MSVC 1900 requires newer versions of some
+# dependencies than the ones bundled in the Mesos repository.
 set(
   3RDPARTY_DEPENDENCIES "https://github.com/3rdparty/mesos-3rdparty/raw/master"
   CACHE STRING
     "URL or filesystem path with a fork of the canonical 3rdparty repository")
 
-if (REBUNDLED AND ENABLE_LIBEVENT)
-  message(
-    WARNING
-    "Both `ENABLE_LIBEVENT` and `REBUNDLED` (set to TRUE by default) flags "
-    "have been set.  Libevent does not come rebundled in Mesos, so it will "
-    "be downloaded.")
-endif (REBUNDLED AND ENABLE_LIBEVENT)
-
 if (WIN32 AND REBUNDLED)
   message(
     WARNING
-    "The current supported version of ZK does not compile on Windows, and does "
-    "not come rebundled in the Mesos repository.  It will be downloaded from "
+    "On Windows, the required versions of:\n"
+    "  * ZooKeeper\n"
+    "  * protobuf\n"
+    "  * glog\n"
+    "  * libevent\n"
+    "  * curl\n"
+    "  * libapr\n"
+    "  * zlib\n"
+    "do not come rebundled in the Mesos repository.  They will be downloaded from "
     "the Internet, even though the `REBUNDLED` flag was set.")
 endif (WIN32 AND REBUNDLED)
 
@@ -163,7 +162,7 @@ if (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
     "  * Linux: (on gcc) set `CMAKE_CXX_FLAGS` to include `-m64`:\n"
     "    `cmake -DCMAKE_CXX_FLAGS=-m64 `.\n"
     "  * Windows: use the VS win64 CMake generator:\n"
-    "    `cmake -G \"Visual Studio 10 Win64\"`.\n"
+    "    `cmake -G \"Visual Studio 15 2017 Win64\"`.\n"
     "  * OS X: add `x86_64` to the `CMAKE_OSX_ARCHITECTURES`:\n"
     "    `cmake -DCMAKE_OSX_ARCHITECTURES=x86_64`.\n")
 endif (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
@@ -175,6 +174,18 @@ endif (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
 #     We just check the MSVC version.
 CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
 if (WIN32)
+  # Versions of Visual Studio older than 2017 do not support all core features
+  # of C++14, which prevents Mesos from moving past C++11. This adds a
+  # non-fatal deprecation warning.
+  set(PREFERRED_GENERATOR "Visual Studio 15 2017")
+  if (NOT CMAKE_GENERATOR MATCHES ${PREFERRED_GENERATOR})
+    message(
+      WARNING
+      "Mesos is deprecating support for ${CMAKE_GENERATOR}. "
+      "Please use ${PREFERRED_GENERATOR}."
+  )
+  endif (NOT CMAKE_GENERATOR MATCHES ${PREFERRED_GENERATOR})
+
   # We don't support compilation against mingw headers (which, e.g., Clang on
   # Windows does at this point), because this is likely to cost us more effort
   # to support than it will be worth at least in the short term.

@@ -643,6 +643,7 @@ protected:
       Try<Owned<checks::Checker>> _checker =
         checks::Checker::create(
             task.check(),
+            launcherDir,
             defer(self(), &Self::taskCheckUpdated, taskId.get(), lambda::_1),
             taskId.get(),
             pid,
@@ -1004,12 +1005,14 @@ private:
           checkStatusInfo.mutable_command();
           break;
         }
-
         case CheckInfo::HTTP: {
           checkStatusInfo.mutable_http();
           break;
         }
-
+        case CheckInfo::TCP: {
+          checkStatusInfo.mutable_tcp();
+          break;
+        }
         case CheckInfo::UNKNOWN: {
           LOG(FATAL) << "UNKNOWN check type is invalid";
           break;

@@ -88,15 +88,17 @@ namespace checks {
 
 #ifndef __WINDOWS__
 constexpr char HTTP_CHECK_COMMAND[] = "curl";
+constexpr char TCP_CHECK_COMMAND[] = "mesos-tcp-connect";
 #else
 constexpr char HTTP_CHECK_COMMAND[] = "curl.exe";
+constexpr char TCP_CHECK_COMMAND[] = "mesos-tcp-connect.exe";
 #endif // __WINDOWS__
 
-static const string DEFAULT_HTTP_SCHEME = "http";
+constexpr char DEFAULT_HTTP_SCHEME[] = "http";
 
 // Use '127.0.0.1' instead of 'localhost', because the host
 // file in some container images may not contain 'localhost'.
-static const string DEFAULT_DOMAIN = "127.0.0.1";
+constexpr char DEFAULT_DOMAIN[] = "127.0.0.1";
 
 
 #ifdef __linux__
@@ -133,6 +135,7 @@ class CheckerProcess : public ProtobufProcess<CheckerProcess>
 public:
   CheckerProcess(
       const CheckInfo& _check,
+      const string& _launcherDir,
       const lambda::function<void(const CheckStatusInfo&)>& _callback,
       const TaskID& _taskId,
       const Option<pid_t>& _taskPid,
@@ -184,19 +187,29 @@ private:
 
   void processCommandCheckResult(
       const Stopwatch& stopwatch,
-      const Future<int>& result);
+      const Future<int>& future);
 
   Future<int> httpCheck();
   Future<int> _httpCheck(
       const tuple<Future<Option<int>>, Future<string>, Future<string>>& t);
   void processHttpCheckResult(
       const Stopwatch& stopwatch,
-      const Future<int>& result);
+      const Future<int>& future);
+
+  Future<bool> tcpCheck();
+  Future<bool> _tcpCheck(
+      const tuple<Future<Option<int>>, Future<string>, Future<string>>& t);
+  void processTcpCheckResult(
+      const Stopwatch& stopwatch,
+      const Future<bool>& future);
 
   const CheckInfo check;
   Duration checkDelay;
   Duration checkInterval;
   Duration checkTimeout;
+
+  // Contains the binary for TCP checks.
+  const string launcherDir;
 
   const lambda::function<void(const CheckStatusInfo&)> updateCallback;
   const TaskID taskId;
@@ -220,6 +233,7 @@ private:
 
 Try<Owned<Checker>> Checker::create(
     const CheckInfo& check,
+    const string& launcherDir,
     const lambda::function<void(const CheckStatusInfo&)>& callback,
     const TaskID& taskId,
     const Option<pid_t>& taskPid,
@@ -233,6 +247,7 @@ Try<Owned<Checker>> Checker::create(
 
   Owned<CheckerProcess> process(new CheckerProcess(
       check,
+      launcherDir,
       callback,
       taskId,
       taskPid,
@@ -248,6 +263,7 @@ Try<Owned<Checker>> Checker::create(
 
 Try<Owned<Checker>> Checker::create(
     const CheckInfo& check,
+    const string& launcherDir,
     const lambda::function<void(const CheckStatusInfo&)>& callback,
     const TaskID& taskId,
     const ContainerID& taskContainerId,
@@ -262,6 +278,7 @@ Try<Owned<Checker>> Checker::create(
 
   Owned<CheckerProcess> process(new CheckerProcess(
       check,
+      launcherDir,
       callback,
       taskId,
       None(),
@@ -303,6 +320,7 @@ void Checker::resume()
 
 CheckerProcess::CheckerProcess(
     const CheckInfo& _check,
+    const string& _launcherDir,
     const lambda::function<void(const CheckStatusInfo&)>& _callback,
     const TaskID& _taskId,
     const Option<pid_t>& _taskPid,
@@ -313,6 +331,7 @@ CheckerProcess::CheckerProcess(
     bool _commandCheckViaAgent)
   : ProcessBase(process::ID::generate("checker")),
     check(_check),
+    launcherDir(_launcherDir),
     updateCallback(_callback),
     taskId(_taskId),
     taskPid(_taskPid),
@@ -345,12 +364,14 @@ CheckerProcess::CheckerProcess(
       previousCheckStatus.mutable_command();
       break;
     }
-
     case CheckInfo::HTTP: {
       previousCheckStatus.mutable_http();
       break;
     }
-
+    case CheckInfo::TCP: {
+      previousCheckStatus.mutable_tcp();
+      break;
+    }
     case CheckInfo::UNKNOWN: {
       LOG(FATAL) << "Received UNKNOWN check type";
       break;
@@ -398,14 +419,18 @@ void CheckerProcess::performCheck()
           &Self::processCommandCheckResult, stopwatch, lambda::_1));
       break;
     }
-
     case CheckInfo::HTTP: {
       httpCheck().onAny(defer(
           self(),
           &Self::processHttpCheckResult, stopwatch, lambda::_1));
       break;
     }
-
+    case CheckInfo::TCP: {
+      tcpCheck().onAny(defer(
+          self(),
+          &Self::processTcpCheckResult, stopwatch, lambda::_1));
+      break;
+    }
     case CheckInfo::UNKNOWN: {
       LOG(FATAL) << "Received UNKNOWN check type";
       break;
@@ -937,7 +962,7 @@ Future<int> CheckerProcess::httpCheck()
     "-L",                 // Follows HTTP 3xx redirects.
     "-k",                 // Ignores SSL validation when scheme is https.
     "-w", "%{http_code}", // Displays HTTP response code on stdout.
-    "-o", os::DEV_NULL,    // Ignores output.
+    "-o", os::DEV_NULL,   // Ignores output.
     url
   };
 
@@ -1043,27 +1068,159 @@ Future<int> CheckerProcess::_httpCheck(
 
 void CheckerProcess::processHttpCheckResult(
     const Stopwatch& stopwatch,
-    const Future<int>& result)
+    const Future<int>& future)
 {
-  CheckStatusInfo checkStatusInfo;
-  checkStatusInfo.set_type(check.type());
+  CheckStatusInfo result;
+  result.set_type(check.type());
 
-  if (result.isReady()) {
+  if (future.isReady()) {
     VLOG(1) << check.type() << " check for task '"
-            << taskId << "' returned: " << result.get();
+            << taskId << "' returned: " << future.get();
 
-    checkStatusInfo.mutable_http()->set_status_code(
-        static_cast<uint32_t>(result.get()));
+    result.mutable_http()->set_status_code(static_cast<uint32_t>(future.get()));
   } else {
     // Check's status is currently not available, which may indicate a change
     // that should be reported as an empty `CheckStatusInfo.Http` message.
-    LOG(WARNING) << "Check for task '" << taskId << "' failed: "
-                 << (result.isFailed() ? result.failure() : "discarded");
+    LOG(WARNING) << check.type() << " check for task '" << taskId << "' failed:"
+                 << " " << (future.isFailed() ? future.failure() : "discarded");
 
-    checkStatusInfo.mutable_http();
+    result.mutable_http();
   }
 
-  processCheckResult(stopwatch, checkStatusInfo);
+  processCheckResult(stopwatch, result);
+}
+
+
+Future<bool> CheckerProcess::tcpCheck()
+{
+  CHECK_EQ(CheckInfo::TCP, check.type());
+  CHECK(check.has_tcp());
+
+  // TCP_CHECK_COMMAND should be reachable.
+  CHECK(os::exists(launcherDir));
+
+  const CheckInfo::Tcp& tcp = check.tcp();
+
+  VLOG(1) << "Launching TCP check for task '" << taskId << "' at port "
+          << tcp.port();
+
+  const string command = path::join(launcherDir, TCP_CHECK_COMMAND);
+
+  const vector<string> argv = {
+    command,
+    "--ip=" + stringify(DEFAULT_DOMAIN),
+    "--port=" + stringify(tcp.port())
+  };
+
+  // TODO(alexr): Consider launching the helper binary once per task lifetime,
+  // see MESOS-6766.
+  Try<Subprocess> s = subprocess(
+      command,
+      argv,
+      Subprocess::PATH(os::DEV_NULL),
+      Subprocess::PIPE(),
+      Subprocess::PIPE(),
+      nullptr,
+      None(),
+      clone);
+
+  if (s.isError()) {
+    return Failure(
+        "Failed to create the " + command + " subprocess: " + s.error());
+  }
+
+  // TODO(alexr): Use lambda named captures for
+  // these cached values once they are available.
+  pid_t commandPid = s->pid();
+  const Duration timeout = checkTimeout;
+  const TaskID _taskId = taskId;
+
+  return await(
+      s->status(),
+      process::io::read(s->out().get()),
+      process::io::read(s->err().get()))
+    .after(
+        timeout,
+        [timeout, commandPid, _taskId](Future<tuple<Future<Option<int>>,
+                                                    Future<string>,
+                                                    Future<string>>> future)
+    {
+      future.discard();
+
+      if (commandPid != -1) {
+        // Cleanup the TCP_CHECK_COMMAND process.
+        VLOG(1) << "Killing the TCP check process " << commandPid
+                << " for task '" << _taskId << "'";
+
+        os::killtree(commandPid, SIGKILL);
+      }
+
+      return Failure(
+          string(TCP_CHECK_COMMAND) + " timed out after " + stringify(timeout));
+    })
+    .then(defer(self(), &Self::_tcpCheck, lambda::_1));
+}
+
+
+Future<bool> CheckerProcess::_tcpCheck(
+    const tuple<Future<Option<int>>, Future<string>, Future<string>>& t)
+{
+  const Future<Option<int>>& status = std::get<0>(t);
+  if (!status.isReady()) {
+    return Failure(
+        "Failed to get the exit status of the " + string(TCP_CHECK_COMMAND) +
+        " process: " + (status.isFailed() ? status.failure() : "discarded"));
+  }
+
+  if (status->isNone()) {
+    return Failure(
+        "Failed to reap the " + string(TCP_CHECK_COMMAND) + " process");
+  }
+
+  int exitCode = status->get();
+
+  const Future<string>& commandOutput = std::get<1>(t);
+  if (commandOutput.isReady()) {
+    VLOG(1) << string(TCP_CHECK_COMMAND) << ": " << commandOutput.get();
+  }
+
+  if (exitCode != 0) {
+    const Future<string>& commandError = std::get<2>(t);
+    if (commandError.isReady()) {
+      VLOG(1) << string(TCP_CHECK_COMMAND) << ": " << commandError.get();
+    }
+  }
+
+  // Non-zero exit code of TCP_CHECK_COMMAND can mean configuration problem
+  // (e.g., bad command flag), system error (e.g., a socket cannot be
+  // created), or actually a failed connection. We cannot distinguish between
+  // these cases, hence treat all of them as connection failure.
+  return (exitCode == 0 ? true : false);
+}
+
+
+void CheckerProcess::processTcpCheckResult(
+    const Stopwatch& stopwatch,
+    const Future<bool>& future)
+{
+  CheckStatusInfo result;
+  result.set_type(check.type());
+
+  if (future.isReady()) {
+    VLOG(1) << check.type() << " check for task '"
+            << taskId << "' returned: " << stringify(future.get());
+
+    result.mutable_tcp()->set_succeeded(future.get());
+  } else {
+    // Check's status is currently not available, which may indicate a change
+    // that should be reported as an empty `CheckStatusInfo.Tcp` message.
+    LOG(WARNING) << check.type() << " check for task '" << taskId << "' failed:"
+                 << " " << (future.isFailed() ? future.failure() : "discarded");
+
+    result.mutable_tcp();
+  }
+
+  processCheckResult(stopwatch, result);
 }
 
 namespace validation {
@@ -1100,7 +1257,6 @@ Option<Error> checkInfo(const CheckInfo& checkInfo)
 
       break;
     }
-
     case CheckInfo::HTTP: {
       if (!checkInfo.has_http()) {
         return Error("Expecting 'http' to be set for HTTP check");
@@ -1115,7 +1271,13 @@ Option<Error> checkInfo(const CheckInfo& checkInfo)
 
       break;
     }
+    case CheckInfo::TCP: {
+      if (!checkInfo.has_tcp()) {
+        return Error("Expecting 'tcp' to be set for TCP check");
+      }
 
+      break;
+    }
     case CheckInfo::UNKNOWN: {
       return Error(
           "'" + CheckInfo::Type_Name(checkInfo.type()) + "'"
@@ -1153,14 +1315,18 @@ Option<Error> checkStatusInfo(const CheckStatusInfo& checkStatusInfo)
       }
       break;
     }
-
     case CheckInfo::HTTP: {
       if (!checkStatusInfo.has_http()) {
         return Error("Expecting 'http' to be set for HTTP check's status");
       }
       break;
     }
-
+    case CheckInfo::TCP: {
+      if (!checkStatusInfo.has_tcp()) {
+        return Error("Expecting 'tcp' to be set for TCP check's status");
+      }
+      break;
+    }
     case CheckInfo::UNKNOWN: {
       return Error(
           "'" + CheckInfo::Type_Name(checkStatusInfo.type()) + "'"

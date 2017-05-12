@@ -506,6 +506,7 @@ protected:
         Try<Owned<checks::Checker>> checker =
           checks::Checker::create(
               task.check(),
+              launcherDirectory,
               defer(self(), &Self::taskCheckUpdated, taskId, lambda::_1),
               taskId,
               containerId,
@@ -802,8 +803,9 @@ protected:
 
     LOG(INFO)
       << "Child container " << container->containerId << " of task '" << taskId
-      << "' in state " << stringify(taskState) << " terminated with status "
-      << (status.isSome() ? WSTRINGIFY(status.get()) : "unknown");
+      << "' in state " << stringify(taskState) << " "
+      << (status.isSome() ? WSTRINGIFY(status.get())
+                          : "terminated with unknown status");
 
     // Shutdown the executor if all the active child containers have terminated.
     if (containers.empty()) {
@@ -1146,12 +1148,14 @@ private:
           checkStatusInfo.mutable_command();
           break;
         }
-
         case CheckInfo::HTTP: {
           checkStatusInfo.mutable_http();
           break;
         }
-
+        case CheckInfo::TCP: {
+          checkStatusInfo.mutable_tcp();
+          break;
+        }
         case CheckInfo::UNKNOWN: {
           LOG(FATAL) << "UNKNOWN check type is invalid";
           break;

@@ -190,11 +190,11 @@ public:
 
   void suppressOffers(
       const FrameworkID& frameworkId,
-      const Option<std::string>& role);
+      const std::set<std::string>& roles);
 
   void reviveOffers(
       const FrameworkID& frameworkId,
-      const Option<std::string>& role);
+      const std::set<std::string>& roles);
 
   void setQuota(
       const std::string& role,
@@ -256,9 +256,6 @@ protected:
       const SlaveID& slaveId,
       InverseOfferFilter* inverseOfferFilter);
 
-  // Returns the weight of the specified role name.
-  double roleWeight(const std::string& name) const;
-
   // Checks whether the slave is whitelisted.
   bool isWhitelisted(const SlaveID& slaveId) const;
 
@@ -304,9 +301,6 @@ protected:
     explicit Framework(const FrameworkInfo& frameworkInfo);
 
     std::set<std::string> roles;
-
-    // Whether the framework suppresses offers.
-    bool suppressed;
 
     protobuf::framework::Capabilities capabilities;
 
@@ -431,10 +425,6 @@ protected:
   // the role, and/or when there are resources allocated to the role
   // (e.g. some tasks and/or executors are consuming resources under the role).
   hashmap<std::string, hashset<FrameworkID>> roles;
-
-  // Configured weight for each role, if any; if a role does not
-  // appear here, it has the default weight of 1.
-  hashmap<std::string, double> weights;
 
   // Configured quota for each role, if any. Setting quota for a role
   // changes the order that the role's frameworks are offered

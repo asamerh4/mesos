@@ -704,6 +704,122 @@ TEST_F(HierarchicalAllocatorTest, DRFWithFairnessExclusion)
 }
 
 
+// This test checks allocator behavior when offering resources to
+// frameworks that register using nested ("hierarchical") roles.
+TEST_F(HierarchicalAllocatorTest, NestedRoleDRF)
+{
+  // Pausing the clock is not necessary, but ensures that the test
+  // doesn't rely on the batch allocation in the allocator, which
+  // would slow down the test.
+  Clock::pause();
+
+  initialize();
+
+  // Total cluster resources will become cpus=2, mem=1024.
+  SlaveInfo slave1 = createSlaveInfo("cpus:2;mem:1024;disk:0");
+  allocator->addSlave(
+      slave1.id(),
+      slave1,
+      AGENT_CAPABILITIES(),
+      None(),
+      slave1.resources(),
+      {});
+
+  // framework1 will be offered all of slave1's resources since it is
+  // the only framework running so far.
+  FrameworkInfo framework1 = createFrameworkInfo({"a/b"});
+  allocator->addFramework(framework1.id(), framework1, {}, true);
+
+  {
+    Allocation expected = Allocation(
+        framework1.id(),
+        {{"a/b", {{slave1.id(), slave1.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  // a share = 1 (cpus=2, mem=1024)
+  //   a/b share = 1 (cpus=2, mem=1024)
+  //     framework1 share = 1
+
+  // Add two new frameworks in roles "a/c" and "d/e".
+  FrameworkInfo framework2 = createFrameworkInfo({"a/c"});
+  allocator->addFramework(framework2.id(), framework2, {}, true);
+
+  FrameworkInfo framework3 = createFrameworkInfo({"d/e"});
+  allocator->addFramework(framework3.id(), framework3, {}, true);
+
+  // Add a new slave. The new slave's resources should be offered to
+  // the framework in role "d/e" rather than the framework in role
+  // "a/c", since the role subtree under "a" has more resources than
+  // the "d" subtree.
+  //
+  // Total cluster resources will become cpus=3, mem=1536.
+  SlaveInfo slave2 = createSlaveInfo("cpus:1;mem:512;disk:0");
+  allocator->addSlave(
+      slave2.id(),
+      slave2,
+      AGENT_CAPABILITIES(),
+      None(),
+      slave2.resources(),
+      {});
+
+  {
+    Allocation expected = Allocation(
+        framework3.id(),
+        {{"d/e", {{slave2.id(), slave2.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  // a share = 0.666667 (cpus=2, mem=1024)
+  //   a/b share = 0.666667 (cpus=2, mem=1024)
+  //     framework1 share = 1
+  //   a/c share = 0
+  //     framework2 share = 0
+  // d share = 0.333333 (cpus=1, mem=512)
+  //   d/e share = 0.333333 (cpus=1, mem=512)
+  //     framework3 share = 1
+
+  // Add a new framework in the role "d/f".
+  FrameworkInfo framework4 = createFrameworkInfo({"d/f"});
+  allocator->addFramework(framework4.id(), framework4, {}, true);
+
+  // Add a new slave. The new slave's resources should be allocated to
+  // the framework in "d/f" (and not the framework in "a/c"), because the
+  // "d" subtree has fewer allocated resources than the "a" subtree.
+  //
+  // Total cluster resources will become cpus=5, mem=2560.
+  SlaveInfo slave3 = createSlaveInfo("cpus:2;mem:1024;disk:0");
+  allocator->addSlave(
+      slave3.id(),
+      slave3,
+      AGENT_CAPABILITIES(),
+      None(),
+      slave3.resources(),
+      {});
+
+  {
+    Allocation expected = Allocation(
+        framework4.id(),
+        {{"d/f", {{slave3.id(), slave3.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  // a share = 0.4 (cpus=2, mem=1024)
+  //   a/b share = 0.4 (cpus=2, mem=1024)
+  //     framework1 share = 1
+  //   a/c share = 0
+  //     framework2 share = 0
+  // d share = 0.6 (cpus=3, mem=1536)
+  //   d/e share = 0.2 (cpus=1, mem=512)
+  //     framework3 share = 1
+  //   d/f share = 0.4 (cpus=2, mem=1024)
+  //     framework4 share = 1
+}
+
+
 // This test ensures that an offer filter larger than the
 // allocation interval effectively filters out resources.
 TEST_F(HierarchicalAllocatorTest, OfferFilter)
@@ -2745,6 +2861,9 @@ TEST_F(HierarchicalAllocatorTest, QuotaAgainstStarvation)
   // Since `QUOTA_ROLE` is under quota, `agent2`'s resources will
   // be allocated to `framework1`.
 
+  // Trigger the next batch allocation.
+  Clock::advance(flags.allocation_interval);
+
   expected = Allocation(
       framework1.id(),
       {{QUOTA_ROLE, {{agent2.id(), agent2.resources()}}}});
@@ -3215,7 +3334,7 @@ TEST_F(HierarchicalAllocatorTest, DeactivateAndReactivateFramework)
       None());
 
   // Suppress offers and disconnect framework.
-  allocator->suppressOffers(framework.id(), None());
+  allocator->suppressOffers(framework.id(), {});
   allocator->deactivateFramework(framework.id());
 
   // Advance the clock and trigger a background allocation cycle.
@@ -3274,7 +3393,7 @@ TEST_F(HierarchicalAllocatorTest, SuppressAndReviveOffers)
 
   // Here the revival is totally unnecessary but we should tolerate the
   // framework's redundant REVIVE calls.
-  allocator->reviveOffers(framework.id(), None());
+  allocator->reviveOffers(framework.id(), {});
 
   // Settle to ensure that the dispatched allocation is executed.
   Clock::settle();
@@ -3289,7 +3408,7 @@ TEST_F(HierarchicalAllocatorTest, SuppressAndReviveOffers)
       allocatedResources(agent.resources(), "role1"),
       None());
 
-  allocator->suppressOffers(framework.id(), None());
+  allocator->suppressOffers(framework.id(), {});
 
   // Advance the clock and trigger a background allocation cycle.
   Clock::advance(flags.allocation_interval);
@@ -3299,7 +3418,7 @@ TEST_F(HierarchicalAllocatorTest, SuppressAndReviveOffers)
   EXPECT_TRUE(allocation.isPending());
 
   // Revive again and this time it should work.
-  allocator->reviveOffers(framework.id(), None());
+  allocator->reviveOffers(framework.id(), {});
 
   // Framework will be offered all of agent's resources again after
   // reviving offers.
@@ -3974,8 +4093,8 @@ TEST_F(HierarchicalAllocatorTest, UpdateWeight)
     weightInfos.push_back(createWeightInfo({"role2"}, 2.0));
     allocator->updateWeights(weightInfos);
 
-    // 'updateWeights' will trigger the allocation immediately, so it does not
-    // need to manually advance the clock here.
+    // Advance the clock and trigger a batch allocation.
+    Clock::advance(flags.allocation_interval);
 
     // role1 share = 0.33 (cpus=4, mem=2048)
     //   framework1 share = 1
@@ -4015,15 +4134,13 @@ TEST_F(HierarchicalAllocatorTest, UpdateWeight)
     weightInfos.push_back(createWeightInfo("role3", 3.0));
     allocator->updateWeights(weightInfos);
 
-    // 'updateWeights' will not trigger the allocation immediately because no
-    // framework exists in 'role3' yet.
+    // 'updateWeights' does not trigger an allocation.
 
     // Framework3 registers with 'role3'.
     FrameworkInfo framework3 = createFrameworkInfo({"role3"});
     allocator->addFramework(framework3.id(), framework3, {}, true);
 
-    // 'addFramework' will trigger the allocation immediately, so it does not
-    // need to manually advance the clock here.
+    // 'addFramework' will trigger an allocation.
 
     // role1 share = 0.166 (cpus=2, mem=1024)
     //   framework1 share = 1
@@ -4112,7 +4229,7 @@ TEST_F(HierarchicalAllocatorTest, ReviveOffers)
   Future<Allocation> allocation = allocations.get();
   EXPECT_TRUE(allocation.isPending());
 
-  allocator->reviveOffers(framework.id(), None());
+  allocator->reviveOffers(framework.id(), {});
 
   // Framework will be offered all of agent's resources again
   // after reviving offers.
@@ -4138,7 +4255,7 @@ TEST_F(HierarchicalAllocatorTest, SuppressAndReviveOffersWithMultiRole)
   FrameworkInfo framework = createFrameworkInfo({"role1", "role2"});
 
   allocator->addFramework(framework.id(), framework, {}, true);
-  allocator->suppressOffers(framework.id(), "role1");
+  allocator->suppressOffers(framework.id(), {"role1"});
 
   // Total cluster resources will become cpus=2, mem=1024.
   SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024;disk:0");
@@ -4173,7 +4290,7 @@ TEST_F(HierarchicalAllocatorTest, SuppressAndReviveOffersWithMultiRole)
 
   // Revive offers for role1, after which the agent's resources
   // should be offered to it.
-  allocator->reviveOffers(framework.id(), "role1");
+  allocator->reviveOffers(framework.id(), {"role1"});
 
   expected = Allocation(
       framework.id(),
@@ -4294,6 +4411,281 @@ TEST_F(HierarchicalAllocatorTest, DisproportionateQuotaVsAllocation)
 
   Future<Allocation> allocation = allocations.get();
   EXPECT_TRUE(allocation.isPending());
+}
+
+
+// This test checks that quota guarantees work as expected when a
+// nested role is created as a child of an existing quota'd role.
+TEST_F(HierarchicalAllocatorTest, NestedRoleQuota)
+{
+  // Pausing the clock is not necessary, but ensures that the test
+  // doesn't rely on the batch allocation in the allocator, which
+  // would slow down the test.
+  Clock::pause();
+
+  initialize();
+
+  const string PARENT_ROLE = "a/b";
+  const string CHILD_ROLE1 = "a/b/c";
+  const string CHILD_ROLE2 = "a/b/d";
+
+  // Create `framework1` in PARENT_ROLE and set quota for its role.
+  FrameworkInfo framework1 = createFrameworkInfo({PARENT_ROLE});
+  allocator->addFramework(framework1.id(), framework1, {}, true);
+
+  const Quota parentQuota = createQuota(PARENT_ROLE, "cpus:2;mem:1024");
+  allocator->setQuota(PARENT_ROLE, parentQuota);
+
+  SlaveInfo agent = createSlaveInfo("cpus:1;mem:512");
+  allocator->addSlave(
+      agent.id(),
+      agent,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent.resources(),
+      {});
+
+  // `framework1` will be offered all the resources on `agent` because
+  // it is the only framework in the only role with unsatisfied quota.
+  {
+    Allocation expected = Allocation(
+        framework1.id(),
+        {{PARENT_ROLE, {{agent.id(), agent.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  // `framework1` declines the resources on `agent` for the duration
+  // of the test.
+  Filters longFilter;
+  longFilter.set_refuse_seconds(flags.allocation_interval.secs() * 10);
+
+  allocator->recoverResources(
+      framework1.id(),
+      agent.id(),
+      allocatedResources(agent.resources(), PARENT_ROLE),
+      longFilter);
+
+  // Create `framework2` in CHILD_ROLE1, which is a child role of
+  // PARENT_ROLE. CHILD_ROLE1 does not have quota. In the current
+  // implementation, because CHILD_ROLE1 does not itself have quota,
+  // it will not be offered any of PARENT_ROLE's quota'd resources.
+  // This behavior may change in the future (MESOS-7150).
+  FrameworkInfo framework2 = createFrameworkInfo({CHILD_ROLE1});
+  allocator->addFramework(framework2.id(), framework2, {}, true);
+
+  // Trigger a batch allocation for good measure; we do not expect
+  // either framework to be offered resources.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  EXPECT_TRUE(allocation.isPending());
+
+  // Set quota for `CHILD_ROLE2`.
+  const Quota childQuota = createQuota(CHILD_ROLE2, "cpus:1;mem:512");
+  allocator->setQuota(CHILD_ROLE2, childQuota);
+
+  // Create `framework3` in CHILD_ROLE2, which is a child role of
+  // PARENT_ROLE. CHILD_ROLE2 has quota, so in the current
+  // implementation, it will be offered resources.
+  FrameworkInfo framework3 = createFrameworkInfo({CHILD_ROLE2});
+  allocator->addFramework(framework3.id(), framework3, {}, true);
+
+  {
+    Allocation expected = Allocation(
+        framework3.id(),
+        {{CHILD_ROLE2, {{agent.id(), agent.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocation);
+  }
+}
+
+
+// This test checks that quota guarantees work as expected when a
+// nested role is created as a child of an existing quota'd role, and
+// the parent role has been allocated resources.
+TEST_F(HierarchicalAllocatorTest, NestedRoleQuotaAllocateToParent)
+{
+  // Pausing the clock is not necessary, but ensures that the test
+  // doesn't rely on the batch allocation in the allocator, which
+  // would slow down the test.
+  Clock::pause();
+
+  initialize();
+
+  const string PARENT_ROLE = "a/b";
+  const string CHILD_ROLE = "a/b/c";
+
+  // Set quota for parent role.
+  const Quota parentQuota = createQuota(PARENT_ROLE, "cpus:4;mem:2048");
+  allocator->setQuota(PARENT_ROLE, parentQuota);
+
+  // Create `framework1` in the parent role.
+  FrameworkInfo framework1 = createFrameworkInfo({PARENT_ROLE});
+  allocator->addFramework(framework1.id(), framework1, {}, true);
+
+  SlaveInfo agent1 = createSlaveInfo("cpus:2;mem:1024");
+  allocator->addSlave(
+      agent1.id(),
+      agent1,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent1.resources(),
+      {});
+
+  // `framework1` will be offered all of the resources on `agent1`.
+  {
+    Allocation expected = Allocation(
+        framework1.id(),
+        {{PARENT_ROLE, {{agent1.id(), agent1.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  // Create `framework2` in the child role.
+  FrameworkInfo framework2 = createFrameworkInfo({CHILD_ROLE});
+  allocator->addFramework(framework2.id(), framework2, {}, true);
+
+  const Quota childQuota = createQuota(CHILD_ROLE, "cpus:1;mem:512");
+  allocator->setQuota(CHILD_ROLE, childQuota);
+
+  SlaveInfo agent2 = createSlaveInfo("cpus:1;mem:512");
+  allocator->addSlave(
+      agent2.id(),
+      agent2,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent2.resources(),
+      {});
+
+  // `framework2` will be offered all of the resources on `agent2`.
+  {
+    Allocation expected = Allocation(
+        framework2.id(),
+        {{CHILD_ROLE, {{agent2.id(), agent2.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  SlaveInfo agent3 = createSlaveInfo("cpus:1;mem:512");
+  allocator->addSlave(
+      agent3.id(),
+      agent3,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent3.resources(),
+      {});
+
+  // `framework1` will be offered all of the resources on `agent3`.
+  //
+  // NOTE: The quota on PARENT_ROLE actually applies to the entire
+  // subtree rooted at PARENT_ROLE, which includes CHILD_ROLE.
+  // Therefore, `framework1` and `framework2` should both be
+  // candidates to receive the resources at `agent3`. In the current
+  // implementation, we don't "delegate" the PARENT_ROLE quota to the
+  // entire subtree; rather, it can only be used by roles in the
+  // subtree that have quota set (MESOS-7150).
+  {
+    Allocation expected = Allocation(
+        framework1.id(),
+        {{PARENT_ROLE, {{agent3.id(), agent3.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+}
+
+
+// This test checks that when quota resources are allocated to a
+// nested role, those resources are also counted against the quota of
+// the parent role as well.
+//
+// TODO(neilc): Re-enable this test when MESOS-7402 is fixed.
+TEST_F(HierarchicalAllocatorTest, DISABLED_NestedQuotaAccounting)
+{
+  Clock::pause();
+
+  initialize();
+
+  const string PARENT_ROLE = "x/b";
+  const string CHILD_ROLE = "x/b/c";
+  const string NON_QUOTA_ROLE = "aaa";
+
+  // Create `framework1` in the non-quota role.
+  FrameworkInfo framework1 = createFrameworkInfo({NON_QUOTA_ROLE});
+  allocator->addFramework(framework1.id(), framework1, {}, true);
+
+  // Set quota for parent role.
+  const Quota parentQuota = createQuota(PARENT_ROLE, "cpus:3;mem:300");
+  allocator->setQuota(PARENT_ROLE, parentQuota);
+
+  // Create `framework2` in the parent role.
+  FrameworkInfo framework2 = createFrameworkInfo({PARENT_ROLE});
+  allocator->addFramework(framework2.id(), framework2, {}, true);
+
+  SlaveInfo agent1 = createSlaveInfo("cpus:2;mem:200");
+  allocator->addSlave(
+      agent1.id(),
+      agent1,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent1.resources(),
+      {});
+
+  // `framework2` will be offered all of the resources on `agent1`.
+  {
+    Allocation expected = Allocation(
+        framework2.id(),
+        {{PARENT_ROLE, {{agent1.id(), agent1.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  // Set quota for child role.
+  const Quota childQuota = createQuota(CHILD_ROLE, "cpus:1;mem:100");
+  allocator->setQuota(CHILD_ROLE, childQuota);
+
+  // Create `framework3` in the child role.
+  FrameworkInfo framework3 = createFrameworkInfo({CHILD_ROLE});
+  allocator->addFramework(framework3.id(), framework3, {}, true);
+
+  SlaveInfo agent2 = createSlaveInfo("cpus:1;mem:100");
+  allocator->addSlave(
+      agent2.id(),
+      agent2,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent2.resources(),
+      {});
+
+  // `framework3` will be offered all of the resources on `agent2`.
+  {
+    Allocation expected = Allocation(
+        framework3.id(),
+        {{CHILD_ROLE, {{agent2.id(), agent2.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
+
+  SlaveInfo agent3 = createSlaveInfo("cpus:1;mem:100");
+  allocator->addSlave(
+      agent3.id(),
+      agent3,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent3.resources(),
+      {});
+
+  // Quota of both frameworks are satisfied at this point, therefore
+  // resources of agent3 should follow the rule of fair share and be
+  // offered to `framework1`.
+  {
+    Allocation expected = Allocation(
+        framework1.id(),
+        {{PARENT_ROLE, {{agent3.id(), agent3.resources()}}}});
+
+    AWAIT_EXPECT_EQ(expected, allocations.get());
+  }
 }
 
 
@@ -4999,7 +5391,7 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, SuppressOffers)
     // 'frameworkCount % allocationsCount' of frameworks not suppressed. For
     // the purposes of the benchmark this is not an issue.
     for (size_t j = 0; j < frameworkCount / allocationsCount; ++j) {
-      allocator->suppressOffers(frameworks[suppressCount].id(), None());
+      allocator->suppressOffers(frameworks[suppressCount].id(), {});
       ++suppressCount;
     }
 
@@ -5194,7 +5586,7 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, AllocatorBacklog)
   // events. The allocator doesn't have more resources to allocate
   // but still incurs the overhead of additional allocation runs.
   for (size_t i = 0; i < frameworkCount; i++) {
-    allocator->reviveOffers(frameworks.at(i).id(), None());
+    allocator->reviveOffers(frameworks.at(i).id(), {});
   }
 
   // Wait for all the `reviveOffers` operations to be processed.

@@ -127,7 +127,6 @@ private:
 HierarchicalAllocatorProcess::Framework::Framework(
     const FrameworkInfo& frameworkInfo)
   : roles(protobuf::framework::getRoles(frameworkInfo)),
-    suppressed(false),
     capabilities(frameworkInfo.capabilities()) {}
 
 
@@ -241,6 +240,9 @@ void HierarchicalAllocatorProcess::addFramework(
 
   foreach (const string& role, framework.roles) {
     trackFrameworkUnderRole(frameworkId, role);
+
+    CHECK(frameworkSorters.contains(role));
+    frameworkSorters.at(role)->activate(frameworkId.value());
   }
 
   // TODO(bmahler): Validate that the reserved resources have the
@@ -368,10 +370,6 @@ void HierarchicalAllocatorProcess::deactivateFramework(
   // HierarchicalAllocatorProcess::expire.
   framework.offerFilters.clear();
   framework.inverseOfferFilters.clear();
-
-  // Clear the suppressed flag to make sure the framework can be offered
-  // resources immediately after getting activated.
-  framework.suppressed = false;
 
   LOG(INFO) << "Deactivated framework " << frameworkId;
 }
@@ -1197,19 +1195,17 @@ void HierarchicalAllocatorProcess::recoverResources(
 
 void HierarchicalAllocatorProcess::suppressOffers(
     const FrameworkID& frameworkId,
-    const Option<string>& role)
+    const set<string>& roles_)
 {
   CHECK(initialized);
   CHECK(frameworks.contains(frameworkId));
 
   Framework& framework = frameworks.at(frameworkId);
-  framework.suppressed = true;
 
   // Deactivating the framework in the sorter is fine as long as
   // SUPPRESS is not parameterized. When parameterization is added,
   // we have to differentiate between the cases here.
-  const set<string>& roles =
-    role.isSome() ? set<string>{role.get()} : framework.roles;
+  const set<string>& roles = roles_.empty() ? framework.roles : roles_;
 
   foreach (const string& role, roles) {
     CHECK(frameworkSorters.contains(role));
@@ -1223,7 +1219,7 @@ void HierarchicalAllocatorProcess::suppressOffers(
 
 void HierarchicalAllocatorProcess::reviveOffers(
     const FrameworkID& frameworkId,
-    const Option<string>& role)
+    const set<string>& roles_)
 {
   CHECK(initialized);
   CHECK(frameworks.contains(frameworkId));
@@ -1232,19 +1228,14 @@ void HierarchicalAllocatorProcess::reviveOffers(
   framework.offerFilters.clear();
   framework.inverseOfferFilters.clear();
 
-  const set<string>& roles =
-    role.isSome() ? set<string>{role.get()} : framework.roles;
+  const set<string>& roles = roles_.empty() ? framework.roles : roles_;
 
-  if (framework.suppressed) {
-    framework.suppressed = false;
-
-    // Activating the framework in the sorter on REVIVE is fine as long as
-    // SUPPRESS is not parameterized. When parameterization is added,
-    // we may need to differentiate between the cases here.
-    foreach (const string& role, roles) {
-      CHECK(frameworkSorters.contains(role));
-      frameworkSorters.at(role)->activate(frameworkId.value());
-    }
+  // Activating the framework in the sorter on REVIVE is fine as long as
+  // SUPPRESS is not parameterized. When parameterization is added,
+  // we may need to differentiate between the cases here.
+  foreach (const string& role, roles) {
+    CHECK(frameworkSorters.contains(role));
+    frameworkSorters.at(role)->activate(frameworkId.value());
   }
 
   // We delete each actual `OfferFilter` when
@@ -1276,7 +1267,8 @@ void HierarchicalAllocatorProcess::setQuota(
   // Persist quota in memory and add the role into the corresponding
   // allocation group.
   quotas[role] = quota;
-  quotaRoleSorter->add(role, roleWeight(role));
+  quotaRoleSorter->add(role);
+  quotaRoleSorter->activate(role);
 
   // Copy allocation information for the quota'ed role.
   if (roleSorter->contains(role)) {
@@ -1294,7 +1286,12 @@ void HierarchicalAllocatorProcess::setQuota(
   LOG(INFO) << "Set quota " << quota.info.guarantee() << " for role '" << role
             << "'";
 
-  allocate();
+  // NOTE: Since quota changes do not result in rebalancing of
+  // offered resources, we do not trigger an allocation here; the
+  // quota change will be reflected in subsequent allocations.
+  //
+  // If we add the ability for quota changes to incur a rebalancing
+  // of offered resources, then we should trigger that here.
 }
 
 
@@ -1317,7 +1314,12 @@ void HierarchicalAllocatorProcess::removeQuota(
 
   metrics.removeQuota(role);
 
-  allocate();
+  // NOTE: Since quota changes do not result in rebalancing of
+  // offered resources, we do not trigger an allocation here; the
+  // quota change will be reflected in subsequent allocations.
+  //
+  // If we add the ability for quota changes to incur a rebalancing
+  // of offered resources, then we should trigger that here.
 }
 
 
@@ -1326,33 +1328,19 @@ void HierarchicalAllocatorProcess::updateWeights(
 {
   CHECK(initialized);
 
-  bool rebalance = false;
-
-  // Update the weight for each specified role.
   foreach (const WeightInfo& weightInfo, weightInfos) {
     CHECK(weightInfo.has_role());
-    weights[weightInfo.role()] = weightInfo.weight();
 
-    // The allocator only needs to rebalance if there is a framework
-    // registered with this role. The roleSorter contains only roles
-    // for registered frameworks, but quotaRoleSorter contains any role
-    // with quota set, regardless of whether any frameworks are registered
-    // with that role.
-    if (quotas.contains(weightInfo.role())) {
-      quotaRoleSorter->update(weightInfo.role(), weightInfo.weight());
-    }
-
-    if (roleSorter->contains(weightInfo.role())) {
-      rebalance = true;
-      roleSorter->update(weightInfo.role(), weightInfo.weight());
-    }
+    quotaRoleSorter->updateWeight(weightInfo.role(), weightInfo.weight());
+    roleSorter->updateWeight(weightInfo.role(), weightInfo.weight());
   }
 
-  // If at least one of the updated roles has registered
-  // frameworks, then trigger the allocation.
-  if (rebalance) {
-    allocate();
-  }
+  // NOTE: Since weight changes do not result in rebalancing of
+  // offered resources, we do not trigger an allocation here; the
+  // weight change will be reflected in subsequent allocations.
+  //
+  // If we add the ability for weight changes to incur a rebalancing
+  // of offered resources, then we should trigger that here.
 }
 
 
@@ -2044,16 +2032,6 @@ void HierarchicalAllocatorProcess::expire(
 }
 
 
-double HierarchicalAllocatorProcess::roleWeight(const string& name) const
-{
-  if (weights.contains(name)) {
-    return weights.at(name);
-  } else {
-    return 1.0; // Default weight.
-  }
-}
-
-
 bool HierarchicalAllocatorProcess::isWhitelisted(
     const SlaveID& slaveId) const
 {
@@ -2232,7 +2210,8 @@ void HierarchicalAllocatorProcess::trackFrameworkUnderRole(
   if (!roles.contains(role)) {
     roles[role] = {};
     CHECK(!roleSorter->contains(role));
-    roleSorter->add(role, roleWeight(role));
+    roleSorter->add(role);
+    roleSorter->activate(role);
 
     CHECK(!frameworkSorters.contains(role));
     frameworkSorters.insert({role, Owned<Sorter>(frameworkSorterFactory())});

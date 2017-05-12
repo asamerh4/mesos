@@ -107,7 +107,6 @@
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 #include <stout/synchronized.hpp>
-#include <stout/thread_local.hpp>
 
 #include "authenticator_manager.hpp"
 #include "config.hpp"
@@ -617,11 +616,11 @@ PID<Help> help;
 // Global logging.
 PID<Logging> _logging;
 
-// Per thread process pointer.
-THREAD_LOCAL ProcessBase* __process__ = nullptr;
+// Per-thread process pointer.
+thread_local ProcessBase* __process__ = nullptr;
 
-// Per thread executor pointer.
-THREAD_LOCAL Executor* _executor_ = nullptr;
+// Per-thread executor pointer.
+thread_local Executor* _executor_ = nullptr;
 
 namespace metrics {
 namespace internal {
@@ -947,6 +946,9 @@ void on_accept(const Future<Socket>& socket)
           size,
           socket.get(),
           decoder));
+  } else {
+     LOG(ERROR) << "Failed to accept socket: "
+                << (socket.isFailed() ? socket.failure() : "future discarded");
   }
 
   // NOTE: `__s__` may be cleaned up during `process::finalize`.
@@ -2359,6 +2361,9 @@ Encoder* SocketManager::next(int_fd s)
           Try<Nothing> shutdown = socket.shutdown();
           if (shutdown.isError()) {
             LOG(ERROR) << "Failed to shutdown socket with fd " << socket.get()
+                       << ", address " << (socket.address().isSome()
+                                             ? stringify(socket.address().get())
+                                             : "N/A")
                        << ": " << shutdown.error();
           }
         }
@@ -2442,6 +2447,9 @@ void SocketManager::close(int_fd s)
       Try<Nothing> shutdown = socket.shutdown();
       if (shutdown.isError()) {
         LOG(ERROR) << "Failed to shutdown socket with fd " << socket.get()
+                   << ", address " << (socket.address().isSome()
+                                         ? stringify(socket.address().get())
+                                         : "N/A")
                    << ": " << shutdown.error();
       }
     }

@@ -230,7 +230,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     } else {
       return Error("Unknown or unsupported launcher: " + flags_.launcher);
     }
-#elif __WINDOWS__
+#elif defined(__WINDOWS__)
     if (flags_.launcher != "windows") {
       return Error("Unsupported launcher: " + flags_.launcher);
     }
@@ -909,6 +909,26 @@ Future<Nothing> MesosContainerizerProcess::__recover(
     const list<ContainerState>& recovered,
     const hashset<ContainerID>& orphans)
 {
+  // Recover containers' launch information.
+  foreach (const ContainerState& run, recovered) {
+    const ContainerID& containerId = run.container_id();
+
+    // Attempt to read container's launch information.
+    Result<ContainerLaunchInfo> containerLaunchInfo =
+      containerizer::paths::getContainerLaunchInfo(
+          flags.runtime_dir, containerId);
+
+    if (containerLaunchInfo.isError()) {
+      return Failure(
+          "Failed to recover launch information of container '" +
+          stringify(containerId) + "': " + containerLaunchInfo.error());
+    }
+
+    if (containerLaunchInfo.isSome()) {
+      containers_[containerId]->launchInfo = containerLaunchInfo.get();
+    }
+  }
+
   foreach (const ContainerState& run, recovered) {
     const ContainerID& containerId = run.container_id();
 
@@ -1347,6 +1367,39 @@ Future<bool> MesosContainerizerProcess::_launch(
     launchInfo.mutable_command()->CopyFrom(container->config.command_info());
   }
 
+  // For command tasks specifically, we should add the task_environment
+  // flag to the launch command of the command executor.
+  // TODO(tillt): Remove this once we no longer support the old style
+  // command task (i.e., that uses mesos-execute).
+  if (container->config.has_task_info() && launchInfo.has_task_environment()) {
+    hashmap<string, string> commandTaskEnvironment;
+
+    foreach (const Environment::Variable& variable,
+             launchInfo.task_environment().variables()) {
+      const string& name = variable.name();
+      const string& value = variable.value();
+      if (commandTaskEnvironment.contains(name) &&
+          commandTaskEnvironment[name] != value) {
+        LOG(WARNING) << "Overwriting environment variable '" << name << "' "
+                     << "for container " << containerId;
+      }
+      // TODO(tillt): Consider making this 'secret' aware.
+      commandTaskEnvironment[name] = value;
+    }
+
+    if (!commandTaskEnvironment.empty()) {
+      Environment taskEnvironment;
+      foreachpair (
+          const string& name, const string& value, commandTaskEnvironment) {
+        Environment::Variable* variable = taskEnvironment.add_variables();
+        variable->set_name(name);
+        variable->set_value(value);
+      }
+      launchInfo.mutable_command()->add_arguments(
+          "--task_environment=" + stringify(JSON::protobuf(taskEnvironment)));
+    }
+  }
+
   // For the command executor case, we should add the rootfs flag to
   // the launch command of the command executor.
   // TODO(jieyu): Remove this once we no longer support the old style
@@ -1367,69 +1420,147 @@ Future<bool> MesosContainerizerProcess::_launch(
   launchInfo.mutable_command()->clear_environment();
   launchInfo.mutable_command()->clear_user();
 
-  // Determine the environment for the command to be launched. The
-  // priority of the environment should be:
+  // Determine the environment for the command to be launched.
+  //
+  // For non-DEBUG containers, the priority of the environment is:
   //  1) User specified environment in CommandInfo.
   //  2) Environment returned by isolators (i.e., in 'launchInfo').
   //  3) Environment passed from agent (e.g., executor environment).
+  //
+  // DEBUG containers inherit parent's environment,
+  // hence the priority of the environment is:
+  //
+  // 1) User specified environment in CommandInfo.
+  // 2) Environment returned by isolators (i.e., in 'launchInfo').
+  // 3) Environment passed from agent (e.g., executor environment).
+  // 4) Environment inherited from the parent container.
+  //
+  // TODO(alexr): Consider using `hashmap` for merging environments to
+  // avoid duplicates, because `MergeFrom()` appends to the list.
+  Environment containerEnvironment;
 
-  // Save a copy of the environment returned by isolators because
-  // earlier entries in 'launchInfo.environment' will be overwritten
-  // by later entries. 'launchInfo.environment' will later be used as
-  // the environment for the container, and the container will not
-  // inherit the agent environment.
-  Environment isolatorEnvironment = launchInfo.environment();
+  // Inherit environment from the parent container for DEBUG containers.
+  if (container->config.has_container_class() &&
+      container->config.container_class() == ContainerClass::DEBUG) {
+    // DEBUG containers must have a parent.
+    CHECK(containerId.has_parent());
+    if (containers_[containerId.parent()]->launchInfo.isSome()) {
+      containerEnvironment.CopyFrom(
+          containers_[containerId.parent()]->launchInfo->environment());
+    }
+  }
 
-  Environment* containerEnvironment = launchInfo.mutable_environment();
-  containerEnvironment->Clear();
-
+  // Include environment passed from agent.
   foreachpair (const string& key, const string& value, environment) {
-    Environment::Variable* variable = containerEnvironment->add_variables();
+    Environment::Variable* variable = containerEnvironment.add_variables();
     variable->set_name(key);
     variable->set_value(value);
   }
 
-  // TODO(klueska): Remove the check below once we have a good way of
-  // setting the sandbox directory for DEBUG containers.
+  // DEBUG containers inherit MESOS_SANDBOX from their parent.
   if (!container->config.has_container_class() ||
-       container->config.container_class() != ContainerClass::DEBUG) {
+      container->config.container_class() != ContainerClass::DEBUG) {
     // TODO(jieyu): Consider moving this to filesystem isolator.
     //
     // NOTE: For the command executor case, although it uses the host
     // filesystem for itself, we still set 'MESOS_SANDBOX' according to
     // the root filesystem of the task (if specified). Command executor
     // itself does not use this environment variable.
-    Environment::Variable* variable = containerEnvironment->add_variables();
+    Environment::Variable* variable = containerEnvironment.add_variables();
     variable->set_name("MESOS_SANDBOX");
     variable->set_value(container->config.has_rootfs()
       ? flags.sandbox_directory
       : container->config.directory());
   }
 
-  containerEnvironment->MergeFrom(isolatorEnvironment);
+  // `launchInfo.environment` contains the environment returned by
+  // isolators. `launchInfo.environment` will later be overwritten
+  // by `containerEnvironment`, hence isolator environment will
+  // contribute to the resulting container environment.
+  containerEnvironment.MergeFrom(launchInfo.environment());
 
-  // Include any user specified environment variables.
+  // Include user specified environment.
   if (container->config.command_info().has_environment()) {
-    containerEnvironment->MergeFrom(
+    containerEnvironment.MergeFrom(
         container->config.command_info().environment());
   }
+
+  // Set the aggregated environment of the launch command.
+  launchInfo.mutable_environment()->CopyFrom(containerEnvironment);
 
   // Determine the rootfs for the container to be launched.
   //
   // NOTE: Command task is a special case. Even if the container
   // config has a root filesystem, the executor container still uses
   // the host filesystem.
-  if (!container->config.has_task_info() &&
-       container->config.has_rootfs()) {
+  if (!container->config.has_task_info() && container->config.has_rootfs()) {
     launchInfo.set_rootfs(container->config.rootfs());
   }
 
-  // Determine the working directory for the container.
-  if (launchInfo.has_rootfs()) {
+  // For a non-DEBUG container, working directory is set to container sandbox,
+  // i.e., MESOS_SANDBOX, unless one of the isolators overrides it. DEBUG
+  // containers set their working directory to their parent working directory,
+  // with the command executor being a special case (see below).
+  //
+  // TODO(alexr): Determining working directory is a convoluted process. We
+  // should either simplify the logic or extract it into a helper routine.
+  if (container->config.has_container_class() &&
+      container->config.container_class() == ContainerClass::DEBUG) {
+    // DEBUG containers must have a parent.
+    CHECK(containerId.has_parent());
+
+    if (containers_[containerId.parent()]->launchInfo.isSome()) {
+      // TODO(alexr): Remove this once we no longer support executorless
+      // command tasks in favor of default executor.
+      if (containers_[containerId.parent()]->config.has_task_info()) {
+        // For the command executor case, even if the task itself has a root
+        // filesystem, the executor container still uses the host filesystem,
+        // hence `ContainerLaunchInfo.working_directory`, which points to the
+        // executor working directory in the host filesystem, may be different
+        // from the task working directory when task defines an image. Fall back
+        // to the sandbox directory if task working directory is not present.
+        if (containers_[containerId.parent()]->config.has_rootfs()) {
+          // We can extract the task working directory from the flag being
+          // passed to the command executor.
+          foreach (
+              const string& flag,
+              containers_[containerId.parent()]
+                ->launchInfo->command().arguments()) {
+            if (strings::startsWith(flag, "--working_directory=")) {
+              launchInfo.set_working_directory(strings::remove(
+                  flag, "--working_directory=", strings::PREFIX));
+              break;
+            }
+          }
+
+          // If "--working_directory" argument is not found, default to the
+          // sandbox directory.
+          if (!launchInfo.has_working_directory()) {
+            launchInfo.set_working_directory(flags.sandbox_directory);
+          }
+        } else {
+          // Parent is command executor, but the task does not define an image.
+          launchInfo.set_working_directory(containers_[containerId.parent()]
+            ->launchInfo->working_directory());
+        }
+      } else {
+        // Parent is a non-command task.
+        launchInfo.set_working_directory(
+            containers_[containerId.parent()]->launchInfo->working_directory());
+      }
+    } else {
+      // Working directory cannot be determined, because
+      // parent working directory is unknown.
+      launchInfo.clear_working_directory();
+    }
+  } else if (launchInfo.has_rootfs()) {
+    // Non-DEBUG container which defines an image.
     if (!launchInfo.has_working_directory()) {
       launchInfo.set_working_directory(flags.sandbox_directory);
     }
   } else {
+    // Non-DEBUG container which does not define an image.
+    //
     // NOTE: If the container shares the host filesystem, we should
     // not allow them to 'cd' into an arbitrary directory because
     // that'll create security issues.
@@ -1444,14 +1575,6 @@ Future<bool> MesosContainerizerProcess::_launch(
     launchInfo.set_working_directory(container->config.directory());
   }
 
-  // TODO(klueska): Debug containers should set their working
-  // directory to their sandbox directory (once we know how to set
-  // that properly).
-  if (container->config.has_container_class() &&
-      container->config.container_class() == ContainerClass::DEBUG) {
-    launchInfo.clear_working_directory();
-  }
-
   // Determine the user to launch the container as.
   if (container->config.has_user()) {
     launchInfo.set_user(container->config.user());
@@ -1464,6 +1587,25 @@ Future<bool> MesosContainerizerProcess::_launch(
     // We need to set the executor user as root as it needs to
     // perform chroot (even when switch_user is set to false).
     launchInfo.set_user("root");
+  }
+
+  // Store container's launch information for future access.
+  container->launchInfo = launchInfo;
+
+  // Checkpoint container's launch information.
+  const string launchInfoPath =
+    containerizer::paths::getContainerLaunchInfoPath(
+        flags.runtime_dir, containerId);
+
+  Try<Nothing> checkpointed = slave::state::checkpoint(
+      launchInfoPath, launchInfo);
+
+  if (checkpointed.isError()) {
+    LOG(ERROR) << "Failed to checkpoint container's launch information to '"
+               << launchInfoPath << "': " << checkpointed.error();
+
+    return Failure("Could not checkpoint container's launch information: " +
+                   checkpointed.error());
   }
 
   // Use a pipe to block the child until it's been isolated.
@@ -1537,8 +1679,8 @@ Future<bool> MesosContainerizerProcess::_launch(
     Try<pid_t> mountNamespaceTarget = getMountNamespaceTarget(parentPid);
     if (mountNamespaceTarget.isError()) {
       return Failure(
-          "Cannot get target mount namespace from "
-          "process " + stringify(parentPid));
+          "Cannot get target mount namespace from process " +
+          stringify(parentPid) + ": " + mountNamespaceTarget.error());
     }
 
     launchFlags.namespace_mnt_target = mountNamespaceTarget.get();
@@ -1625,8 +1767,7 @@ Future<bool> MesosContainerizerProcess::_launch(
       containerizer::paths::getRuntimePath(flags.runtime_dir, containerId),
       containerizer::paths::PID_FILE);
 
-  Try<Nothing> checkpointed =
-    slave::state::checkpoint(pidPath, stringify(pid));
+  checkpointed = slave::state::checkpoint(pidPath, stringify(pid));
 
   if (checkpointed.isError()) {
     return Failure("Failed to checkpoint the container pid to"

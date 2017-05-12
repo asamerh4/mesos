@@ -46,10 +46,16 @@ We categorize the changes as follows:
   1.3.x
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>R <a href="#1-3-x-disallow-old-agents">Prevent registration by old Mesos agents</a></li>
+    </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
     <ul style="padding-left:10px;">
-      <li>R <a href="1-3-x-setquota-removequota-acl">--acls (set_quotas and remove_quotas)</a></li>
+      <li>R <a href="#1-3-x-setquota-removequota-acl">--acls (set_quotas and remove_quotas)</a></li>
+      <li>R <a href="#1-3-x-shutdown-framework-acl">--acls (shutdown_frameworks)</a></li>
+      <li>A <a href="#1-3-x-executor-authentication">authenticate_http_executors</a></li>
+      <li>A <a href="#1-3-x-executor-authentication">executor_secret_key</a></li>
     </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
@@ -74,6 +80,9 @@ We categorize the changes as follows:
   1.2.x
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>R <a href="#1-2-1-disallow-old-agents">Prevent registration by old Mesos agents</a></li>
+    </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
     <ul style="padding-left:10px;">
@@ -268,8 +277,14 @@ We categorize the changes as follows:
 
 ## Upgrading from 1.2.x to 1.3.x ##
 
+<a name="1-3-x-disallow-old-agents"></a>
+* The master will no longer allow 0.x agents to register. Interoperability between 1.1+ masters and 0.x agents has never been supported; however, it was not explicitly disallowed, either. Starting with this release of Mesos, registration attempts by 0.x agents will be ignored.
+
 <a name="1-3-x-setquota-removequota-acl"></a>
-* Support for deprecated ACLs `set_quotas` and `remove_quotas` has been removed from the local authorizer. Before upgrading the Mesos binaries, consolidate the ACLs used under `set_quotas` and `remove_quotes` under their replacemente ACL `update_quotas`. After consolidation of the ACLs, the binaries could be safely replaced.
+* Support for deprecated ACLs `set_quotas` and `remove_quotas` has been removed from the local authorizer. Before upgrading the Mesos binaries, consolidate the ACLs used under `set_quotas` and `remove_quotes` under their replacement ACL `update_quotas`. After consolidation of the ACLs, the binaries could be safely replaced.
+
+<a name="1-3-x-shutdown-framework-acl"></a>
+* Support for deprecated ACL `shutdown_frameworks` has been removed from the local authorizer. Before upgrading the Mesos binaries, replace all instances of the ACL `shutdown_frameworks` with the newer ACL `teardown_frameworks`. After updating the ACLs, the binaries can be safely replaced.
 
 <a name="1-3-x-framework-info-role"></a>
 * Support for multi-role frameworks deprecates the `FrameworkInfo.role` field in favor of `FrameworkInfo.roles` and the `MULTI_ROLE` capability. Frameworks using the new field can continue to use a single role.
@@ -280,7 +295,22 @@ We categorize the changes as follows:
 <a name="1-3-x-allocator-interface-change"></a>
 * Implementors of allocator modules have to provide new implementation functionality to satisfy the `MULTI_ROLE` framework capability. Also, the interface has changed.
 
+<a name="1-3-x-executor-authentication"></a>
+* New Agent flags `authenticate_http_executors` and `executor_secret_key`: Used to enable required HTTP executor authentication and set the key file used for generation and authentication of HTTP executor tokens. Note that enabling these flags after upgrade is disruptive to HTTP executors that were launched before the upgrade. For more information on the recommended upgrade procedure when enabling these flags, see the [authentication documentation](authentication.md).
+
+In order to upgrade a running cluster:
+
+1. Rebuild and install any modules so that upgraded masters/agents/schedulers can use them.
+2. Install the new master binaries and restart the masters.
+3. Install the new agent binaries and restart the agents.
+4. Upgrade the schedulers by linking the latest native library / jar / egg (if necessary).
+5. Restart the schedulers.
+6. Upgrade the executors by linking the latest native library / jar / egg (if necessary).
+
 ## Upgrading from 1.1.x to 1.2.x ##
+
+<a name="1-2-1-disallow-old-agents"></a>
+* In Mesos 1.2.1, the master will no longer allow 0.x agents to register. Interoperability between 1.1+ masters and 0.x agents has never been supported; however, it was not explicitly disallowed, either. Starting with Mesos 1.2.1, registration attempts by 0.x agents will be ignored. **NOTE:** This applies only when upgrading to Mesos 1.2.1. Mesos 1.2.0 does not implement this behavior.
 
 <a name="1-2-x-heartbeat-flag"></a>
 * New Agent flag http_heartbeat_interval: This flag sets a heartbeat interval for messages to be sent over persistent connections made against the agent HTTP API. Currently, this only applies to the LAUNCH_NESTED_CONTAINER_SESSION and ATTACH_CONTAINER_OUTPUT calls. (default: 30secs)

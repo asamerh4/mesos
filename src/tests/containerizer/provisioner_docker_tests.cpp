@@ -369,14 +369,14 @@ TEST_F(ProvisionerDockerLocalStoreTest, PullingSameImageSimutanuously)
 
 
 #ifdef __linux__
-class ProvisionerDockerPullerTest
+class ProvisionerDockerTest
   : public MesosTest,
     public WithParamInterface<string> {};
 
 
 // This test verifies that local docker image can be pulled and
 // provisioned correctly, and shell command should be executed.
-TEST_F(ProvisionerDockerPullerTest, ROOT_LocalPullerSimpleCommand)
+TEST_F(ProvisionerDockerTest, ROOT_LocalPullerSimpleCommand)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -456,7 +456,7 @@ TEST_F(ProvisionerDockerPullerTest, ROOT_LocalPullerSimpleCommand)
 // puller normalize docker official images if necessary.
 INSTANTIATE_TEST_CASE_P(
     ImageAlpine,
-    ProvisionerDockerPullerTest,
+    ProvisionerDockerTest,
     ::testing::ValuesIn(vector<string>({
         "alpine", // Verifies the normalization of the Docker repository name.
         "library/alpine",
@@ -466,7 +466,7 @@ INSTANTIATE_TEST_CASE_P(
 
 // TODO(jieyu): This is a ROOT test because of MESOS-4757. Remove the
 // ROOT restriction after MESOS-4757 is resolved.
-TEST_P(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_SimpleCommand)
+TEST_P(ProvisionerDockerTest, ROOT_INTERNET_CURL_SimpleCommand)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -477,7 +477,7 @@ TEST_P(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_SimpleCommand)
 
   // Image pulling time may be long, depending on the location of
   // the registry server.
-  flags.executor_registration_timeout = Minutes(3);
+  flags.executor_registration_timeout = Minutes(10);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
@@ -532,7 +532,7 @@ TEST_P(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_SimpleCommand)
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY_FOR(statusRunning, Minutes(3));
+  AWAIT_READY_FOR(statusRunning, Minutes(10));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -548,7 +548,7 @@ TEST_P(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_SimpleCommand)
 // This test verifies that the scratch based docker image (that
 // only contain a single binary and its dependencies) can be
 // launched correctly.
-TEST_F(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_ScratchImage)
+TEST_F(ProvisionerDockerTest, ROOT_INTERNET_CURL_ScratchImage)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -619,7 +619,7 @@ TEST_F(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_ScratchImage)
 }
 
 
-class ProvisionerDockerWhiteoutTest
+class ProvisionerDockerBackendTest
   : public MesosTest,
     public WithParamInterface<string>
 {
@@ -646,13 +646,13 @@ public:
 
 INSTANTIATE_TEST_CASE_P(
     BackendFlag,
-    ProvisionerDockerWhiteoutTest,
-    ::testing::ValuesIn(ProvisionerDockerWhiteoutTest::parameters()));
+    ProvisionerDockerBackendTest,
+    ::testing::ValuesIn(ProvisionerDockerBackendTest::parameters()));
 
 
 // This test verifies that a docker image containing whiteout files
 // will be processed correctly by copy, aufs and overlay backends.
-TEST_P(ProvisionerDockerWhiteoutTest, ROOT_INTERNET_CURL_Whiteout)
+TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Whiteout)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -731,9 +731,109 @@ TEST_P(ProvisionerDockerWhiteoutTest, ROOT_INTERNET_CURL_Whiteout)
 }
 
 
+// This test verifies that the provisioner correctly overwrites a
+// directory in underlying layers with a with a regular file or symbolic
+// link of the same name in an upper layer, and vice versa.
+TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Overwrite)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "docker/runtime,filesystem/linux";
+  flags.image_providers = "docker";
+  flags.image_provisioner_backend = GetParam();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  ASSERT_EQ(1u, offers->size());
+
+  const Offer& offer = offers.get()[0];
+
+  // We are using the docker image 'chhsiao/overwrite' to verify that:
+  //   1. The '/merged' directory is merged.
+  //   2. All '/replaced*' files/directories are correctly overwritten.
+  //   3. The '/foo', '/bar' and '/baz' files are correctly overwritten.
+  // See more details in the following link:
+  //   https://hub.docker.com/r/chhsiao/overwrite/
+  CommandInfo command = createCommandInfo(
+      "test -f /replaced1 &&"
+      "test -L /replaced2 &&"
+      "test -f /replaced2/m1 &&"
+      "test -f /replaced2/m2 &&"
+      "! test -e /replaced2/r2 &&"
+      "test -d /replaced3 &&"
+      "test -d /replaced4 &&"
+      "! test -e /replaced4/m1 &&"
+      "test -f /foo &&"
+      "! test -L /bar &&"
+      "test -L /baz");
+
+  TaskInfo task = createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:1;mem:128").get(),
+      command);
+
+  Image image = createDockerImage("chhsiao/overwrite");
+
+  ContainerInfo* container = task.mutable_container();
+  container->set_type(ContainerInfo::MESOS);
+  container->mutable_mesos()->mutable_image()->CopyFrom(image);
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusFinished;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusFinished));
+
+  // Create a non-empty file 'abc' in the agent's work directory on the
+  // host filesystem. This file is symbolically linked by
+  //   '/xyz -> ../../../../../../../abc'
+  // in the 2nd layer of the testing image during provisioning.
+  // For more details about the provisioner directory please see:
+  //   https://github.com/apache/mesos/blob/master/src/slave/containerizer/mesos/provisioner/paths.hpp#L34-L48 // NOLINT
+  const string hostFile = path::join(flags.work_dir, "abc");
+  ASSERT_SOME(os::write(hostFile, "abc"));
+  ASSERT_SOME(os::shell("test -s " + hostFile));
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusRunning->task_id());
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  AWAIT_READY(statusFinished);
+  EXPECT_EQ(task.task_id(), statusFinished->task_id());
+  EXPECT_EQ(TASK_FINISHED, statusFinished->state());
+
+  // The non-empty file should not be overwritten by the empty file
+  // '/xyz' in the 3rd layer of the testing image during provisioning.
+  EXPECT_SOME(os::shell("test -s " + hostFile));
+
+  driver.stop();
+  driver.join();
+}
+
+
 // This test verifies that Docker image can be pulled from the
 // repository by digest.
-TEST_F(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_ImageDigest)
+TEST_F(ProvisionerDockerTest, ROOT_INTERNET_CURL_ImageDigest)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -817,7 +917,7 @@ TEST_F(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_ImageDigest)
 // command runs as the specified user 'nobody' and the sandbox of
 // the command task is writtable by the specified user. It also
 // verifies that stdout/stderr are owned by the specified user.
-TEST_F(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_CommandTaskUser)
+TEST_F(ProvisionerDockerTest, ROOT_INTERNET_CURL_CommandTaskUser)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -903,7 +1003,7 @@ TEST_F(ProvisionerDockerPullerTest, ROOT_INTERNET_CURL_CommandTaskUser)
 // directory still survives. The recursive `provisioner::destroy()`
 // can make sure that a child container is always cleaned up
 // before its parent container.
-TEST_F(ProvisionerDockerPullerTest, ROOT_RecoverNestedOnReboot)
+TEST_F(ProvisionerDockerTest, ROOT_RecoverNestedOnReboot)
 {
   const string directory = path::join(os::getcwd(), "archives");
 
