@@ -33,7 +33,16 @@ namespace slave {
 // details in MESOS-1023.
 
 constexpr Duration EXECUTOR_REGISTRATION_TIMEOUT = Minutes(1);
-constexpr Duration EXECUTOR_REREGISTER_TIMEOUT = Seconds(2);
+constexpr Duration EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(2);
+
+// The maximum timeout within which an executor can re-register.
+// Note that this value has to be << 'MIN_AGENT_REREGISTER_TIMEOUT'
+// declared in 'master/constants.hpp'; since agent recovery will only
+// complete after this timeout has elapsed, this ensures that the
+// agent can re-register with the master before it is marked
+// unreachable and its tasks are transitioned to TASK_UNREACHABLE or
+// TASK_LOST.
+constexpr Duration MAX_EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(15);
 
 // The default amount of time to wait for the executor to
 // shut down before destroying the container.
@@ -95,7 +104,7 @@ constexpr double DEFAULT_EXECUTOR_CPUS = 0.1;
 // Default memory resource given to a command executor.
 constexpr Bytes DEFAULT_EXECUTOR_MEM = Megabytes(32);
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
 // Default number of ephemeral ports allocated to a container by the
 // network isolator.
 constexpr uint16_t DEFAULT_EPHEMERAL_PORTS_PER_CONTAINER = 1024;

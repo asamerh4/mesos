@@ -810,10 +810,12 @@ TEST_F(RoleTest, Validate)
   EXPECT_NONE(roles::validate("foo.bar"));
   EXPECT_NONE(roles::validate("foo..bar"));
   EXPECT_NONE(roles::validate("..."));
-  EXPECT_NONE(roles::validate("foo/bar"));
-  EXPECT_NONE(roles::validate("foo/.bar"));
-  EXPECT_NONE(roles::validate("foo/bar/baz"));
-  EXPECT_NONE(roles::validate("a/b/c/d/e/f/g/h"));
+
+  // TODO(neilc): These expectations will change when MESOS-7505 is fixed.
+  EXPECT_SOME(roles::validate("foo/bar"));
+  EXPECT_SOME(roles::validate("foo/.bar"));
+  EXPECT_SOME(roles::validate("foo/bar/baz"));
+  EXPECT_SOME(roles::validate("a/b/c/d/e/f/g/h"));
 
   EXPECT_SOME(roles::validate(""));
   EXPECT_SOME(roles::validate("."));
@@ -878,7 +880,7 @@ TEST_F(RoleTest, EndpointBadAuthentication)
 }
 
 
-// This test confirms that our handling of peristent volumes from hierarchical
+// This test confirms that our handling of persistent volumes from hierarchical
 // roles does not cause leaking of volumes. Since hierarchical roles contain
 // literal `/` an implementation not taking this into account could map the name
 // of a hierarchical role `A/B` onto a directory hierarchy `A/B`. If the
@@ -898,7 +900,10 @@ TEST_F(RoleTest, EndpointBadAuthentication)
 // subdirectory).
 //
 // TODO(bbannier): Figure out a way to run the test command on Windows.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, VolumesInOverlappingHierarchies)
+//
+// TODO(neilc): Re-enable this when MESOS-7505 is fixed.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    RoleTest, DISABLED_VolumesInOverlappingHierarchies)
 {
   constexpr char PATH[] = "path";
   constexpr Megabytes DISK_SIZE(1);

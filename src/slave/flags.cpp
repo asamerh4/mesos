@@ -186,18 +186,15 @@ mesos::internal::slave::Flags::Flags()
       "Size of the fetcher cache in Bytes.",
       DEFAULT_FETCHER_CACHE_SIZE);
 
-  // By default the fetcher cache directory is held inside the work
-  // directory, so everything can be deleted or archived in one swoop,
-  // in particular during testing. However, a typical production
-  // scenario is to use a separate cache volume. First, it is not meant
-  // to be backed up. Second, you want to avoid that sandbox directories
-  // and the cache directory can interfere with each other in
-  // unpredictable ways by occupying shared space. So it is recommended
-  // to set the cache directory explicitly.
   add(&Flags::fetcher_cache_dir,
       "fetcher_cache_dir",
-      "Parent directory for fetcher cache directories\n"
-      "(one subdirectory per agent).",
+      "Directory for the fetcher cache. The agent will clear this directory\n"
+      "on startup. It is recommended to set this value to a separate volume\n"
+      "for several reasons:\n"
+      "  * The cache directories are transient and not meant to be\n"
+      "    backed up. Upon restarting the agent, the cache is always empty.\n"
+      "  * The cache and container sandboxes can potentially interfere with\n"
+      "    each other when occupying a shared space (i.e. disk contention).",
       path::join(os::temp(), "mesos", "fetch"));
 
   add(&Flags::work_dir,
@@ -315,7 +312,7 @@ mesos::internal::slave::Flags::Flags()
       "}",
       [](const Option<JSON::Object>& object) -> Option<Error> {
         if (object.isSome()) {
-          foreachvalue (const JSON::Value& value, object.get().values) {
+          foreachvalue (const JSON::Value& value, object->values) {
             if (!value.is<JSON::String>()) {
               return Error("`executor_environment_variables` must "
                            "only contain string values");
@@ -331,6 +328,44 @@ mesos::internal::slave::Flags::Flags()
       "to register with the agent before considering it hung and\n"
       "shutting it down (e.g., 60secs, 3mins, etc)",
       EXECUTOR_REGISTRATION_TIMEOUT);
+
+  add(&Flags::executor_reregistration_timeout,
+      "executor_reregistration_timeout",
+      "The timeout within which an executor is expected to re-register after\n"
+      "the agent has restarted, before the agent considers it gone and shuts\n"
+      "it down. Note that currently, the agent will not re-register with the\n"
+      "master until this timeout has elapsed (see MESOS-7539).",
+      EXECUTOR_REREGISTRATION_TIMEOUT,
+      [](const Duration& value) -> Option<Error> {
+        if (value > MAX_EXECUTOR_REREGISTRATION_TIMEOUT) {
+          return Error("Expected `--executor_reregistration_timeout` "
+                       "to be not more than " +
+                       stringify(MAX_EXECUTOR_REREGISTRATION_TIMEOUT));
+        }
+        return None();
+      });
+
+  // TODO(bmahler): Remove this once v0 executors are no longer supported.
+  add(&Flags::executor_reregistration_retry_interval,
+      "executor_reregistration_retry_interval",
+      "For PID-based executors, how long the agent waits before retrying\n"
+      "the reconnect message sent to the executor during recovery.\n"
+      "NOTE: Do not use this unless you understand the following\n"
+      "(see MESOS-5332): PID-based executors using Mesos libraries >= 1.1.2\n"
+      "always re-link with the agent upon receiving the reconnect message.\n"
+      "This avoids the executor replying on a half-open TCP connection to\n"
+      "the old agent (possible if netfilter is dropping packets,\n"
+      "see: MESOS-7057). However, PID-based executors using Mesos\n"
+      "libraries < 1.1.2 do not re-link and are therefore prone to\n"
+      "replying on a half-open connection after the agent restarts. If we\n"
+      "only send a single reconnect message, these \"old\" executors will\n"
+      "reply on their half-open connection and receive a RST; without any\n"
+      "retries, they will fail to reconnect and be killed by the agent once\n"
+      "the executor re-registration timeout elapses. To ensure these \"old\"\n"
+      "executors can reconnect in the presence of netfilter dropping\n"
+      "packets, we introduced optional retries of the reconnect message.\n"
+      "This results in \"old\" executors correctly establishing a link\n"
+      "when processing the second reconnect message.");
 
   add(&Flags::executor_shutdown_grace_period,
       "executor_shutdown_grace_period",
@@ -738,7 +773,7 @@ mesos::internal::slave::Flags::Flags()
       "policy instead.",
       Seconds(0));
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
   add(&Flags::ephemeral_ports_per_container,
       "ephemeral_ports_per_container",
       "Number of ephemeral ports allocated to a container by the network\n"
@@ -802,7 +837,7 @@ mesos::internal::slave::Flags::Flags()
       "isolator.",
       false);
 
-#endif // WITH_NETWORK_ISOLATOR
+#endif // ENABLE_PORT_MAPPING_ISOLATOR
 
   add(&Flags::network_cni_plugins_dir,
       "network_cni_plugins_dir",
@@ -957,6 +992,13 @@ mesos::internal::slave::Flags::Flags()
       "hooks",
       "A comma-separated list of hook modules to be\n"
       "installed inside the agent.");
+
+  add(&Flags::secret_resolver,
+      "secret_resolver",
+      "The name of the secret resolver module to use for resolving\n"
+      "environment and file-based secrets. If this flag is not specified,\n"
+      "the default behavior is to resolve value-based secrets and error on\n"
+      "reference-based secrets.");
 
   add(&Flags::resource_estimator,
       "resource_estimator",

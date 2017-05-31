@@ -45,13 +45,13 @@ namespace allocator {
 
 
 DRFSorter::DRFSorter()
-  : root(new Node("", nullptr)) {}
+  : root(new Node("", Node::INTERNAL, nullptr)) {}
 
 
 DRFSorter::DRFSorter(
     const UPID& allocator,
     const string& metricsPrefix)
-  : root(new Node("", nullptr)),
+  : root(new Node("", Node::INTERNAL, nullptr)),
     metrics(Metrics(allocator, *this, metricsPrefix)) {}
 
 
@@ -99,20 +99,14 @@ void DRFSorter::add(const string& clientPath)
     // leaf node into an internal node, we need to create an
     // additional child node: `current` must have been associated with
     // a client and clients must always be associated with leaf nodes.
-    //
-    // There are two exceptions: if `current` is the root node or it
-    // was just created by the current `add()` call, it does not
-    // correspond to a client, so we don't create an extra child.
-    if (current->children.empty() &&
-        current != root &&
-        current != lastCreatedNode) {
+    if (current->isLeaf()) {
       Node* parent = CHECK_NOTNULL(current->parent);
 
       parent->removeChild(current);
 
       // Create a node under `parent`. This internal node will take
       // the place of `current` in the tree.
-      Node* internal = new Node(current->name, parent);
+      Node* internal = new Node(current->name, Node::INTERNAL, parent);
       parent->addChild(internal);
       internal->allocation = current->allocation;
 
@@ -122,8 +116,9 @@ void DRFSorter::add(const string& clientPath)
       // `internal`.
       current->name = ".";
       current->parent = internal;
-      internal->addChild(current);
       current->path = strings::join("/", parent->path, current->name);
+
+      internal->addChild(current);
 
       CHECK_EQ(internal->path, current->clientPath());
 
@@ -131,28 +126,41 @@ void DRFSorter::add(const string& clientPath)
     }
 
     // Now actually add a new child to `current`.
-    Node* newChild = new Node(element, current);
+    Node* newChild = new Node(element, Node::INTERNAL, current);
     current->addChild(newChild);
 
     current = newChild;
     lastCreatedNode = newChild;
   }
 
+  CHECK(current->kind == Node::INTERNAL);
+
   // `current` is the node associated with the last element of the
   // path. If we didn't add `current` to the tree above, create a leaf
   // node now. For example, if the tree contains "a/b" and we add a
   // new client "a", we want to create a new leaf node "a/." here.
   if (current != lastCreatedNode) {
-    Node* newChild = new Node(".", current);
+    Node* newChild = new Node(".", Node::INACTIVE_LEAF, current);
     current->addChild(newChild);
     current = newChild;
+  } else {
+    // If we created `current` in the loop above, it was marked an
+    // `INTERNAL` node. It should actually be an inactive leaf node.
+    current->kind = Node::INACTIVE_LEAF;
+
+    // `current` has changed from an internal node to an inactive
+    // leaf, so remove and re-add it to its parent. This moves it to
+    // the end of the parent's list of children.
+    CHECK_NOTNULL(current->parent);
+
+    current->parent->removeChild(current);
+    current->parent->addChild(current);
   }
 
   // `current` is the newly created node associated with the last
-  // element of the path. `current` should be an inactive node with no
-  // children.
+  // element of the path. `current` should be an inactive leaf node.
   CHECK(current->children.empty());
-  CHECK(!current->active);
+  CHECK(current->kind == Node::INACTIVE_LEAF);
 
   // Add a new entry to the lookup table. The full path of the newly
   // added client should not already exist in `clients`.
@@ -222,12 +230,22 @@ void DRFSorter::remove(const string& clientPath)
       Node* child = *(current->children.begin());
 
       if (child->name == ".") {
-        CHECK(child->children.empty());
+        CHECK(child->isLeaf());
         CHECK(clients.contains(current->path));
         CHECK_EQ(child, clients.at(current->path));
 
-        current->active = child->active;
+        current->kind = child->kind;
         current->removeChild(child);
+
+        // `current` has changed kind (from `INTERNAL` to a leaf,
+        // which might be active or inactive). Hence we might need to
+        // change its position in the `children` list.
+        if (current->kind == Node::INTERNAL) {
+          CHECK_NOTNULL(current->parent);
+
+          current->parent->removeChild(current);
+          current->parent->addChild(current);
+        }
 
         clients[current->path] = current;
 
@@ -250,14 +268,41 @@ void DRFSorter::remove(const string& clientPath)
 void DRFSorter::activate(const string& clientPath)
 {
   Node* client = CHECK_NOTNULL(find(clientPath));
-  client->active = true;
+
+  if (client->kind == Node::INACTIVE_LEAF) {
+    client->kind = Node::ACTIVE_LEAF;
+
+    // `client` has been activated, so move it to the beginning of its
+    // parent's list of children. We mark the tree dirty, so that the
+    // client's share is updated correctly and it is sorted properly.
+    //
+    // TODO(neilc): We could instead calculate share here and insert
+    // the client into the appropriate place here, which would avoid
+    // dirtying the whole tree.
+    CHECK_NOTNULL(client->parent);
+
+    client->parent->removeChild(client);
+    client->parent->addChild(client);
+
+    dirty = true;
+  }
 }
 
 
 void DRFSorter::deactivate(const string& clientPath)
 {
   Node* client = CHECK_NOTNULL(find(clientPath));
-  client->active = false;
+
+  if (client->kind == Node::ACTIVE_LEAF) {
+    client->kind = Node::INACTIVE_LEAF;
+
+    // `client` has been deactivated, so move it to the end of its
+    // parent's list of children.
+    CHECK_NOTNULL(client->parent);
+
+    client->parent->removeChild(client);
+    client->parent->addChild(client);
+  }
 }
 
 
@@ -467,16 +512,33 @@ vector<string> DRFSorter::sort()
 {
   if (dirty) {
     std::function<void (Node*)> sortTree = [this, &sortTree](Node* node) {
-      foreach (Node* child, node->children) {
+      // Inactive leaves are always stored at the end of the
+      // `children` vector; this means that as soon as we see an
+      // inactive leaf, we can stop calculating shares, and we only
+      // need to sort the prefix of the vector before that point.
+      auto childIter = node->children.begin();
+
+      while (childIter != node->children.end()) {
+        Node* child = *childIter;
+
+        if (child->kind == Node::INACTIVE_LEAF) {
+          break;
+        }
+
         child->share = calculateShare(child);
+        ++childIter;
       }
 
       std::sort(node->children.begin(),
-                node->children.end(),
+                childIter,
                 DRFSorter::Node::compareDRF);
 
       foreach (Node* child, node->children) {
-        sortTree(child);
+        if (child->kind == Node::INTERNAL) {
+          sortTree(child);
+        } else if (child->kind == Node::INACTIVE_LEAF) {
+          break;
+        }
       }
     };
 
@@ -485,18 +547,28 @@ vector<string> DRFSorter::sort()
     dirty = false;
   }
 
-  // Return the leaf nodes in the tree. The children of each node are
-  // already sorted in DRF order.
+  // Return all active leaves in the tree via pre-order traversal.
+  // The children of each node are already sorted in DRF order, with
+  // inactive leaves sorted after active leaves and internal nodes.
   vector<string> result;
 
   std::function<void (const Node*)> listClients =
       [&listClients, &result](const Node* node) {
-    if (node->active) {
-      result.push_back(node->clientPath());
-    }
+    foreach (const Node* child, node->children) {
+      switch (child->kind) {
+        case Node::ACTIVE_LEAF:
+          result.push_back(child->clientPath());
+          break;
 
-    foreach (Node* child, node->children) {
-      listClients(child);
+        case Node::INACTIVE_LEAF:
+          // As soon as we see the first inactive leaf, we can stop
+          // iterating over the current node's list of children.
+          return;
+
+        case Node::INTERNAL:
+          listClients(child);
+          break;
+      }
     }
   };
 
@@ -562,13 +634,17 @@ double DRFSorter::findWeight(const Node* node) const
 
 DRFSorter::Node* DRFSorter::find(const string& clientPath) const
 {
-  Option<Node*> client = clients.get(clientPath);
+  Option<Node*> client_ = clients.get(clientPath);
 
-  if (client.isNone()) {
+  if (client_.isNone()) {
     return nullptr;
   }
 
-  return client.get();
+  Node* client = client_.get();
+
+  CHECK(client->isLeaf());
+
+  return client;
 }
 
 } // namespace allocator {

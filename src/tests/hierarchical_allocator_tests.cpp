@@ -3575,6 +3575,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(HierarchicalAllocatorTest, AllocationRunsMetric)
 
   ++allocations; // Adding a framework triggers allocations.
 
+  // Allocation count is set based on adding an agent and a framework.
   expected.values = { {"allocator/mesos/allocation_runs", allocations} };
 
   metrics = Metrics();
@@ -3661,6 +3662,88 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   JSON::Number timing = value.as<JSON::Number>();
   ASSERT_EQ(JSON::Number::FLOATING, timing.type);
   EXPECT_GT(timing.as<double>(), 0.0);
+
+  // The statistics should be generated.
+  foreach (const string& statistic, statistics) {
+    EXPECT_EQ(1u, values.count(statistic))
+      << "Expected " << statistic << " to be present";
+  }
+}
+
+
+// This test checks that the allocation run latency
+// metrics are reported in the metrics endpoint.
+// TODO(xujyan): This test is structurally similar to
+// `AllocationRunTimerMetrics` above. Consider a refactor.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HierarchicalAllocatorTest,
+    AllocationRunLatencyMetrics)
+{
+  Clock::pause();
+
+  initialize();
+
+  // These time series statistics will be generated
+  // once at least 2 allocation runs occur.
+  auto statistics = {
+    "allocator/mesos/allocation_run_latency_ms/count",
+    "allocator/mesos/allocation_run_latency_ms/min",
+    "allocator/mesos/allocation_run_latency_ms/max",
+    "allocator/mesos/allocation_run_latency_ms/p50",
+    "allocator/mesos/allocation_run_latency_ms/p95",
+    "allocator/mesos/allocation_run_latency_ms/p99",
+    "allocator/mesos/allocation_run_latency_ms/p999",
+    "allocator/mesos/allocation_run_latency_ms/p9999",
+  };
+
+  JSON::Object metrics = Metrics();
+  map<string, JSON::Value> values = metrics.values;
+
+  EXPECT_EQ(0u, values.count("allocator/mesos/allocation_run_latency_ms"));
+
+  // No allocation latency statistics should appear.
+  foreach (const string& statistic, statistics) {
+    EXPECT_EQ(0u, values.count(statistic))
+      << "Expected " << statistic << " to be absent";
+  }
+
+  // Allow the allocation timer to measure time.
+  Clock::resume();
+
+  // Trigger at least two calls to allocate to generate the window statistics.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024;disk:0");
+  allocator->addSlave(
+      agent.id(),
+      agent,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent.resources(),
+      {});
+
+  // Wait for the allocation triggered by `addSlave()` to complete.
+  Clock::pause();
+  Clock::settle();
+  Clock::resume();
+
+  FrameworkInfo framework = createFrameworkInfo({"role1"});
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Wait for the allocation triggered by `addFramework()` to complete.
+  AWAIT_READY(allocations.get());
+
+  metrics = Metrics();
+  values = metrics.values;
+
+  // A non-zero measurement should be present.
+  EXPECT_EQ(1u, values.count("allocator/mesos/allocation_run_latency_ms"));
+
+  JSON::Value value =
+    metrics.values["allocator/mesos/allocation_run_latency_ms"];
+  ASSERT_TRUE(value.is<JSON::Number>()) << value.which();
+
+  JSON::Number timing = value.as<JSON::Number>();
+  ASSERT_EQ(JSON::Number::FLOATING, timing.type);
+  EXPECT_GE(timing.as<double>(), 0.0);
 
   // The statistics should be generated.
   foreach (const string& statistic, statistics) {
@@ -4805,7 +4888,7 @@ TEST_P(HierarchicalAllocatorTestWithParam, AllocateSharedResources)
 
 class HierarchicalAllocator_BENCHMARK_Test
   : public HierarchicalAllocatorTestBase,
-    public WithParamInterface<std::tr1::tuple<size_t, size_t>> {};
+    public WithParamInterface<std::tuple<size_t, size_t>> {};
 
 
 // The Hierarchical Allocator benchmark tests are parameterized
@@ -4823,8 +4906,8 @@ INSTANTIATE_TEST_CASE_P(
 // add a framework after the slaves are added.
 TEST_P(HierarchicalAllocator_BENCHMARK_Test, AddAndUpdateSlave)
 {
-  size_t slaveCount = std::tr1::get<0>(GetParam());
-  size_t frameworkCount = std::tr1::get<1>(GetParam());
+  size_t slaveCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
 
   vector<SlaveInfo> slaves;
   slaves.reserve(slaveCount);
@@ -4888,9 +4971,9 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, AddAndUpdateSlave)
   // Add the slaves, use round-robin to choose which framework
   // to allocate a slice of the slave's resources to.
   for (size_t i = 0; i < slaves.size(); i++) {
-    hashmap<FrameworkID, Resources> used;
-
-    used[frameworks[i % frameworkCount].id()] = allocation;
+    hashmap<FrameworkID, Resources> used = {
+      {frameworks[i % frameworkCount].id(), allocation}
+    };
 
     allocator->addSlave(
         slaves[i].id(),
@@ -4938,8 +5021,8 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, AddAndUpdateSlave)
 // subsequent offers.
 TEST_P(HierarchicalAllocator_BENCHMARK_Test, DeclineOffers)
 {
-  size_t slaveCount = std::tr1::get<0>(GetParam());
-  size_t frameworkCount = std::tr1::get<1>(GetParam());
+  size_t slaveCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
 
   // Pause the clock because we want to manually drive the allocations.
   Clock::pause();
@@ -5013,10 +5096,12 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, DeclineOffers)
   for (size_t i = 0; i < slaveCount; i++) {
     slaves.push_back(createSlaveInfo(agentResources));
 
-    // Add some used resources on each slave. Let's say there are 16 tasks, each
-    // is allocated 1 cpu and a random port from the port range.
-    hashmap<FrameworkID, Resources> used;
-    used[frameworks[i % frameworkCount].id()] = allocation;
+    // Add some used resources on each slave. Let's say there are 16 tasks;
+    // each is allocated 1 cpu and a random port from the port range.
+    hashmap<FrameworkID, Resources> used = {
+      {frameworks[i % frameworkCount].id(), allocation}
+    };
+
     allocator->addSlave(
         slaves[i].id(),
         slaves[i],
@@ -5092,8 +5177,8 @@ static Labels createLabels(
 // TODO(neilc): Refactor to reduce code duplication with `DeclineOffers` test.
 TEST_P(HierarchicalAllocator_BENCHMARK_Test, ResourceLabels)
 {
-  size_t slaveCount = std::tr1::get<0>(GetParam());
-  size_t frameworkCount = std::tr1::get<1>(GetParam());
+  size_t slaveCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
 
   // Pause the clock because we want to manually drive the allocations.
   Clock::pause();
@@ -5206,8 +5291,10 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, ResourceLabels)
 
     // Add some used resources on each slave. Let's say there are 16 tasks, each
     // is allocated 1 cpu and a random port from the port range.
-    hashmap<FrameworkID, Resources> used;
-    used[frameworks[i % frameworkCount].id()] = _allocation;
+    hashmap<FrameworkID, Resources> used = {
+      {frameworks[i % frameworkCount].id(), _allocation}
+    };
+
     allocator->addSlave(
         slaves[i].id(),
         slaves[i],
@@ -5266,8 +5353,8 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, ResourceLabels)
 // on allocation times.
 TEST_P(HierarchicalAllocator_BENCHMARK_Test, SuppressOffers)
 {
-  size_t agentCount = std::tr1::get<0>(GetParam());
-  size_t frameworkCount = std::tr1::get<1>(GetParam());
+  size_t agentCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
 
   // Pause the clock because we want to manually drive the allocations.
   Clock::pause();
@@ -5341,8 +5428,9 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, SuppressOffers)
   for (size_t i = 0; i < agentCount; i++) {
     agents.push_back(createSlaveInfo(agentResources));
 
-    hashmap<FrameworkID, Resources> used;
-    used[frameworks[i % frameworkCount].id()] = allocation;
+    hashmap<FrameworkID, Resources> used = {
+      {frameworks[i % frameworkCount].id(), allocation}
+    };
 
     allocator->addSlave(
         agents[i].id(),
@@ -5371,7 +5459,7 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, SuppressOffers)
   size_t allocationsCount = 5;
   size_t suppressCount = 0;
 
-  for (size_t i = 0; i < allocationsCount; ++i) {
+  for (size_t i = 0; i < allocationsCount; i++) {
     // Recover resources with no filters because we want to test the
     // effect of suppression alone.
     foreach (const OfferedResources& offer, offers) {
@@ -5418,13 +5506,164 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, SuppressOffers)
 }
 
 
+// This benchmark measures allocator performance when almost all
+// frameworks are suppressed.
+TEST_P(HierarchicalAllocator_BENCHMARK_Test, ExtremeSuppressOffers)
+{
+  size_t agentCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
+
+  // Pause the clock because we want to manually drive the allocations.
+  Clock::pause();
+
+  struct OfferedResources
+  {
+    FrameworkID   frameworkId;
+    SlaveID       slaveId;
+    Resources     resources;
+  };
+
+  vector<OfferedResources> offers;
+
+  auto offerCallback = [&offers](
+      const FrameworkID& frameworkId,
+      const hashmap<string, hashmap<SlaveID, Resources>>& resources_)
+  {
+    foreachkey (const string& role, resources_) {
+      foreachpair (const SlaveID& slaveId,
+                   const Resources& resources,
+                   resources_.at(role)) {
+        offers.push_back(OfferedResources{frameworkId, slaveId, resources});
+      }
+    }
+  };
+
+  cout << "Using " << agentCount << " agents and "
+       << frameworkCount << " frameworks" << endl;
+
+  master::Flags flags;
+  initialize(flags, offerCallback);
+
+  vector<FrameworkInfo> frameworks;
+  frameworks.reserve(frameworkCount);
+
+  Stopwatch watch;
+  watch.start();
+
+  for (size_t i = 0; i < frameworkCount; i++) {
+    frameworks.push_back(createFrameworkInfo({"*"}));
+    allocator->addFramework(frameworks[i].id(), frameworks[i], {}, true);
+  }
+
+  // Wait for all the `addFramework` operations to be processed.
+  Clock::settle();
+
+  watch.stop();
+
+  cout << "Added " << frameworkCount << " frameworks"
+       << " in " << watch.elapsed() << endl;
+
+  vector<SlaveInfo> agents;
+  agents.reserve(agentCount);
+
+  const Resources agentResources = Resources::parse(
+      "cpus:24;mem:4096;disk:4096;ports:[31000-32000]").get();
+
+  // Each agent has a portion of its resources allocated to a single
+  // framework. We round-robin through the frameworks when allocating.
+  Resources allocation = Resources::parse("cpus:16;mem:1024;disk:1024").get();
+
+  Try<::mesos::Value::Ranges> ranges = fragment(createRange(31000, 32000), 16);
+  ASSERT_SOME(ranges);
+  ASSERT_EQ(16, ranges->range_size());
+
+  allocation += createPorts(ranges.get());
+  allocation.allocate("*");
+
+  watch.start();
+
+  for (size_t i = 0; i < agentCount; i++) {
+    agents.push_back(createSlaveInfo(agentResources));
+
+    hashmap<FrameworkID, Resources> used = {
+      {frameworks[i % frameworkCount].id(), allocation}
+    };
+
+    allocator->addSlave(
+        agents[i].id(),
+        agents[i],
+        AGENT_CAPABILITIES(),
+        None(),
+        agents[i].resources(),
+        used);
+  }
+
+  // Wait for all the `addSlave` operations to be processed.
+  Clock::settle();
+
+  watch.stop();
+
+  cout << "Added " << agentCount << " agents"
+       << " in " << watch.elapsed() << endl;
+
+  // Now perform allocations. Each time we trigger an allocation run, we
+  // increase the number of frameworks that are suppressing offers. To
+  // ensure the test can run in a timely manner, we always perform a
+  // fixed number of allocations.
+  //
+  // TODO(jjanco): Parameterize this test by allocationsCount, not an arbitrary
+  // number. Batching reduces loop size, lowering time to test completion.
+  size_t allocationsCount = 5;
+
+  // Suppress offers for 99% of frameworks.
+  size_t suppressCount = static_cast<size_t>(frameworkCount * 0.99);
+  CHECK(suppressCount < frameworkCount);
+
+  for (size_t i = 0; i < suppressCount; i++) {
+    allocator->suppressOffers(frameworks[i].id(), {});
+  }
+
+  for (size_t i = 0; i < allocationsCount; i++) {
+    // Recover resources with no filters because we want to test the
+    // effect of suppression alone.
+    foreach (const OfferedResources& offer, offers) {
+      allocator->recoverResources(
+          offer.frameworkId,
+          offer.slaveId,
+          offer.resources,
+          None());
+    }
+
+    // Wait for all declined offers to be processed.
+    Clock::settle();
+    offers.clear();
+
+    watch.start();
+
+    // Advance the clock and trigger a batch allocation.
+    Clock::advance(flags.allocation_interval);
+    Clock::settle();
+
+    watch.stop();
+
+    cout << "allocate() took " << watch.elapsed()
+         << " to make " << offers.size() << " offers with "
+         << suppressCount << " out of "
+         << frameworkCount << " frameworks suppressing offers"
+         << endl;
+  }
+
+  Clock::resume();
+}
+
+
 // Measures the processing time required for the allocator metrics.
 //
 // TODO(bmahler): Add allocations to this benchmark.
 TEST_P(HierarchicalAllocator_BENCHMARK_Test, Metrics)
 {
-  size_t slaveCount = std::tr1::get<0>(GetParam());
-  size_t frameworkCount = std::tr1::get<1>(GetParam());
+  size_t slaveCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
 
   // Pause the clock because we want to manually drive the allocations.
   Clock::pause();
@@ -5503,8 +5742,8 @@ TEST_P(HierarchicalAllocator_BENCHMARK_Test, Metrics)
 // batching (MESOS-6904).
 TEST_P(HierarchicalAllocator_BENCHMARK_Test, AllocatorBacklog)
 {
-  size_t agentCount = std::tr1::get<0>(GetParam());
-  size_t frameworkCount = std::tr1::get<1>(GetParam());
+  size_t agentCount = std::get<0>(GetParam());
+  size_t frameworkCount = std::get<1>(GetParam());
 
   // Pause the clock because we want to manually drive the allocations.
   Clock::pause();

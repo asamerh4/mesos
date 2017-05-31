@@ -57,7 +57,7 @@
 #include "linux/perf.hpp"
 #endif
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
 #include "linux/routing/utils.hpp"
 #endif
 
@@ -67,7 +67,7 @@
 #include "tests/flags.hpp"
 #include "tests/utils.hpp"
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
 using namespace routing;
 #endif
 
@@ -79,6 +79,7 @@ using std::vector;
 using process::Owned;
 
 using stout::internal::tests::TestFilter;
+
 
 namespace mesos {
 namespace internal {
@@ -264,7 +265,7 @@ class DockerFilter : public TestFilter
 public:
   DockerFilter()
   {
-#ifdef __linux__
+#if defined(__linux__) || defined(__WINDOWS__)
     Try<Owned<Docker>> docker = Docker::create(
         flags.docker,
         flags.docker_socket);
@@ -273,8 +274,8 @@ public:
       dockerError = docker.error();
     }
 #else
-    dockerError = Error("Docker tests not supported on non-Linux systems");
-#endif // __linux__
+    dockerError = Error("Docker tests are not supported on this platform");
+#endif // __linux__ || __WINDOWS__
 
     if (dockerError.isSome()) {
       std::cerr
@@ -433,7 +434,7 @@ class NetworkIsolatorTestFilter : public TestFilter
 public:
   NetworkIsolatorTestFilter()
   {
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
     Try<Nothing> check = routing::check();
     if (check.isError()) {
       std::cerr
@@ -451,7 +452,7 @@ public:
   {
     if (matches(test, "PortMappingIsolatorTest") ||
         matches(test, "PortMappingMesosTest")) {
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
       return !portMappingError.isNone();
 #else
       return true;
@@ -617,8 +618,8 @@ public:
   bool disable(const ::testing::TestInfo* test) const
   {
 #ifdef __WINDOWS__
-    // On Windows, `root` does not exist, so we cannot run `ROOT_` tests.
-    return matches(test, "ROOT_");
+    // On Windows, tests are expected to be run as Administrator.
+    return false;
 #else
     Result<string> user = os::user();
     CHECK_SOME(user);
@@ -716,16 +717,9 @@ void Environment::SetUp()
     os::setenv("MESOS_NATIVE_JAVA_LIBRARY", path);
   }
 
-  // TODO(hausdorff): Revisit whether we need this check when we complete work
-  // to light up Agent tests on Windows (see epic tracking this work at
-  // MESOS-6695). As we incrementally add tests to the Windows build, we will
-  // add this check to the tests that need it; eventually, the goal is to get
-  // rid of this altogether. See MESOS-5903.
-#ifndef __WINDOWS__
-  if (!GTEST_IS_THREADSAFE) {
-    EXIT(EXIT_FAILURE) << "Testing environment is not thread safe, bailing!";
-  }
-#endif // __WINDOWS__
+#if !GTEST_IS_THREADSAFE
+  EXIT(EXIT_FAILURE) << "Testing environment is not thread safe, bailing!";
+#endif // !GTEST_IS_THREADSAFE
 }
 
 

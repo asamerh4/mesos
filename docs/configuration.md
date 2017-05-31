@@ -1451,6 +1451,17 @@ shutting it down (e.g., 60secs, 3mins, etc) (default: 1mins)
 </tr>
 <tr>
   <td>
+    --executor_reregistration_timeout=VALUE
+  </td>
+  <td>
+The timeout within which an executor is expected to re-register after
+the agent has restarted, before the agent considers it gone and shuts
+it down. Note that currently, the agent will not re-register with the
+master until this timeout has elapsed (see MESOS-7539). (default: 2secs)
+  </td>
+</tr>
+<tr>
+  <td>
     --max_completed_executors_per_framework
   </td>
   <td>
@@ -2102,6 +2113,23 @@ quotas for container sandbox directories. Valid project IDs range from
       this port will not actually be bound (the local LIBPROCESS_PORT
       will be), so redirection to the local IP and port must be
       provided separately.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      LIBPROCESS_REQUIRE_PEER_ADDRESS_IP_MATCH
+    </td>
+    <td>
+      If set, the IP address portion of the libprocess UPID in
+      incoming messages is required to match the IP address
+      of the socket from which the message was sent. This can be a
+      security enhancement since it prevents unauthorized senders
+      impersonating other libprocess actors. This check may
+      break configurations that require setting LIBPROCESS_IP,
+      or LIBPROCESS_ADVERTISE_IP. Additionally, multi-homed
+      configurations may be affected since the address on
+      which libprocess is listening may not match the address from
+      which libprocess connects to other actors.
     </td>
   </tr>
   <tr>

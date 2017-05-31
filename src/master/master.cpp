@@ -2173,7 +2173,7 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
     // A different node has been elected as the leading master.
     LOG(INFO) << "The newly elected leader is "
               << (leader.isSome()
-                  ? (leader.get().pid() + " with id " + leader.get().id())
+                  ? (leader->pid() + " with id " + leader->id())
                   : "None");
 
     if (wasElected) {
@@ -5060,7 +5060,7 @@ void Master::kill(Framework* framework, const scheduler::Call::Kill& kill)
     return;
   }
 
-  if (slaveId.isSome() && !(slaveId.get() == task->slave_id())) {
+  if (slaveId.isSome() && slaveId.get() != task->slave_id()) {
     LOG(WARNING) << "Cannot kill task " << taskId << " of agent "
                  << slaveId.get() << " of framework " << *framework
                  << " because it belongs to different agent "
@@ -5475,6 +5475,7 @@ void Master::_registerSlave(
 
   if (authorizationError.isSome()) {
     LOG(WARNING) << "Refusing registration of agent at " << pid
+                 << " (" << slaveInfo.hostname() << ")"
                  << ": " << authorizationError.get();
 
     ShutdownMessage message;
@@ -5484,6 +5485,9 @@ void Master::_registerSlave(
     slaves.registering.erase(pid);
     return;
   }
+
+  VLOG(1) << "Authorized registration of agent at " << pid
+          << " (" << slaveInfo.hostname() << ")";
 
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
@@ -5608,6 +5612,9 @@ void Master::__registerSlave(
     return;
   }
 
+  VLOG(1) << "Admitted agent " << slaveInfo.id() << " at " << pid
+          << " (" << slaveInfo.hostname() << ")";
+
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
   machineId.set_ip(stringify(pid.address.ip));
@@ -5687,6 +5694,14 @@ void Master::reregisterSlave(
     return;
   }
 
+  if (slaves.reregistering.contains(slaveInfo.id())) {
+    LOG(INFO)
+      << "Ignoring re-register agent message from agent "
+      << slaveInfo.id() << " at " << from << " ("
+      << slaveInfo.hostname() << ") as re-registration is already in progress";
+    return;
+  }
+
   Option<Error> error = validation::master::message::reregisterSlave(
       slaveInfo, tasks, checkpointedResources, executorInfos, frameworks);
 
@@ -5694,14 +5709,6 @@ void Master::reregisterSlave(
     LOG(WARNING) << "Dropping re-registration of agent at " << from
                  << " because it sent an invalid re-registration: "
                  << error->message;
-    return;
-  }
-
-  if (slaves.reregistering.contains(slaveInfo.id())) {
-    LOG(INFO)
-      << "Ignoring re-register agent message from agent "
-      << slaveInfo.id() << " at " << from << " ("
-      << slaveInfo.hostname() << ") as re-registration is already in progress";
     return;
   }
 
@@ -5762,7 +5769,8 @@ void Master::_reregisterSlave(
   }
 
   if (authorizationError.isSome()) {
-    LOG(WARNING) << "Refusing re-registration of agent at " << pid
+    LOG(WARNING) << "Refusing re-registration of agent " << slaveInfo.id()
+                 << " at " << pid << " (" << slaveInfo.hostname() << ")"
                  << ": " << authorizationError.get();
 
     ShutdownMessage message;
@@ -5772,6 +5780,9 @@ void Master::_reregisterSlave(
     slaves.reregistering.erase(slaveInfo.id());
     return;
   }
+
+  VLOG(1) << "Authorized re-registration of agent " << slaveInfo.id()
+          << " at " << pid << " (" << slaveInfo.hostname() << ")";
 
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
@@ -5941,7 +5952,8 @@ void Master::__reregisterSlave(
   // `MarkSlaveReachable` registry operation should never fail.
   CHECK(readmit.get());
 
-  // Re-admission succeeded.
+  VLOG(1) << "Re-admitted agent " << slaveInfo.id() << " at " << pid
+          << " (" << slaveInfo.hostname() << ")";
 
   // Ensure we don't remove the slave for not re-registering after
   // we've recovered it from the registry.
@@ -7203,7 +7215,7 @@ void Master::offer(
         continue;
       }
 
-  #ifdef WITH_NETWORK_ISOLATOR
+  #ifdef ENABLE_PORT_MAPPING_ISOLATOR
       // TODO(dhamon): This flag is required as the static allocation of
       // ephemeral ports leads to a maximum number of containers that can
       // be created on each slave. Once MESOS-1654 is fixed and ephemeral
@@ -7225,7 +7237,7 @@ void Master::offer(
           continue;
         }
       }
-  #endif // WITH_NETWORK_ISOLATOR
+  #endif // ENABLE_PORT_MAPPING_ISOLATOR
 
       // TODO(vinod): Split regular and revocable resources into
       // separate offers, so that rescinding offers with revocable

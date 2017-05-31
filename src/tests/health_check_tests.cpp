@@ -318,6 +318,9 @@ TEST_F(HealthCheckTest, HealthyTask)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -473,6 +476,9 @@ TEST_F(HealthCheckTest, ROOT_HealthyTaskWithContainerImage)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -520,7 +526,7 @@ TEST_F(HealthCheckTest, ROOT_HealthyTaskWithContainerImage)
 
 // This test creates a healthy task using the Docker executor and
 // verifies that the healthy status is reported to the scheduler.
-TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
 {
   Shared<Docker> docker(new MockDocker(
       tests::flags.docker, tests::flags.docker_socket));
@@ -539,7 +545,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
 
   slave::Flags agentFlags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(agentFlags);
 
   Try<ContainerLogger*> logger =
     ContainerLogger::create(agentFlags.container_logger);
@@ -591,7 +597,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
       containerInfo);
 
   Future<ContainerID> containerId;
-  EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
     .WillOnce(DoAll(FutureArg<0>(&containerId),
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
@@ -612,6 +618,9 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -694,6 +703,9 @@ TEST_F(HealthCheckTest, HealthyTaskNonShell)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->healthy());
 
   driver.stop();
@@ -703,7 +715,7 @@ TEST_F(HealthCheckTest, HealthyTaskNonShell)
 
 // This test creates a task whose health flaps, and verifies that the
 // health status updates are sent to the framework scheduler.
-TEST_F(HealthCheckTest, HealthStatusChange)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(HealthCheckTest, HealthStatusChange)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -759,14 +771,23 @@ TEST_F(HealthCheckTest, HealthStatusChange)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->healthy());
 
   AWAIT_READY(statusUnhealthy);
   EXPECT_EQ(TASK_RUNNING, statusUnhealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusUnhealthy->reason());
   EXPECT_FALSE(statusUnhealthy->healthy());
 
   AWAIT_READY(statusHealthyAgain);
   EXPECT_EQ(TASK_RUNNING, statusHealthyAgain->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthyAgain->reason());
   EXPECT_TRUE(statusHealthyAgain->healthy());
 
   driver.stop();
@@ -777,7 +798,8 @@ TEST_F(HealthCheckTest, HealthStatusChange)
 // This test creates a task that uses the Docker executor and whose
 // health flaps. It then verifies that the health status updates are
 // sent to the framework scheduler.
-TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
 {
   Shared<Docker> docker(new MockDocker(
       tests::flags.docker, tests::flags.docker_socket));
@@ -796,7 +818,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
 
   slave::Flags agentFlags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(agentFlags);
 
   Try<ContainerLogger*> logger =
     ContainerLogger::create(agentFlags.container_logger);
@@ -867,7 +889,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
       containerInfo);
 
   Future<ContainerID> containerId;
-  EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
     .WillOnce(DoAll(FutureArg<0>(&containerId),
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
@@ -891,14 +913,23 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
 
   AWAIT_READY(statusUnhealthy);
   EXPECT_EQ(TASK_RUNNING, statusUnhealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusUnhealthy->reason());
   EXPECT_FALSE(statusUnhealthy->healthy());
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->healthy());
 
   AWAIT_READY(statusUnhealthyAgain);
   EXPECT_EQ(TASK_RUNNING, statusUnhealthyAgain->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusUnhealthyAgain->reason());
   EXPECT_FALSE(statusUnhealthyAgain->healthy());
 
   // Check the temporary file created in host still
@@ -983,18 +1014,30 @@ TEST_F(HealthCheckTest, ConsecutiveFailures)
 
   AWAIT_READY(status1);
   EXPECT_EQ(TASK_RUNNING, status1->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      status1->reason());
   EXPECT_FALSE(status1->healthy());
 
   AWAIT_READY(status2);
   EXPECT_EQ(TASK_RUNNING, status2->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      status2->reason());
   EXPECT_FALSE(status2->healthy());
 
   AWAIT_READY(status3);
   EXPECT_EQ(TASK_RUNNING, status3->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      status3->reason());
   EXPECT_FALSE(status3->healthy());
 
   AWAIT_READY(status4);
   EXPECT_EQ(TASK_RUNNING, status4->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      status4->reason());
   EXPECT_FALSE(status4->healthy());
 
   AWAIT_READY(statusKilled);
@@ -1054,6 +1097,9 @@ TEST_F(HealthCheckTest, EnvironmentSetup)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->healthy());
 
   driver.stop();
@@ -1170,6 +1216,9 @@ TEST_F(HealthCheckTest, CheckCommandTimeout)
 
   AWAIT_READY(statusUnhealthy);
   EXPECT_EQ(TASK_RUNNING, statusUnhealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusUnhealthy->reason());
   EXPECT_FALSE(statusUnhealthy->healthy());
 
   AWAIT_READY(statusKilled);
@@ -1239,11 +1288,17 @@ TEST_F(HealthCheckTest, HealthyToUnhealthyTransitionWithinGracePeriod)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
   AWAIT_READY(statusUnhealthy);
   EXPECT_EQ(TASK_RUNNING, statusUnhealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusUnhealthy->reason());
   EXPECT_TRUE(statusUnhealthy->has_healthy());
   EXPECT_FALSE(statusUnhealthy->healthy());
 
@@ -1323,6 +1378,9 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(HealthCheckTest, HealthyTaskViaHTTP)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1408,6 +1466,9 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(HealthCheckTest, HealthyTaskViaHTTPWithoutType)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1485,6 +1546,9 @@ TEST_F(HealthCheckTest, HealthyTaskViaTCP)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1570,6 +1634,9 @@ TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaHTTPWithContainerImage)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1658,6 +1725,9 @@ TEST_F(HealthCheckTest,
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1747,6 +1817,9 @@ TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaTCPWithContainerImage)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1757,7 +1830,8 @@ TEST_F(HealthCheckTest, ROOT_INTERNET_CURL_HealthyTaskViaTCPWithContainerImage)
 
 // Tests a healthy docker task via HTTP. To emulate a task responsive
 // to HTTP health checks, starts Netcat in the docker "alpine" image.
-TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
 {
   Shared<Docker> docker(new MockDocker(
       tests::flags.docker, tests::flags.docker_socket));
@@ -1767,7 +1841,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
 
   slave::Flags agentFlags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(agentFlags);
 
   Try<ContainerLogger*> logger =
     ContainerLogger::create(agentFlags.container_logger);
@@ -1832,7 +1906,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
   task.mutable_health_check()->CopyFrom(healthCheck);
 
   Future<ContainerID> containerId;
-  EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
     .WillOnce(DoAll(FutureArg<0>(&containerId),
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
@@ -1854,6 +1928,9 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -1884,7 +1961,8 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTP)
 // Tests a healthy docker task via HTTPS. To emulate a task responsive
 // to HTTPS health checks, starts an HTTPS server in the docker
 // "haosdent/https-server" image.
-TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
 {
   Shared<Docker> docker(new MockDocker(
       tests::flags.docker, tests::flags.docker_socket));
@@ -1894,7 +1972,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
 
   slave::Flags agentFlags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(agentFlags);
 
   Try<ContainerLogger*> logger =
     ContainerLogger::create(agentFlags.container_logger);
@@ -1961,7 +2039,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
   task.mutable_health_check()->CopyFrom(healthCheck);
 
   Future<ContainerID> containerId;
-  EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
     .WillOnce(DoAll(FutureArg<0>(&containerId),
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
@@ -1984,6 +2062,9 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -2016,7 +2097,8 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaHTTPS)
 //
 // NOTE: This test is almost identical to ROOT_DOCKER_DockerHealthyTaskViaHTTP
 // with the difference being TCP health check.
-TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaTCP)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaTCP)
 {
   Shared<Docker> docker(new MockDocker(
       tests::flags.docker, tests::flags.docker_socket));
@@ -2026,7 +2108,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaTCP)
 
   slave::Flags agentFlags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(agentFlags);
 
   Try<ContainerLogger*> logger =
     ContainerLogger::create(agentFlags.container_logger);
@@ -2091,7 +2173,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaTCP)
   task.mutable_health_check()->CopyFrom(healthCheck);
 
   Future<ContainerID> containerId;
-  EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
     .WillOnce(DoAll(FutureArg<0>(&containerId),
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
@@ -2113,6 +2195,9 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTaskViaTCP)
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy->has_healthy());
   EXPECT_TRUE(statusHealthy->healthy());
 
@@ -2162,7 +2247,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   flags.acls = acls;
 #endif // USE_SSL_SOCKET
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command health
@@ -2247,6 +2332,9 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   AWAIT_READY(statusHealthy);
   EXPECT_EQ(TASK_RUNNING, statusHealthy.get().state());
+  EXPECT_EQ(
+      TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      statusHealthy->reason());
   EXPECT_TRUE(statusHealthy.get().has_healthy());
   EXPECT_TRUE(statusHealthy.get().healthy());
 

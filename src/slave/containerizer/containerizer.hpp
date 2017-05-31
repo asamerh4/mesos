@@ -22,6 +22,8 @@
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 
+#include <mesos/secret/resolver.hpp>
+
 #include <mesos/slave/containerizer.hpp>
 
 #include <process/future.hpp>
@@ -60,7 +62,8 @@ public:
   static Try<Containerizer*> create(
       const Flags& flags,
       bool local,
-      Fetcher* fetcher);
+      Fetcher* fetcher,
+      SecretResolver* secretResolver = nullptr);
 
   // Determine slave resources from flags, probing the system or
   // querying a delegate.
@@ -78,34 +81,20 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state) = 0;
 
-  // Launch a containerized task/executor. Returns true if launching
-  // this TaskInfo/ExecutorInfo is supported and it has been launched,
-  // otherwise false or a failure if something went wrong.
-  virtual process::Future<bool> launch(
-      const ContainerID& containerId,
-      const Option<TaskInfo>& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const std::map<std::string, std::string>& environment,
-      bool checkpoint) = 0;
-
-  // Launch a nested container.
-  // TODO(jieyu): Consider combining with the 'launch' above.
+  // Launch a container with the specified ContainerConfig.
   //
-  // TODO(gilbert): Remove the 'slaveId' once the fetcher does
-  // not rely on SlaveID.
+  // If the ContainerID has a parent, this will attempt to launch
+  // a nested container.
+  // NOTE: For nested containers, the required `directory` field of
+  // the ContainerConfig will be determined by the containerizer.
+  //
+  // Returns true if launching this container is supported and it has
+  // been launched, otherwise false or a failure if something went wrong.
   virtual process::Future<bool> launch(
       const ContainerID& containerId,
-      const CommandInfo& commandInfo,
-      const Option<ContainerInfo>& containerInfo,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const Option<mesos::slave::ContainerClass>& containerClass = None())
-  {
-    return process::Failure("Unsupported");
-  }
+      const mesos::slave::ContainerConfig& containerConfig,
+      const std::map<std::string, std::string>& environment,
+      const Option<std::string>& pidCheckpointPath) = 0;
 
   // Create an HTTP connection that can be used to "attach" (i.e.,
   // stream input to or stream output from) a container.

@@ -159,6 +159,7 @@ ExternalProject_Add(
   BUILD_COMMAND     ${CMAKE_NOOP}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${BOOST_URL}
+  URL_HASH          ${BOOST_HASH}
   )
 
 ExternalProject_Add(
@@ -168,6 +169,7 @@ ExternalProject_Add(
   BUILD_COMMAND     ${CMAKE_NOOP}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${ELFIO_URL}
+  URL_HASH          ${ELFIO_HASH}
   )
 
 # The patch, configure, build, and install commands are stubbed out on Windows
@@ -183,7 +185,7 @@ ExternalProject_Add(
   BUILD_COMMAND     ${GLOG_BUILD_CMD}
   INSTALL_COMMAND   ${GLOG_INSTALL_CMD}
   URL               ${GLOG_URL}
-  DOWNLOAD_NAME     glog-${GLOG_VERSION}.tar.gz
+  URL_HASH          ${GLOG_HASH}
   )
 
 ExternalProject_Add(
@@ -193,6 +195,7 @@ ExternalProject_Add(
   BUILD_COMMAND     ${CMAKE_NOOP}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${PICOJSON_URL}
+  URL_HASH          ${PICOJSON_HASH}
   )
 
 ExternalProject_Add(
@@ -202,6 +205,7 @@ ExternalProject_Add(
   BUILD_COMMAND     ${CMAKE_NOOP}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${NVML_URL}
+  URL_HASH          ${NVML_HASH}
   )
 
 ExternalProject_Add(
@@ -211,6 +215,7 @@ ExternalProject_Add(
   PATCH_COMMAND     ${HTTP_PARSER_PATCH_CMD}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${HTTP_PARSER_URL}
+  URL_HASH          ${HTTP_PARSER_HASH}
   )
 
 if (NOT ENABLE_LIBEVENT)
@@ -222,6 +227,7 @@ if (NOT ENABLE_LIBEVENT)
     BUILD_COMMAND     ${LIBEV_BUILD_CMD}
     INSTALL_COMMAND   ${LIBEV_INSTALL_CMD}
     URL               ${LIBEV_URL}
+    URL_HASH          ${LIBEV_HASH}
     )
 elseif (ENABLE_LIBEVENT)
   ExternalProject_Add(
@@ -230,6 +236,7 @@ elseif (ENABLE_LIBEVENT)
     CMAKE_ARGS      ${LIBEVENT_CMAKE_ARGS}
     INSTALL_COMMAND ${LIBEVENT_INSTALL_CMD}
     URL             ${LIBEVENT_URL}
+    URL_HASH        ${LIBEVENT_HASH}
     )
 endif (NOT ENABLE_LIBEVENT)
 
@@ -240,6 +247,7 @@ if (WIN32)
     CMAKE_ARGS      -DBUILD_SHARED_LIBS=OFF
     INSTALL_COMMAND ${LIBAPR_INSTALL_CMD}
     URL             ${LIBAPR_URL}
+    URL_HASH        ${LIBAPR_HASH}
     )
 endif (WIN32)
 
@@ -257,6 +265,7 @@ if (WIN32)
     BUILD_COMMAND     msbuild /p:RuntimeLibrary=MT_StaticDebug lib/libcurl.vcxproj
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${CURL_URL}
+    URL_HASH          ${CURL_HASH}
   )
 
   ExternalProject_Add(
@@ -266,6 +275,7 @@ if (WIN32)
     BUILD_COMMAND   ${GLOG_BUILD_CMD}
     INSTALL_COMMAND ${CMAKE_NOOP}
     URL             ${ZLIB_URL}
+    URL_HASH        ${ZLIB_HASH}
   )
 endif (WIN32)
 
@@ -282,25 +292,18 @@ list(
 include(StoutConfigure)
 include(StoutTestsConfigure)
 
-set(GMOCK_URL    ${FETCH_URL}/gmock-${GMOCK_VERSION}.tar.gz)
-# NOTE: The Windows version of protobuf is patched and only available in the
-# 3rdparty repo, not the local repo.
-if (NOT WIN32)
-  set(PROTOBUF_URL ${FETCH_URL}/protobuf-${PROTOBUF_VERSION}.tar.gz)
-elseif (WIN32)
-  set(PROTOBUF_URL ${3RDPARTY_DEPENDENCIES}/protobuf-${PROTOBUF_VERSION}.tar.gz)
-endif (NOT WIN32)
+set(GOOGLETEST_URL ${FETCH_URL}/googletest-release-${GOOGLETEST_VERSION}.tar.gz)
+set(PROTOBUF_URL ${FETCH_URL}/protobuf-${PROTOBUF_VERSION}.tar.gz)
 
-# NOTE: `gmock` is "installed" into a lib directory, see "NOTE: (fix for
+# NOTE: `googletest` is "installed" into a lib directory, see "NOTE: (fix for
 # MESOS-3250)" comment above for explanation.
 if (NOT WIN32)
-  set(GMOCK_INSTALL_CMD mkdir -p ${GMOCK_ROOT}-lib/lib && cp -r ${GMOCK_ROOT}-build/. ${GMOCK_ROOT}-lib/lib && cp -r ${GMOCK_ROOT}-build/gtest/. ${GMOCK_ROOT}-lib/lib)
+  set(GOOGLETEST_INSTALL_CMD mkdir -p ${GOOGLETEST_ROOT}-lib/lib && cp -r ${GOOGLETEST_ROOT}-build/googlemock/. ${GOOGLETEST_ROOT}-lib/lib)
 elseif (WIN32)
-  set(GMOCK_INSTALL_CMD ${CMAKE_NOOP})
+  set(GOOGLETEST_INSTALL_CMD ${CMAKE_NOOP})
 endif (NOT WIN32)
 
 if (NOT WIN32)
-  PATCH_CMD(${MESOS_3RDPARTY_SRC}/protobuf-${PROTOBUF_VERSION}.patch PROTOBUF_PATCH_CMD)
   set(PROTOBUF_CONFIG_CMD  ${PROTOBUF_ROOT}/src/../configure --prefix=${PROTOBUF_LIB_ROOT})
   set(PROTOBUF_BUILD_CMD   make)
   set(PROTOBUF_INSTALL_CMD make install)
@@ -313,28 +316,29 @@ endif (NOT WIN32)
 # NOTE: An implicit consequence of the following code is that on non-Windows
 # platforms, gmock and gtest are assumed to be CMake projects, and are thus
 # configured and built using default CMake commands. The reason is that on
-# non-Windows platforms, we choose to set `GMOCK_CONFIG_CMD` and
-# `GMOCK_BUILD_CMD` with stub commands, which cause CMake to "fall back" to
+# non-Windows platforms, we choose to set `GOOGLETEST_CONFIG_CMD` and
+# `GOOGLETEST_BUILD_CMD` with stub commands, which cause CMake to "fall back" to
 # trying to build them with CMake.
 ExternalProject_Add(
-  ${GMOCK_TARGET}
-  PREFIX            ${GMOCK_CMAKE_ROOT}
+  ${GOOGLETEST_TARGET}
+  PREFIX            ${GOOGLETEST_CMAKE_ROOT}
   CMAKE_ARGS        -DBUILD_SHARED_LIBS=FALSE
-  CONFIGURE_COMMAND ${GMOCK_CONFIG_CMD}
-  BUILD_COMMAND     ${GMOCK_BUILD_CMD}
-  INSTALL_COMMAND   ${GMOCK_INSTALL_CMD}
-  URL               ${GMOCK_URL}
+  CONFIGURE_COMMAND ${GOOGLETEST_CONFIG_CMD}
+  BUILD_COMMAND     ${GOOGLETEST_BUILD_CMD}
+  INSTALL_COMMAND   ${GOOGLETEST_INSTALL_CMD}
+  URL               ${GOOGLETEST_URL}
+  URL_HASH          ${GOOGLETEST_HASH}
   )
 
 ExternalProject_Add(
   ${PROTOBUF_TARGET}
   PREFIX            ${PROTOBUF_CMAKE_ROOT}
   CMAKE_ARGS        -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS} -DCMAKE_CXX_FLAGS_DEBUG="/MTd"
-  PATCH_COMMAND     ${PROTOBUF_PATCH_CMD}
   CONFIGURE_COMMAND ${PROTOBUF_CONFIG_CMD}
   BUILD_COMMAND     ${PROTOBUF_BUILD_CMD}
   INSTALL_COMMAND   ${PROTOBUF_INSTALL_CMD}
   URL               ${PROTOBUF_URL}
+  URL_HASH          ${PROTOBUF_HASH}
   )
 
 
@@ -384,6 +388,7 @@ if (NOT WIN32)
     BUILD_COMMAND     cd ${ZOOKEEPER_C_ROOT} && make
     INSTALL_COMMAND   cd ${ZOOKEEPER_C_ROOT} && make install
     URL               ${ZOOKEEPER_URL}
+    URL_HASH          ${ZOOKEEPER_HASH}
     )
 elseif (WIN32)
   ExternalProject_Add(
@@ -398,6 +403,7 @@ elseif (WIN32)
     CMAKE_ARGS        -DWANT_CPPUNIT=0
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${ZOOKEEPER_URL}
+    URL_HASH          ${ZOOKEEPER_HASH}
     )
 endif (NOT WIN32)
 
@@ -417,5 +423,6 @@ if (NOT WIN32)
     BUILD_COMMAND     ${LEVELDB_BUILD_CMD}
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${LEVELDB_URL}
+    URL_HASH          ${LEVELDB_HASH}
     )
 endif (NOT WIN32)

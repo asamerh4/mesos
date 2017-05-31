@@ -605,6 +605,54 @@ TEST(SorterTest, HierarchicalAllocation)
 }
 
 
+// This test checks that the sorted list of clients returned by the
+// sorter iterates over the client tree in the correct order.
+TEST(SorterTest, HierarchicalIterationOrder)
+{
+  DRFSorter sorter;
+
+  SlaveID slaveId;
+  slaveId.set_value("agentId");
+
+  Resources totalResources = Resources::parse("cpus:100;mem:100").get();
+  sorter.add(slaveId, totalResources);
+
+  sorter.add("a/b");
+  sorter.add("c");
+  sorter.add("d");
+  sorter.add("d/e");
+
+  sorter.activate("a/b");
+  sorter.activate("c");
+  sorter.activate("d");
+  sorter.activate("d/e");
+
+  // Shares: a/b = 0, c = 0, d = 0, d/e = 0
+  EXPECT_EQ(vector<string>({"a/b", "c", "d", "d/e"}), sorter.sort());
+
+  Resources cResources = Resources::parse("cpus:8;mem:8").get();
+  sorter.allocated("c", slaveId, cResources);
+
+  // Shares: a/b = 0, d = 0, d/e = 0, c = 0.08.
+  EXPECT_EQ(vector<string>({"a/b", "d", "d/e", "c"}), sorter.sort());
+
+  Resources dResources = Resources::parse("cpus:3;mem:3").get();
+  sorter.allocated("d", slaveId, dResources);
+
+  Resources deResources = Resources::parse("cpus:2;mem:2").get();
+  sorter.allocated("d/e", slaveId, deResources);
+
+  // Shares: a/b = 0, d/e = 0.02, d = 0.03, c = 0.08.
+  EXPECT_EQ(vector<string>({"a/b", "d/e", "d", "c"}), sorter.sort());
+
+  Resources abResources = Resources::parse("cpus:6;mem:6").get();
+  sorter.allocated("a/b", slaveId, abResources);
+
+  // Shares: d/e = 0.02, d = 0.03, a/b = 0.06, c = 0.08.
+  EXPECT_EQ(vector<string>({"d/e", "d", "a/b", "c"}), sorter.sort());
+}
+
+
 // This test checks what happens when a new sorter client is added as
 // a child of what was previously a leaf node.
 TEST(SorterTest, AddChildToLeaf)
@@ -986,6 +1034,43 @@ TEST(SorterTest, UpdateAllocationNestedClient)
   EXPECT_EQ(1u, allocation.size());
   EXPECT_EQ(newAllocation.get(), allocation.at(slaveId));
   EXPECT_EQ(newAllocation.get(), sorter.allocation("a/x", slaveId));
+}
+
+
+// This test checks that the sorter correctly reports allocation
+// information about inactive clients.
+TEST(SorterTest, AllocationForInactiveClient)
+{
+  DRFSorter sorter;
+
+  SlaveID slaveId;
+  slaveId.set_value("agentId");
+
+  sorter.add(slaveId, Resources::parse("cpus:10;mem:10").get());
+
+  sorter.add("a");
+  sorter.add("b");
+
+  // Leave client "a" inactive.
+  sorter.activate("b");
+
+  sorter.allocated("a", slaveId, Resources::parse("cpus:2;mem:2").get());
+  sorter.allocated("b", slaveId, Resources::parse("cpus:3;mem:3").get());
+
+  hashmap<string, Resources> clientAllocation = sorter.allocation(slaveId);
+  EXPECT_EQ(2u, clientAllocation.size());
+  EXPECT_EQ(Resources::parse("cpus:2;mem:2").get(), clientAllocation.at("a"));
+  EXPECT_EQ(Resources::parse("cpus:3;mem:3").get(), clientAllocation.at("b"));
+
+  hashmap<SlaveID, Resources> agentAllocation1 = sorter.allocation("a");
+  EXPECT_EQ(1u, agentAllocation1.size());
+  EXPECT_EQ(
+      Resources::parse("cpus:2;mem:2").get(), agentAllocation1.at(slaveId));
+
+  hashmap<SlaveID, Resources> agentAllocation2 = sorter.allocation("b");
+  EXPECT_EQ(1u, agentAllocation2.size());
+  EXPECT_EQ(
+      Resources::parse("cpus:3;mem:3").get(), agentAllocation2.at(slaveId));
 }
 
 
@@ -1467,7 +1552,7 @@ TEST(SorterTest, RemoveSharedResources)
 
 class Sorter_BENCHMARK_Test
   : public ::testing::Test,
-    public ::testing::WithParamInterface<std::tr1::tuple<size_t, size_t>> {};
+    public ::testing::WithParamInterface<std::tuple<size_t, size_t>> {};
 
 
 // The sorter benchmark tests are parameterized by
@@ -1485,8 +1570,8 @@ INSTANTIATE_TEST_CASE_P(
 // different amount of allocations.
 TEST_P(Sorter_BENCHMARK_Test, FullSort)
 {
-  size_t agentCount = std::tr1::get<0>(GetParam());
-  size_t clientCount = std::tr1::get<1>(GetParam());
+  size_t agentCount = std::get<0>(GetParam());
+  size_t clientCount = std::get<1>(GetParam());
 
   cout << "Using " << agentCount << " agents and "
        << clientCount << " clients" << endl;
@@ -1617,7 +1702,7 @@ TEST_P(Sorter_BENCHMARK_Test, FullSort)
 class HierarchicalSorter_BENCHMARK_Test
   : public ::testing::Test,
     public ::testing::WithParamInterface<
-        std::tr1::tuple<size_t, std::tr1::tuple<size_t, size_t>>> {};
+        std::tuple<size_t, std::tuple<size_t, size_t>>> {};
 
 
 INSTANTIATE_TEST_CASE_P(
@@ -1627,9 +1712,9 @@ INSTANTIATE_TEST_CASE_P(
       ::testing::Values(1000U, 5000U, 10000U, 20000U, 30000U, 50000U),
       ::testing::Values(
           // ~1000 clients with different heights and branching factors.
-          std::tr1::tuple<size_t, size_t>{3U, 32U},   // 1056 clients.
-          std::tr1::tuple<size_t, size_t>{7U, 3U},    // 1092 clients.
-          std::tr1::tuple<size_t, size_t>{10U, 2U}))  // 1022 clients.
+          std::tuple<size_t, size_t>{3U, 32U},   // 1056 clients.
+          std::tuple<size_t, size_t>{7U, 3U},    // 1092 clients.
+          std::tuple<size_t, size_t>{10U, 2U}))  // 1022 clients.
     );
 
 
@@ -1640,10 +1725,10 @@ INSTANTIATE_TEST_CASE_P(
 // of each internal node).
 TEST_P(HierarchicalSorter_BENCHMARK_Test, FullSort)
 {
-  const size_t agentCount = std::tr1::get<0>(GetParam());
-  const std::tr1::tuple<size_t, size_t> tuple = std::tr1::get<1>(GetParam());
-  const size_t treeHeight = std::tr1::get<0>(tuple);
-  const size_t branchingFactor = std::tr1::get<1>(tuple);
+  const size_t agentCount = std::get<0>(GetParam());
+  const std::tuple<size_t, size_t> tuple = std::get<1>(GetParam());
+  const size_t treeHeight = std::get<0>(tuple);
+  const size_t branchingFactor = std::get<1>(tuple);
 
   vector<SlaveID> agents;
   agents.reserve(agentCount);

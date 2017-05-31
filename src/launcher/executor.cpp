@@ -345,7 +345,7 @@ protected:
         None(),
         None(),
         None(),
-        None(),
+        TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
         None(),
         healthStatus.healthy());
 
@@ -587,6 +587,10 @@ protected:
     if (taskEnvironment.isSome()) {
       foreach (const Environment::Variable& variable,
                taskEnvironment->variables()) {
+        // Skip overwriting if the variable is unresolved secret.
+        if (variable.type() == Environment::Variable::SECRET) {
+          continue;
+        }
         const string& name = variable.name();
         if (environment.contains(name) &&
             environment[name].value() != variable.value()) {
@@ -599,6 +603,10 @@ protected:
     if (command.has_environment()) {
       foreach (const Environment::Variable& variable,
                command.environment().variables()) {
+        // Skip overwriting if the variable is unresolved secret.
+        if (variable.type() == Environment::Variable::SECRET) {
+          continue;
+        }
         const string& name = variable.name();
         if (environment.contains(name) &&
             environment[name].value() != variable.value()) {
@@ -916,6 +924,8 @@ private:
 
     // Indicate that a kill occurred due to a failing health check.
     if (killed && killedByHealthCheck) {
+      // TODO(abudnik): Consider specifying appropriate status update reason,
+      // saying that the task was killed due to a failing health check.
       status.set_healthy(false);
     }
 

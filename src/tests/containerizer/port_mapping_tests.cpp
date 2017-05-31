@@ -1849,8 +1849,6 @@ public:
     ContainerizerTest<MesosContainerizer>::TearDown();
   }
 
-  Fetcher fetcher;
-
   // Name of the host eth0 and lo.
   string eth0;
   string lo;
@@ -1874,6 +1872,8 @@ TEST_F(PortMappingMesosTest, CGROUPS_ROOT_RecoverMixedContainers)
   // is consistent with the launchers we use for other containerizers
   // we create in this test. Also, this will bypass MESOS-2554.
   slaveFlags.isolation = "cgroups/cpu,cgroups/mem";
+
+  Fetcher fetcher(slaveFlags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(slaveFlags, true, &fetcher);
@@ -1962,7 +1962,7 @@ TEST_F(PortMappingMesosTest, CGROUPS_ROOT_RecoverMixedContainers)
   AWAIT_READY(_recover1);
 
   Clock::settle(); // Wait for slave to schedule reregister timeout.
-  Clock::advance(EXECUTOR_REREGISTER_TIMEOUT);
+  Clock::advance(slaveFlags.executor_reregistration_timeout);
 
   AWAIT_READY(slaveReregisteredMessage1);
 
@@ -2011,7 +2011,7 @@ TEST_F(PortMappingMesosTest, CGROUPS_ROOT_RecoverMixedContainers)
   AWAIT_READY(_recover2);
 
   Clock::settle(); // Wait for slave to schedule reregister timeout.
-  Clock::advance(EXECUTOR_REREGISTER_TIMEOUT);
+  Clock::advance(slaveFlags.executor_reregistration_timeout);
 
   AWAIT_READY(slaveReregisteredMessage2);
 
@@ -2048,6 +2048,8 @@ TEST_F(PortMappingMesosTest, CGROUPS_ROOT_CleanUpOrphan)
 
   // NOTE: We add 'cgroups/cpu,cgroups/mem' to bypass MESOS-2554.
   flags.isolation = "cgroups/cpu,cgroups/mem,network/port_mapping";
+
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -2174,6 +2176,8 @@ TEST_F(PortMappingMesosTest, ROOT_NetworkNamespaceHandleSymlink)
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = "network/port_mapping";
 
+  Fetcher fetcher(flags);
+
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
 
@@ -2261,6 +2265,8 @@ TEST_F(PortMappingMesosTest, CGROUPS_ROOT_RecoverMixedKnownAndUnKnownOrphans)
 
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = "network/port_mapping";
+
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);

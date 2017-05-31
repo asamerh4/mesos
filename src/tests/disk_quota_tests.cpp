@@ -291,7 +291,7 @@ TEST_F(DiskQuotaTest, VolumeUsageExceedsQuota)
 
   const Offer& offer = offers.get()[0];
 
-  // Create a task that requests a 1 MB persistent volume but atempts
+  // Create a task that requests a 1 MB persistent volume but attempts
   // to use 2MB.
   Resources volume = createPersistentVolume(
       Megabytes(1),
@@ -354,7 +354,7 @@ TEST_F(DiskQuotaTest, NoQuotaEnforcement)
   flags.container_disk_watch_interval = Milliseconds(1);
   flags.enforce_container_disk_quota = false;
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -455,7 +455,7 @@ TEST_F(DiskQuotaTest, ResourceStatistics)
   // the 'du' subprocess.
   flags.container_disk_watch_interval = Milliseconds(1);
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -609,7 +609,7 @@ TEST_F(DiskQuotaTest, SlaveRecovery)
   flags.isolation = "posix/cpu,posix/mem,disk/du";
   flags.container_disk_watch_interval = Milliseconds(1);
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
@@ -701,7 +701,7 @@ TEST_F(DiskQuotaTest, SlaveRecovery)
   AWAIT_READY(reregisterExecutorMessage);
 
   // Ensure the slave considers itself recovered.
-  Clock::advance(slave::EXECUTOR_REREGISTER_TIMEOUT);
+  Clock::advance(flags.executor_reregistration_timeout);
 
   // NOTE: We resume the clock because we need the reaper to reap the
   // 'du' subprocess.

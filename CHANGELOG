@@ -5,7 +5,9 @@ Release Notes - Mesos - Version 1.3.1 (WIP)
 All Issues:
 ** Bug
   * [MESOS-7429] - Allow isolators to inject task-specific environment variables.
-  * [MESOS-7471] - Provisioner recover should not always assume 'rootfses' dir exists.
+  * [MESOS-7546] - WAIT_NESTED_CONTAINER sometimes returns 404.
+  * [MESOS-7540] - Add an agent flag for executor re-registration timeout.
+  * [MESOS-7569] - Allow "old" executors with half-open connections to be preserved during agent upgrade / restart.
 
 
 Release Notes - Mesos - Version 1.3.0
@@ -31,16 +33,6 @@ This release contains the following new features:
     as that executor and make operator API calls which affect that executor's
     container. See 'docs/authorization.md' for more information on these
     implicit authorization rules.
-
-  * [MESOS-6375] - **Experimental** Support for hierarchical roles. A
-    role can now have one or more "child" roles. This makes it easier to
-    use roles to represent the hierarchical structure commonly found in
-    organizations. Support for hierarchical roles is experimental:
-    currently, quota cannot be set on a nested (child) role, and the
-    behavior of resource reservations for role hierarchies is expected
-    to change (presently, making a reservation to a role reserves the
-    resource for that exact role; in a future Mesos release, this will
-    instead reserve the resource for the sub-tree rooted at the role).
 
   * [MESOS-6627] - Support for frameworks to modify the role(s) they are
     subscribed to. This is essential to supporting "multi-user" frameworks
@@ -123,7 +115,6 @@ All Experimental Features:
   * [MESOS-5931] - Support auto backend in Mesos Containerizer.
   * [MESOS-6014] - Added port mapping CNI plugin.
   * [MESOS-6077] - Added a default (task group) executor.
-  * [MESOS-6375] - **NEW** Support hierarchical resource allocation roles.
   * [MESOS-6402] - rlimit support for Mesos containerizer.
   * [MESOS-6460] - Container Attach/Exec.
   * [MESOS-6758] - Support docker registry that requires basic auth.
@@ -204,11 +195,15 @@ All Resolved Issues:
   * [MESOS-7400] - The mesos master crashes due to an incorrect invariant check in the decoder.
   * [MESOS-7427] - Registry puller cannot fetch manifests from Amazon ECR: 405 Unsupported.
   * [MESOS-7430] - Per-role Suppress call implementation is broken.
+  * [MESOS-7431] - Registry puller cannot fetch manifests from Google GCR: 403 Forbidden.
   * [MESOS-7453] - glyphicons-halflings-regular.woff2 is missing in WebUI.
   * [MESOS-7456] - Compilation error on recent glibc in cgroups device subsystem.
   * [MESOS-7464] - Recent Docker versions cannot be parsed by stout.
+  * [MESOS-7471] - Provisioner recover should not always assume 'rootfses' dir exists.
   * [MESOS-7478] - Pre-1.2.x master does not work with 1.2.x agent.
   * [MESOS-7484] - VersionTest.ParseInvalid aborts on Windows.
+  * [MESOS-7521] - Major performance regression in DRF sorter.
+  * [MESOS-7538] - Don't validate re-registrations that are going to be dropped.
 
 ** Documentation
   * [MESOS-7005] - Add executor authentication documentation.
@@ -291,6 +286,17 @@ All Resolved Issues:
   * [MESOS-7391] - Add deprecation warning for Visual Studio 14 2015.
   * [MESOS-7395] - Benchmark performance of hierarchical roles.
   * [MESOS-7439] - Bump the default timeout value for docker volume driver unmount operation.
+
+
+Release Notes - Mesos - Version 1.2.2
+-------------------------------------------
+* This is a bug fix release.
+
+All Issues:
+** Bug
+  * [MESOS-7540] - Add an agent flag for executor re-registration timeout.
+  * [MESOS-7546] - WAIT_NESTED_CONTAINER sometimes returns 404.
+  * [MESOS-7569] - Allow "old" executors with half-open connections to be preserved during agent upgrade / restart.
 
 
 Release Notes - Mesos - Version 1.2.1
@@ -775,6 +781,16 @@ All Issues:
     * [MESOS-7062] - Add a test for a MULTI_ROLE framework receiving offers for each of its roles.
 
 
+Release Notes - Mesos - Version 1.1.3 (WIP)
+-------------------------------------------
+* This is a bug fix release.
+
+All Issues:
+** Bug
+  * [MESOS-7540] - Add an agent flag for executor re-registration timeout.
+  * [MESOS-7569] - Allow "old" executors with half-open connections to be preserved during agent upgrade / restart.
+
+
 Release Notes - Mesos - Version 1.1.2
 -------------------------------------
 * This is a bug fix release.
@@ -797,6 +813,7 @@ All Issues:
   * [MESOS-7383] - Docker executor logs possibly sensitive parameters.
   * [MESOS-7422] - Docker containerizer should not leak possibly sensitive data to agent log.
   * [MESOS-7471] - Provisioner recover should not always assume 'rootfses' dir exists.
+  * [MESOS-7482] - #elif does not match #ifdef when checking the platform.
 
 
 Release Notes - Mesos - Version 1.1.1

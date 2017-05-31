@@ -45,9 +45,10 @@ include versions.am
 BOOST = boost-$(BOOST_VERSION)
 ELFIO = elfio-$(ELFIO_VERSION)
 GLOG = glog-$(GLOG_VERSION)
-GMOCK = gmock-$(GMOCK_VERSION)
+GOOGLETEST = googletest-release-$(GOOGLETEST_VERSION)
+GMOCK = $(GOOGLETEST)/googlemock
 GPERFTOOLS = gperftools-$(GPERFTOOLS_VERSION)
-GTEST = $(GMOCK)/gtest
+GTEST = $(GOOGLETEST)/googletest
 HTTP_PARSER = http-parser-$(HTTP_PARSER_VERSION)
 LEVELDB = leveldb-$(LEVELDB_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
@@ -63,7 +64,7 @@ EXTRA_DIST =		\
   $(BOOST).tar.gz	\
   $(ELFIO).tar.gz	\
   $(GLOG).tar.gz	\
-  $(GMOCK).tar.gz	\
+  $(GOOGLETEST).tar.gz	\
   $(GPERFTOOLS).tar.gz	\
   $(HTTP_PARSER).tar.gz	\
   $(LEVELDB).tar.gz	\
@@ -94,11 +95,6 @@ EXTRA_DIST +=		\
 EXTRA_DIST +=		\
   $(LIBEV).patch
 
-# We include an upstream patch for protobuf in order to avoid
-# signed/unsigned comparisons.
-EXTRA_DIST +=		\
-  $(PROTOBUF).patch
-
 # We need to patch ZooKeeper in order to get 3.4.8 to compile on PPC LE.
 EXTRA_DIST +=		\
   $(ZOOKEEPER).patch
@@ -107,7 +103,7 @@ CLEAN_EXTRACTED =	\
   $(BOOST)		\
   $(ELFIO)		\
   $(GLOG)		\
-  $(GMOCK)		\
+  $(GOOGLETEST)		\
   $(GPERFTOOLS)		\
   $(HTTP_PARSER)	\
   $(LEVELDB)		\
@@ -277,7 +273,7 @@ libgmock_la_CPPFLAGS =			\
   -I$(GTEST)/include -I$(GTEST) -I$(GTEST)/src	\
   -I$(GMOCK)/include -I$(GMOCK) -I$(GMOCK)/src
 
-  gmock_sources.cc: $(GMOCK)-stamp
+  gmock_sources.cc: $(GOOGLETEST)-stamp
 
 $(GMOCK)-build-stamp: libgmock.la
 	touch $@

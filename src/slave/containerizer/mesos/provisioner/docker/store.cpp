@@ -19,6 +19,10 @@
 
 #include <glog/logging.h>
 
+#include <mesos/docker/spec.hpp>
+
+#include <mesos/secret/resolver.hpp>
+
 #include <stout/hashmap.hpp>
 #include <stout/json.hpp>
 #include <stout/os.hpp>
@@ -27,8 +31,6 @@
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
 #include <process/id.hpp>
-
-#include <mesos/docker/spec.hpp>
 
 #include "slave/containerizer/mesos/provisioner/constants.hpp"
 #include "slave/containerizer/mesos/provisioner/utils.hpp"
@@ -40,13 +42,23 @@
 
 #include "uri/fetcher.hpp"
 
-using namespace process;
-
 namespace spec = docker::spec;
 
 using std::list;
 using std::string;
 using std::vector;
+
+using process::Failure;
+using process::Future;
+using process::Owned;
+using process::Process;
+using process::Promise;
+
+using process::defer;
+using process::dispatch;
+using process::spawn;
+using process::terminate;
+using process::wait;
 
 namespace mesos {
 namespace internal {
@@ -76,6 +88,7 @@ public:
 private:
   Future<Image> _get(
       const spec::ImageReference& reference,
+      const Option<Secret>& config,
       const Option<Image>& image,
       const string& backend);
 
@@ -101,7 +114,9 @@ private:
 };
 
 
-Try<Owned<slave::Store>> Store::create(const Flags& flags)
+Try<Owned<slave::Store>> Store::create(
+    const Flags& flags,
+    SecretResolver* secretResolver)
 {
   // TODO(jieyu): We should inject URI fetcher from top level, instead
   // of creating it here.
@@ -117,7 +132,9 @@ Try<Owned<slave::Store>> Store::create(const Flags& flags)
     return Error("Failed to create the URI fetcher: " + fetcher.error());
   }
 
-  Try<Owned<Puller>> puller = Puller::create(flags, fetcher->share());
+  Try<Owned<Puller>> puller =
+    Puller::create(flags, fetcher->share(), secretResolver);
+
   if (puller.isError()) {
     return Error("Failed to create Docker puller: " + puller.error());
   }
@@ -209,13 +226,21 @@ Future<ImageInfo> StoreProcess::get(
   }
 
   return metadataManager->get(reference.get(), image.cached())
-    .then(defer(self(), &Self::_get, reference.get(), lambda::_1, backend))
+    .then(defer(self(),
+                &Self::_get,
+                reference.get(),
+                image.docker().has_config()
+                  ? image.docker().config()
+                  : Option<Secret>(),
+                lambda::_1,
+                backend))
     .then(defer(self(), &Self::__get, lambda::_1, backend));
 }
 
 
 Future<Image> StoreProcess::_get(
     const spec::ImageReference& reference,
+    const Option<Secret>& config,
     const Option<Image>& image,
     const string& backend)
 {
@@ -263,7 +288,11 @@ Future<Image> StoreProcess::_get(
   if (!pulling.contains(name)) {
     Owned<Promise<Image>> promise(new Promise<Image>());
 
-    Future<Image> future = puller->pull(reference, staging.get(), backend)
+    Future<Image> future = puller->pull(
+        reference,
+        staging.get(),
+        backend,
+        config)
       .then(defer(self(),
                   &Self::moveLayers,
                   staging.get(),

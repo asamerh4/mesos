@@ -18,11 +18,12 @@
 The config plugin.
 """
 
+import os
 import sys
 
-import settings
 import cli
 
+from cli.exceptions import CLIException
 from cli.plugins import PluginBase
 from cli.util import Table
 
@@ -46,6 +47,12 @@ class Config(PluginBase):
             "flags": {},
             "short_help": "Print the plugins that can be used.",
             "long_help": "Print the plugins that can be used."
+        },
+        "show": {
+            "arguments": [],
+            "flags": {},
+            "short_help": "Show the contents of the configuration file.",
+            "long_help": "Show the contents of the configuration file."
         }
     }
 
@@ -59,10 +66,33 @@ class Config(PluginBase):
         plugins_table = Table(["NAME", "DESCRIPTION"])
 
         # Load the plugins
-        loaded_plugins = cli.util.import_modules(settings.PLUGINS, "plugins")
-        for plugin in loaded_plugins:
+        plugins = cli.util.import_modules(
+            cli.util.join_plugin_paths(self.settings, self.config),
+            "plugins")
+
+        for plugin in plugins:
             plugins_table.add_row([
-                cli.util.get_module(loaded_plugins, plugin).PLUGIN_NAME,
-                cli.util.get_module(loaded_plugins, plugin).SHORT_HELP
+                cli.util.get_module(plugins, plugin).PLUGIN_NAME,
+                cli.util.get_module(plugins, plugin).SHORT_HELP
             ])
         sys.stdout.write("{}\n".format(plugins_table))
+
+    def show(self, argv):
+        """
+        Show the contents of the configuration file.
+        """
+        # pylint: disable=unused-argument
+        config_file = self.config.path
+        if not os.path.isfile(config_file):
+            raise CLIException("Unable to show the config file,"
+                               " '{path}' does not exist"
+                               .format(path=config_file))
+
+        with open(config_file, 'r') as stream:
+            try:
+                sys.stdout.write("{stream}\n"
+                                 .format(stream=stream.read().rstrip()))
+            except Exception as exception:
+                raise CLIException("Unable to read config file '{path}':"
+                                   " {error}"
+                                   .format(path=config_file, error=exception))

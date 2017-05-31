@@ -27,6 +27,9 @@
 #include <mesos/mesos.hpp>
 
 #include <mesos/module/anonymous.hpp>
+#include <mesos/module/secret_resolver.hpp>
+
+#include <mesos/secret/resolver.hpp>
 
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -84,6 +87,7 @@ using mesos::slave::QoSController;
 using mesos::slave::ResourceEstimator;
 
 using mesos::Authorizer;
+using mesos::SecretResolver;
 using mesos::SlaveInfo;
 
 using process::Owned;
@@ -180,7 +184,7 @@ static Try<Nothing> assignCgroups(const slave::Flags& flags)
     // isolators/cgroups/perf.cpp. Consider moving ancillary
     // processes to a different cgroup, e.g., moving 'docker log' to
     // the container's cgroup.
-    if (!processes.get().empty()) {
+    if (!processes->empty()) {
       // For each process, we print its pid as well as its command
       // to help triaging.
       vector<string> infos;
@@ -189,7 +193,7 @@ static Try<Nothing> assignCgroups(const slave::Flags& flags)
 
         // Only print the command if available.
         if (proc.isSome()) {
-          infos.push_back(stringify(pid) + " '" + proc.get().command + "'");
+          infos.push_back(stringify(pid) + " '" + proc->command + "'");
         } else {
           infos.push_back(stringify(pid));
         }
@@ -233,7 +237,7 @@ int main(int argc, char** argv)
   //   contender/detector might depend upon anonymous modules.
   // * Hooks.
   // * Systemd support (if it exists).
-  // * Fetcher and Containerizer.
+  // * Fetcher, SecretResolver, and Containerizer.
   // * Master detector.
   // * Authorizer.
   // * Garbage collector.
@@ -264,8 +268,7 @@ int main(int argc, char** argv)
   // TODO(marco): this pattern too should be abstracted away
   // in FlagsBase; I have seen it at least 15 times.
   if (load.isError()) {
-    cerr << flags.usage(load.error()) << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << flags.usage(load.error());
   }
 
   // Check that agent's version has the expected format (SemVer).
@@ -279,15 +282,13 @@ int main(int argc, char** argv)
   }
 
   if (flags.master.isNone() && flags.master_detector.isNone()) {
-    cerr << flags.usage("Missing required option `--master` or "
-                        "`--master_detector`.") << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << flags.usage(
+        "Missing required option `--master` or `--master_detector`");
   }
 
   if (flags.master.isSome() && flags.master_detector.isSome()) {
-    cerr << flags.usage("Only one of --master or --master_detector options "
-                        "should be specified.");
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << flags.usage(
+        "Only one of `--master` or `--master_detector` should be specified");
   }
 
   // Initialize libprocess.
@@ -429,7 +430,7 @@ int main(int argc, char** argv)
 #ifdef __linux__
   // Initialize systemd if it exists.
   if (flags.systemd_enable_support && systemd::exists()) {
-    LOG(INFO) << "Inializing systemd state";
+    LOG(INFO) << "Initializing systemd state";
 
     systemd::Flags systemdFlags;
     systemdFlags.enabled = flags.systemd_enable_support;
@@ -444,10 +445,19 @@ int main(int argc, char** argv)
   }
 #endif // __linux__
 
-  Fetcher* fetcher = new Fetcher();
+  Fetcher* fetcher = new Fetcher(flags);
+
+  // Initialize SecretResolver.
+  Try<SecretResolver*> secretResolver =
+    mesos::SecretResolver::create(flags.secret_resolver);
+
+  if (secretResolver.isError()) {
+    EXIT(EXIT_FAILURE)
+        << "Failed to initialize secret resolver: " << secretResolver.error();
+  }
 
   Try<Containerizer*> containerizer =
-    Containerizer::create(flags, false, fetcher);
+    Containerizer::create(flags, false, fetcher, secretResolver.get());
 
   if (containerizer.isError()) {
     EXIT(EXIT_FAILURE)
@@ -506,18 +516,16 @@ int main(int argc, char** argv)
     ResourceEstimator::create(flags.resource_estimator);
 
   if (resourceEstimator.isError()) {
-    cerr << "Failed to create resource estimator: "
-         << resourceEstimator.error() << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << "Failed to create resource estimator: "
+                       << resourceEstimator.error();
   }
 
   Try<QoSController*> qosController =
     QoSController::create(flags.qos_controller);
 
   if (qosController.isError()) {
-    cerr << "Failed to create QoS Controller: "
-         << qosController.error() << endl;
-    return EXIT_FAILURE;
+    EXIT(EXIT_FAILURE) << "Failed to create QoS Controller: "
+                       << qosController.error();
   }
 
   Slave* slave = new Slave(

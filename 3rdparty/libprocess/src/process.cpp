@@ -135,6 +135,8 @@ using process::http::authentication::AuthenticatorManager;
 
 using process::http::authorization::AuthorizationCallbacks;
 
+namespace inet = process::network::inet;
+
 using process::network::inet::Address;
 using process::network::inet::Socket;
 
@@ -211,12 +213,27 @@ struct Flags : public virtual flags::FlagsBase
 
           return None();
         });
+
+    add(&Flags::require_peer_address_ip_match,
+        "require_peer_address_ip_match",
+        "If set, the IP address portion of the libprocess UPID in\n"
+        "incoming messages is required to match the IP address of\n"
+        "the socket from which the message was sent. This can be a\n"
+        "security enhancement since it prevents unauthorized senders\n"
+        "impersonating other libprocess actors. This check may\n"
+        "break configurations that require setting LIBPROCESS_IP,\n"
+        "or LIBPROCESS_ADVERTISE_IP. Additionally, multi-homed\n"
+        "configurations may be affected since the address on which\n"
+        "libprocess is listening may not match the address from\n"
+        "which libprocess connects to other actors.\n",
+        false);
   }
 
   Option<net::IP> ip;
   Option<net::IP> advertise_ip;
   Option<int> port;
   Option<int> advertise_port;
+  bool require_peer_address_ip_match;
 };
 
 } // namespace internal {
@@ -559,6 +576,7 @@ private:
   std::atomic_bool finalizing;
 };
 
+static internal::Flags* flags = new internal::Flags();
 
 // Synchronization primitives for `initialize`.
 // See documentation in `initialize` for how they are used.
@@ -1097,11 +1115,10 @@ bool initialize(
   __address__ = Address::ANY_ANY();
 
   // Fetch and parse the libprocess environment variables.
-  internal::Flags flags;
-  Try<flags::Warnings> load = flags.load("LIBPROCESS_");
+  Try<flags::Warnings> load = flags->load("LIBPROCESS_");
 
   if (load.isError()) {
-    EXIT(EXIT_FAILURE) << flags.usage(load.error());
+    EXIT(EXIT_FAILURE) << flags->usage(load.error());
   }
 
   // Log any flag warnings.
@@ -1109,12 +1126,12 @@ bool initialize(
     LOG(WARNING) << warning.message;
   }
 
-  if (flags.ip.isSome()) {
-    __address__.ip = flags.ip.get();
+  if (flags->ip.isSome()) {
+    __address__.ip = flags->ip.get();
   }
 
-  if (flags.port.isSome()) {
-    __address__.port = flags.port.get();
+  if (flags->port.isSome()) {
+    __address__.port = flags->port.get();
   }
 
   // Create a "server" socket for communicating.
@@ -1145,27 +1162,26 @@ bool initialize(
   __address__ = bind.get();
 
   // If advertised IP and port are present, use them instead.
-  if (flags.advertise_ip.isSome()) {
-    __address__.ip = flags.advertise_ip.get();
+  if (flags->advertise_ip.isSome()) {
+    __address__.ip = flags->advertise_ip.get();
   }
 
-  if (flags.advertise_port.isSome()) {
-    __address__.port = flags.advertise_port.get();
+  if (flags->advertise_port.isSome()) {
+    __address__.port = flags->advertise_port.get();
   }
 
-  // Lookup hostname if missing ip or if ip is 0.0.0.0 in case we
-  // actually have a valid external ip address. Note that we need only
-  // one ip address, so that other processes can send and receive and
+  // Resolve the hostname if ip is 0.0.0.0 in case we actually have
+  // a valid external IP address. Note that we need only one IP
+  // address, so that other processes can send and receive and
   // don't get confused as to whom they are sending to.
   if (__address__.ip.isAny()) {
     char hostname[512];
 
     if (gethostname(hostname, sizeof(hostname)) < 0) {
-      LOG(FATAL) << "Failed to initialize, gethostname: "
-                 << os::hstrerror(h_errno);
+      PLOG(FATAL) << "Failed to initialize, gethostname";
     }
 
-    // Lookup IP address of local hostname.
+    // Lookup an IP address of local hostname, taking the first result.
     Try<net::IP> ip = net::getIP(hostname, __address__.ip.family());
 
     if (ip.isError()) {
@@ -1343,6 +1359,9 @@ void finalize(bool finalize_wsa)
   // NOTE: This variable is necessary for process communication, so it
   // cannot be cleared until after the `ProcessManager` is deleted.
   __address__ = Address::ANY_ANY();
+
+  // Finally, reset the Flags to defaults.
+  *flags = internal::Flags();
 
 #ifdef __WINDOWS__
   if (finalize_wsa && !net::wsa_cleanup()) {
@@ -2852,6 +2871,35 @@ void ProcessManager::handle(
         }
 
         Message* message = CHECK_NOTNULL(future.get());
+
+        // Verify that the UPID this peer is claiming is on the same IP
+        // address the peer is sending from.
+        if (flags->require_peer_address_ip_match) {
+          CHECK_SOME(request->client);
+
+          // If the client address is not an IP address (e.g. coming
+          // from a domain socket), we also reject the message.
+          Try<inet::Address> client_ip_address =
+            network::convert<inet::Address>(request->client.get());
+
+          if (client_ip_address.isError() ||
+              message->from.address.ip != client_ip_address->ip) {
+            Response response = BadRequest(
+                "UPID IP address validation failed: Message from " +
+                stringify(message->from) + " was sent from IP " +
+                stringify(request->client.get()));
+
+            dispatch(proxy, &HttpProxy::enqueue, response, *request);
+
+            VLOG(1) << "Returning '" << response.status << "'"
+                    << " for '" << request->url.path << "'"
+                    << ": " << response.body;
+
+            delete request;
+            delete message;
+            return;
+          }
+        }
 
         // TODO(benh): Use the sender PID when delivering in order to
         // capture happens-before timing relationships for testing.

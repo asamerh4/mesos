@@ -29,6 +29,9 @@
 #include <mesos/module/authorizer.hpp>
 #include <mesos/module/contender.hpp>
 #include <mesos/module/detector.hpp>
+#include <mesos/module/secret_resolver.hpp>
+
+#include <mesos/secret/resolver.hpp>
 
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -361,13 +364,15 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     // environment variables explicitly set.
     map<string, string> propagatedFlags;
 
-    // Use a different work directory for each agent.
+    // Use a different work/runtime/fetcher-cache directory for each agent.
     propagatedFlags["work_dir"] =
-      path::join(flags.work_dir, "agents", stringify(i));
+      path::join(flags.work_dir, "agents", stringify(i), "work");
 
-    // Use a different runtime directory for each agent.
     propagatedFlags["runtime_dir"] =
-      path::join(flags.runtime_dir, "agents", stringify(i));
+      path::join(flags.work_dir, "agents", stringify(i), "run");
+
+    propagatedFlags["fetcher_cache_dir"] =
+      path::join(flags.work_dir, "agents", stringify(i), "fetch");
 
     slave::Flags slaveFlags;
     Try<flags::Warnings> load = slaveFlags.load(
@@ -404,7 +409,7 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
 
     garbageCollectors->push_back(new GarbageCollector());
     statusUpdateManagers->push_back(new StatusUpdateManager(slaveFlags));
-    fetchers->push_back(new Fetcher());
+    fetchers->push_back(new Fetcher(slaveFlags));
 
     Try<ResourceEstimator*> resourceEstimator =
       ResourceEstimator::create(slaveFlags.resource_estimator);
@@ -438,8 +443,20 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
       slaveFlags.launcher = "posix";
     }
 
-    Try<Containerizer*> containerizer =
-      Containerizer::create(slaveFlags, true, fetchers->back());
+    // Initialize SecretResolver.
+    Try<SecretResolver*> secretResolver =
+      mesos::SecretResolver::create(slaveFlags.secret_resolver);
+
+    if (secretResolver.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to initialize secret resolver: " << secretResolver.error();
+    }
+
+    Try<Containerizer*> containerizer = Containerizer::create(
+        slaveFlags,
+        true,
+        fetchers->back(),
+        secretResolver.get());
 
     if (containerizer.isError()) {
       EXIT(EXIT_FAILURE)

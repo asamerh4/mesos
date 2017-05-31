@@ -31,6 +31,7 @@
 #include <stout/nothing.hpp>
 
 #include "log/coordinator.hpp"
+#include "log/metrics.hpp"
 #include "log/network.hpp"
 #include "log/recover.hpp"
 #include "log/replica.hpp"
@@ -100,16 +101,18 @@ private:
   zookeeper::Group* group;
   process::Future<zookeeper::Group::Membership> membership;
 
-  struct Metrics
+  friend Metrics;
+  Metrics metrics;
+
+  // The size of the network. We use "ensemble" because it as a metric
+  // name more intuitively means the "replica set".
+  process::Future<double> _ensemble_size()
   {
-    explicit Metrics(
-        const LogProcess& process,
-        const Option<std::string>& prefix);
-
-    ~Metrics();
-
-    process::metrics::Gauge recovered;
-  } metrics;
+    // Watching for any value different than 0 should give us the
+    // current value.
+    return network->watch(0u)
+      .then([](size_t size) -> double { return size; });
+  }
 };
 
 

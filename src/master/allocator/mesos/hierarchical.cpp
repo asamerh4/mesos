@@ -25,10 +25,12 @@
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 
+#include <process/after.hpp>
 #include <process/delay.hpp>
 #include <process/dispatch.hpp>
 #include <process/event.hpp>
 #include <process/id.hpp>
+#include <process/loop.hpp>
 #include <process/timeout.hpp>
 
 #include <stout/check.hpp>
@@ -44,9 +46,14 @@ using std::vector;
 
 using mesos::allocator::InverseOfferStatus;
 
+using process::after;
+using process::Continue;
+using process::ControlFlow;
 using process::Failure;
 using process::Future;
+using process::loop;
 using process::Owned;
+using process::PID;
 using process::Timeout;
 
 using mesos::internal::protobuf::framework::Capabilities;
@@ -157,7 +164,19 @@ void HierarchicalAllocatorProcess::initialize(
 
   VLOG(1) << "Initialized hierarchical allocator process";
 
-  delay(allocationInterval, self(), &Self::batch);
+  // Start a loop to run allocation periodically.
+  PID<HierarchicalAllocatorProcess> _self = self();
+
+  loop(None(), // Use `None` so we iterate outside the allocator process.
+       [_allocationInterval]() {
+         return after(_allocationInterval);
+       },
+       [_self, this](const Nothing&) {
+         return dispatch(_self, [this]() { return allocate(); })
+           .then([]() -> ControlFlow<Nothing> {
+             return Continue();
+           });
+       });
 }
 
 
@@ -1166,9 +1185,9 @@ void HierarchicalAllocatorProcess::recoverResources(
     // expire before we perform the next allocation for this agent,
     // see MESOS-4302 for more information.
     //
-    // Because the next batched allocation goes through a dispatch
+    // Because the next periodic allocation goes through a dispatch
     // after `allocationInterval`, we do the same for `expire()`
-    // (with a hepler `_expire()`) to achieve the above.
+    // (with a helper `_expire()`) to achieve the above.
     //
     // TODO(alexr): If we allocated upon resource recovery
     // (MESOS-3078), we would not need to increase the timeout here.
@@ -1364,18 +1383,6 @@ void HierarchicalAllocatorProcess::resume()
 }
 
 
-void HierarchicalAllocatorProcess::batch()
-{
-  process::PID<HierarchicalAllocatorProcess> pid = self();
-  Duration _allocationInterval = allocationInterval;
-
-  allocate()
-    .onAny([_allocationInterval, pid]() {
-      delay(_allocationInterval, pid, &HierarchicalAllocatorProcess::batch);
-    });
-}
-
-
 Future<Nothing> HierarchicalAllocatorProcess::allocate()
 {
   return allocate(slaves.keys());
@@ -1402,6 +1409,7 @@ Future<Nothing> HierarchicalAllocatorProcess::allocate(
   allocationCandidates |= slaveIds;
 
   if (allocation.isNone() || !allocation->isPending()) {
+    metrics.allocation_run_latency.start();
     allocation = dispatch(self(), &Self::_allocate);
   }
 
@@ -1409,7 +1417,10 @@ Future<Nothing> HierarchicalAllocatorProcess::allocate(
 }
 
 
-Nothing HierarchicalAllocatorProcess::_allocate() {
+Nothing HierarchicalAllocatorProcess::_allocate()
+{
+  metrics.allocation_run_latency.stop();
+
   if (paused) {
     VLOG(1) << "Skipped allocation because the allocator is paused";
 

@@ -35,6 +35,7 @@
 
 #include <mesos/module/authenticatee.hpp>
 
+#include <process/after.hpp>
 #include <process/async.hpp>
 #include <process/check.hpp>
 #include <process/collect.hpp>
@@ -43,6 +44,7 @@
 #include <process/dispatch.hpp>
 #include <process/http.hpp>
 #include <process/id.hpp>
+#include <process/loop.hpp>
 #include <process/reap.hpp>
 #include <process/time.hpp>
 
@@ -117,6 +119,7 @@ using mesos::executor::Call;
 
 using mesos::master::detector::MasterDetector;
 
+using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerTermination;
 using mesos::slave::QoSController;
 using mesos::slave::QoSCorrection;
@@ -130,9 +133,13 @@ using std::set;
 using std::string;
 using std::vector;
 
+using process::after;
 using process::async;
 using process::wait; // Necessary on some OS's to disambiguate.
+using process::Break;
 using process::Clock;
+using process::Continue;
+using process::ControlFlow;
 using process::Failure;
 using process::Future;
 using process::Owned;
@@ -256,7 +263,7 @@ void Slave::initialize()
     } else {
       credential = _credential.get();
       LOG(INFO) << "Agent using credential for: "
-                << credential.get().principal();
+                << credential->principal();
     }
   }
 
@@ -381,8 +388,12 @@ void Slave::initialize()
   }
 
   // Ensure slave work directory exists.
-  CHECK_SOME(os::mkdir(flags.work_dir))
-    << "Failed to create agent work directory '" << flags.work_dir << "'";
+  Try<Nothing> mkdir = os::mkdir(flags.work_dir);
+  if (mkdir.isError()) {
+    EXIT(EXIT_FAILURE)
+      << "Failed to create agent work directory '" << flags.work_dir << "': "
+      << mkdir.error();
+  }
 
   Try<Resources> resources = Containerizer::resources(flags);
   if (resources.isError()) {
@@ -454,7 +465,7 @@ void Slave::initialize()
         }
 
         bool foundEntry = false;
-        foreach (const fs::MountTable::Entry& entry, mountTable.get().entries) {
+        foreach (const fs::MountTable::Entry& entry, mountTable->entries) {
           if (entry.dir == realpath.get()) {
             foundEntry = true;
             break;
@@ -495,7 +506,7 @@ void Slave::initialize()
       Try<string> result = net::getHostname(self().address.ip);
 
       if (result.isError()) {
-        LOG(FATAL) << "Failed to get hostname: " << result.error();
+        EXIT(EXIT_FAILURE) << "Failed to get hostname: " << result.error();
       }
 
       hostname = result.get();
@@ -907,13 +918,13 @@ void Slave::detected(const Future<Option<MasterInfo>>& _master)
     LOG(INFO) << "Re-detecting master";
     latest = None();
     master = None();
-  } else if (_master.get().isNone()) {
+  } else if (_master->isNone()) {
     LOG(INFO) << "Lost leading master";
     latest = None();
     master = None();
   } else {
     latest = _master.get();
-    master = UPID(_master.get().get().pid());
+    master = UPID(latest->pid());
 
     LOG(INFO) << "New master detected at " << master.get();
 
@@ -1121,14 +1132,6 @@ void Slave::registered(
       LOG(INFO) << "Registered with master " << master.get()
                 << "; given agent ID " << slaveId;
 
-      // TODO(bernd-mesos): Make this an instance method call, see comment
-      // in "fetcher.hpp"".
-      Try<Nothing> recovered = Fetcher::recover(slaveId, flags);
-      if (recovered.isError()) {
-        LOG(FATAL) << "Could not initialize fetcher cache: "
-                   << recovered.error();
-      }
-
       state = RUNNING;
 
       // Cancel the pending registration timer to avoid spurious attempts
@@ -1165,7 +1168,7 @@ void Slave::registered(
     }
     case RUNNING:
       // Already registered!
-      if (!(info.id() == slaveId)) {
+      if (info.id() != slaveId) {
        EXIT(EXIT_FAILURE)
          << "Registered but got wrong id: " << slaveId
          << " (expected: " << info.id() << "). Committing suicide";
@@ -1212,7 +1215,7 @@ void Slave::reregistered(
 
   CHECK_SOME(master);
 
-  if (!(info.id() == slaveId)) {
+  if (info.id() != slaveId) {
     EXIT(EXIT_FAILURE)
       << "Re-registered but got wrong id: " << slaveId
       << " (expected: " << info.id() << "). Committing suicide";
@@ -1614,7 +1617,7 @@ void Slave::run(
             << " for framework " << frameworkId;
 
   foreach (const TaskInfo& _task, tasks) {
-    if (!(_task.slave_id() == info.id())) {
+    if (_task.slave_id() != info.id()) {
       LOG(WARNING)
         << "Agent " << info.id() << " ignoring running "
         << taskOrTaskGroup(_task, taskGroup) << " because "
@@ -2690,6 +2693,8 @@ void Slave::launchExecutor(
   }
 
   // Tell the containerizer to launch the executor.
+  // NOTE: We make a copy of the executor info because we may mutate
+  // it with some default fields and resources.
   ExecutorInfo executorInfo_ = executor->info;
 
   // Populate the command info for default executor. We modify the ExecutorInfo
@@ -2715,6 +2720,41 @@ void Slave::launchExecutor(
 
   executorInfo_.mutable_resources()->CopyFrom(resources);
 
+  // Add the default container info to the executor info.
+  // TODO(jieyu): Rename the flag to be default_mesos_container_info.
+  if (!executorInfo_.has_container() &&
+      flags.default_container_info.isSome()) {
+    executorInfo_.mutable_container()->CopyFrom(
+        flags.default_container_info.get());
+  }
+
+  // Bundle all the container launch fields together.
+  ContainerConfig containerConfig;
+  containerConfig.mutable_executor_info()->CopyFrom(executorInfo_);
+  containerConfig.mutable_command_info()->CopyFrom(executorInfo_.command());
+  containerConfig.mutable_resources()->CopyFrom(executorInfo_.resources());
+  containerConfig.set_directory(executor->directory);
+
+  if (executor->user.isSome()) {
+    containerConfig.set_user(executor->user.get());
+  }
+
+  if (executor->isCommandExecutor()) {
+    if (taskInfo.isSome()) {
+      containerConfig.mutable_task_info()->CopyFrom(taskInfo.get());
+
+      if (taskInfo.get().has_container()) {
+        containerConfig.mutable_container_info()
+          ->CopyFrom(taskInfo.get().container());
+      }
+    }
+  } else {
+    if (executorInfo_.has_container()) {
+      containerConfig.mutable_container_info()
+        ->CopyFrom(executorInfo_.container());
+    }
+  }
+
   // Prepare environment variables for the executor.
   map<string, string> environment = executorEnvironment(
       flags,
@@ -2725,48 +2765,33 @@ void Slave::launchExecutor(
       authenticationToken,
       framework->info.checkpoint());
 
-  // Launch the container.
-  Future<bool> launch;
-  if (!executor->isCommandExecutor()) {
-    // If the executor is _not_ a command executor, this means that
-    // the task will include the executor to run. The actual task to
-    // run will be enqueued and subsequently handled by the executor
-    // when it has registered to the slave.
-    launch = containerizer->launch(
-        executor->containerId,
-        None(),
-        executorInfo_,
-        executor->directory,
-        executor->user,
+  // Prepare the filename of the pidfile, for checkpoint-enabled frameworks.
+  Option<string> pidCheckpointPath = None();
+  if (framework->info.checkpoint()){
+    pidCheckpointPath = slave::paths::getForkedPidPath(
+        slave::paths::getMetaRootDir(flags.work_dir),
         info.id(),
-        environment,
-        framework->info.checkpoint());
-  } else {
-    // An executor has _not_ been provided by the task and will
-    // instead define a command and/or container to run. Right now,
-    // these tasks will require an executor anyway and the slave
-    // creates a command executor. However, it is up to the
-    // containerizer how to execute those tasks and the generated
-    // executor info works as a placeholder.
-    // TODO(nnielsen): Obsolete the requirement for executors to run
-    // one-off tasks.
-    launch = containerizer->launch(
-        executor->containerId,
-        taskInfo,
-        executorInfo_,
-        executor->directory,
-        executor->user,
-        info.id(),
-        environment,
-        framework->info.checkpoint());
+        framework->id(),
+        executor->id,
+        executor->containerId);
   }
 
-  launch.onAny(defer(self(),
-                     &Self::executorLaunched,
-                     frameworkId,
-                     executor->id,
-                     executor->containerId,
-                     lambda::_1));
+  LOG(INFO) << "Launching container " << executor->containerId
+            << " for executor '" << executor->id
+            << "' of framework " << framework->id();
+
+  // Launch the container.
+  containerizer->launch(
+      executor->containerId,
+      containerConfig,
+      environment,
+      pidCheckpointPath)
+    .onAny(defer(self(),
+                 &Self::executorLaunched,
+                 frameworkId,
+                 executor->id,
+                 executor->containerId,
+                 lambda::_1));
 
   // Make sure the executor registers within the given timeout.
   delay(flags.executor_registration_timeout,
@@ -3963,48 +3988,89 @@ void Slave::reregisterExecutor(
         state == RUNNING || state == TERMINATING)
     << state;
 
-  if (state != RECOVERING) {
-    LOG(WARNING) << "Shutting down executor '" << executorId
-                 << "' of framework " << frameworkId
-                 << " because the agent is not in recovery mode";
+  LOG(INFO) << "Received re-registration message from"
+            << " executor '" << executorId << "'"
+            << " of framework " << frameworkId;
+
+  if (state == TERMINATING) {
+    LOG(WARNING) << "Shutting down executor '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " because the agent is terminating";
+
     reply(ShutdownExecutorMessage());
     return;
   }
 
-  LOG(INFO) << "Re-registering executor '" << executorId
-            << "' of framework " << frameworkId;
+  if (!frameworks.contains(frameworkId)) {
+    LOG(WARNING) << "Shutting down executor '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " because the framework is unknown";
 
-  CHECK(frameworks.contains(frameworkId))
-    << "Unknown framework " << frameworkId;
+    reply(ShutdownExecutorMessage());
+    return;
+  }
 
-  Framework* framework = frameworks[frameworkId];
+  Framework* framework = frameworks.at(frameworkId);
 
   CHECK(framework->state == Framework::RUNNING ||
         framework->state == Framework::TERMINATING)
     << framework->state;
 
   if (framework->state == Framework::TERMINATING) {
-    LOG(WARNING) << "Shutting down executor '" << executorId
-                 << "' as the framework " << frameworkId
-                 << " is terminating";
+    LOG(WARNING) << "Shutting down executor '" << executorId << "'"
+                 << " of framework " << frameworkId
+                 << " because the framework is terminating";
 
     reply(ShutdownExecutorMessage());
     return;
   }
 
   Executor* executor = framework->getExecutor(executorId);
-  CHECK_NOTNULL(executor);
+
+  if (executor == nullptr) {
+    LOG(WARNING) << "Shutting down unknown executor '" << executorId << "'"
+                 << " of framework " << frameworkId;
+
+    reply(ShutdownExecutorMessage());
+    return;
+  }
 
   switch (executor->state) {
     case Executor::TERMINATING:
     case Executor::TERMINATED:
       // TERMINATED is possible if the executor forks, the parent process
       // terminates and the child process (driver) tries to register!
-    case Executor::RUNNING:
       LOG(WARNING) << "Shutting down executor " << *executor
                    << " because it is in unexpected state " << executor->state;
       reply(ShutdownExecutorMessage());
       break;
+
+    case Executor::RUNNING:
+      if (flags.executor_reregistration_retry_interval.isNone()) {
+        // Previously, when an executor sends a re-registration while
+        // in the RUNNING state, we would shut the executor down. We
+        // preserve that behavior when the optional reconnect retry
+        // is not enabled.
+        LOG(WARNING) << "Shutting down executor " << *executor
+                     << " because it is in unexpected state "
+                     << executor->state;
+        reply(ShutdownExecutorMessage());
+      } else {
+        // When the agent is configured to retry the reconnect requests
+        // to executors, we ignore any further re-registrations. This
+        // is because we can't easily handle re-registering libprocess
+        // based executors in the steady state, and we plan to move to
+        // only allowing v1 HTTP executors (where re-subscription in
+        // the steady state is supported). Also, ignoring this message
+        // ensures that any executors mimicking the libprocess protocol
+        // do not have any illusion of being able to re-register without
+        // an agent restart (hopefully they will commit suicide if they
+        // fail to re-register).
+        LOG(WARNING) << "Ignoring executor re-registration message from "
+                     << *executor << " because it is already registered";
+      }
+      break;
+
     case Executor::REGISTERING: {
       executor->state = Executor::RUNNING;
 
@@ -4087,10 +4153,6 @@ void Slave::reregisterExecutor(
       // should be shutdown if it hasn't received any tasks.
       break;
     }
-    default:
-      LOG(FATAL) << "Executor " << *executor << " is in unexpected state "
-                 << executor->state;
-      break;
   }
 }
 
@@ -4182,7 +4244,7 @@ void Slave::reregisterExecutorTimeout()
               TaskStatus::REASON_EXECUTOR_REREGISTRATION_TIMEOUT);
           termination.set_message(
               "Executor did not re-register within " +
-              stringify(EXECUTOR_REREGISTER_TIMEOUT));
+              stringify(flags.executor_reregistration_timeout));
 
           executor->pendingTermination = termination;
           break;
@@ -4196,6 +4258,8 @@ void Slave::reregisterExecutorTimeout()
   }
 
   // Signal the end of recovery.
+  // TODO(greggomann): Allow the agent to complete recovery before the executor
+  // re-registration timeout has elapsed. See MESOS-7539
   recoveryInfo.recovered.set(Nothing());
 }
 
@@ -5761,17 +5825,17 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
   // NOTE: 'resourcesState' is None if the slave rootDir does not
   // exist or the resources checkpoint file cannot be found.
   if (resourcesState.isSome()) {
-    if (resourcesState.get().errors > 0) {
+    if (resourcesState->errors > 0) {
       LOG(WARNING) << "Errors encountered during resources recovery: "
-                   << resourcesState.get().errors;
+                   << resourcesState->errors;
 
-      metrics.recovery_errors += resourcesState.get().errors;
+      metrics.recovery_errors += resourcesState->errors;
     }
 
-    checkpointedResources = resourcesState.get().resources;
+    checkpointedResources = resourcesState->resources;
 
-    if (resourcesState.get().target.isSome()) {
-      Resources targetResources = resourcesState.get().target.get();
+    if (resourcesState->target.isSome()) {
+      Resources targetResources = resourcesState->target.get();
 
       // Sync the checkpointed resources from the target (which was
       // only created when there are pending changes in the
@@ -5829,44 +5893,37 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
     totalResources = _totalResources.get();
   }
 
-  if (slaveState.isSome() && slaveState.get().info.isSome()) {
+  if (slaveState.isSome() && slaveState->info.isSome()) {
     // Check for SlaveInfo compatibility.
     // TODO(vinod): Also check for version compatibility.
     // NOTE: We set the 'id' field in 'info' from the recovered slave,
     // as a hack to compare the info created from options/flags with
     // the recovered info.
-    info.mutable_id()->CopyFrom(slaveState.get().id);
+    info.mutable_id()->CopyFrom(slaveState->id);
     if (flags.recover == "reconnect" &&
-        !(info == slaveState.get().info.get())) {
+        !(info == slaveState->info.get())) {
       return Failure(strings::join(
           "\n",
           "Incompatible agent info detected.",
           "------------------------------------------------------------",
-          "Old agent info:\n" + stringify(slaveState.get().info.get()),
+          "Old agent info:\n" + stringify(slaveState->info.get()),
           "------------------------------------------------------------",
           "New agent info:\n" + stringify(info),
           "------------------------------------------------------------"));
     }
 
-    info = slaveState.get().info.get(); // Recover the slave info.
+    info = slaveState->info.get(); // Recover the slave info.
 
-    if (slaveState.get().errors > 0) {
+    if (slaveState->errors > 0) {
       LOG(WARNING) << "Errors encountered during agent recovery: "
-                   << slaveState.get().errors;
+                   << slaveState->errors;
 
-      metrics.recovery_errors += slaveState.get().errors;
-    }
-
-    // TODO(bernd-mesos): Make this an instance method call, see comment
-    // in "fetcher.hpp"".
-    Try<Nothing> recovered = Fetcher::recover(slaveState.get().id, flags);
-    if (recovered.isError()) {
-      return Failure(recovered.error());
+      metrics.recovery_errors += slaveState->errors;
     }
 
     // Recover the frameworks.
     foreachvalue (const FrameworkState& frameworkState,
-                  slaveState.get().frameworks) {
+                  slaveState->frameworks) {
       recoverFramework(frameworkState, injectedExecutors, injectedTasks);
     }
   }
@@ -5913,6 +5970,62 @@ Future<Nothing> Slave::_recover()
           ReconnectExecutorMessage message;
           message.mutable_slave_id()->MergeFrom(info.id());
           send(executor->pid.get(), message);
+
+          // PID-based executors using Mesos libraries >= 1.1.2 always
+          // re-link with the agent upon receiving the reconnect message.
+          // This avoids the executor replying on a half-open TCP
+          // connection to the old agent (possible if netfilter is
+          // dropping packets, see: MESOS-7057). However, PID-based
+          // executors using Mesos libraries < 1.1.2 do not re-link
+          // and are therefore prone to replying on a half-open connection
+          // after the agent restarts. If we only send a single reconnect
+          // message, these "old" executors will reply on their half-open
+          // connection and receive a RST; without any retries, they will
+          // fail to reconnect and be killed by the agent once the executor
+          // re-registration timeout elapses. To ensure these "old"
+          // executors can reconnect in the presence of netfilter dropping
+          // packets, we introduced optional retries of the reconnect
+          // message. This results in "old" executors correctly establishing
+          // a link when processing the second reconnect message.
+          if (flags.executor_reregistration_retry_interval.isSome()) {
+            const Duration& retryInterval =
+              flags.executor_reregistration_retry_interval.get();
+
+            const FrameworkID& frameworkId = framework->id();
+            const ExecutorID& executorId = executor->id;
+
+            process::loop(
+                self(),
+                [retryInterval]() {
+                  return after(retryInterval);
+                },
+                [this, frameworkId, executorId, message](Nothing)
+                    -> ControlFlow<Nothing> {
+                  if (state != RECOVERING) {
+                    return Break();
+                  }
+
+                  Framework* framework = getFramework(frameworkId);
+                  if (framework == nullptr) {
+                    return Break();
+                  }
+
+                  Executor* executor = framework->getExecutor(executorId);
+                  if (executor == nullptr) {
+                    return Break();
+                  }
+
+                  if (executor->state != Executor::REGISTERING) {
+                    return Break();
+                  }
+
+                  LOG(INFO) << "Re-sending reconnect request to executor "
+                            << *executor;
+
+                  send(executor->pid.get(), message);
+                  return Continue();
+                });
+          }
         } else if (executor->pid.isNone()) {
           LOG(INFO) << "Waiting for executor " << *executor
                     << " to subscribe";
@@ -5941,7 +6054,7 @@ Future<Nothing> Slave::_recover()
 
   if (!frameworks.empty() && flags.recover == "reconnect") {
     // Cleanup unregistered executors after a delay.
-    delay(EXECUTOR_REREGISTER_TIMEOUT,
+    delay(flags.executor_reregistration_timeout,
           self(),
           &Slave::reregisterExecutorTimeout);
 
@@ -5999,7 +6112,7 @@ void Slave::__recover(const Future<Nothing>& future)
       // registers with the master) or if it is an old work directory.
       SlaveID slaveId;
       slaveId.set_value(entry);
-      if (!info.has_id() || !(slaveId == info.id())) {
+      if (!info.has_id() || slaveId != info.id()) {
         LOG(INFO) << "Garbage collecting old agent " << slaveId;
 
         // NOTE: We update the modification time of the slave work/meta
@@ -7103,18 +7216,18 @@ void Framework::recoverExecutor(
       info.checkpoint());
 
   // Recover the libprocess PID if possible for PID based executors.
-  if (run.get().http.isSome()) {
-    if (!run.get().http.get()) {
+  if (run->http.isSome()) {
+    if (!run->http.get()) {
       // When recovering in non-strict mode, the assumption is that the
       // slave can die after checkpointing the forked pid but before the
       // libprocess pid. So, it is not possible for the libprocess pid
       // to exist but not the forked pid. If so, it is a really bad
       // situation (e.g., disk corruption).
-      CHECK_SOME(run.get().forkedPid)
+      CHECK_SOME(run->forkedPid)
         << "Failed to get forked pid for executor " << state.id
         << " of framework " << id();
 
-      executor->pid = run.get().libprocessPid.get();
+      executor->pid = run->libprocessPid.get();
     } else {
       // We set the PID to None() to signify that this is a HTTP based
       // executor.
@@ -7127,7 +7240,7 @@ void Framework::recoverExecutor(
   }
 
   // And finally recover all the executor's tasks.
-  foreachvalue (const TaskState& taskState, run.get().tasks) {
+  foreachvalue (const TaskState& taskState, run->tasks) {
     executor->recoverTask(
         taskState,
         tasksToRecheckpoint.contains(taskState.id));
@@ -7161,13 +7274,13 @@ void Framework::recoverExecutor(
   // If the latest run of the executor was completed (i.e., terminated
   // and all updates are acknowledged) in the previous run, we
   // transition its state to 'TERMINATED' and gc the directories.
-  if (run.get().completed) {
+  if (run->completed) {
     ++slave->metrics.executors_terminated;
 
     executor->state = Executor::TERMINATED;
 
-    CHECK_SOME(run.get().id);
-    const ContainerID& runId = run.get().id.get();
+    CHECK_SOME(run->id);
+    const ContainerID& runId = run->id.get();
 
     // GC the executor run's work directory.
     const string path = paths::getExecutorRunPath(
@@ -7347,7 +7460,7 @@ void Executor::recoverTask(const TaskState& state, bool recheckpointTask)
   // slave was down, the executor resources we capture here is an
   // upper-bound. The actual resources needed (for live tasks) by
   // the isolator will be calculated when the executor re-registers.
-  resources += state.info.get().resources();
+  resources += state.info->resources();
 
   // Read updates to get the latest state of the task.
   foreach (const StatusUpdate& update, state.updates) {
@@ -7497,7 +7610,7 @@ void Executor::closeHttpConnection()
 {
   CHECK_SOME(http);
 
-  if (!http.get().close()) {
+  if (!http->close()) {
     LOG(WARNING) << "Failed to close HTTP pipe for " << *this;
   }
 
@@ -7544,7 +7657,7 @@ map<string, string> executorEnvironment(
   if (flags.executor_environment_variables.isSome()) {
     foreachpair (const string& key,
                  const JSON::Value& value,
-                 flags.executor_environment_variables.get().values) {
+                 flags.executor_environment_variables->values) {
       // See slave/flags.cpp where we validate each value is a string.
       CHECK(value.is<JSON::String>());
       environment[key] = value.as<JSON::String>().value;
@@ -7615,7 +7728,7 @@ map<string, string> executorEnvironment(
     // The maximum backoff duration to be used by an executor between two
     // retries when disconnected.
     environment["MESOS_SUBSCRIPTION_BACKOFF_MAX"] =
-      stringify(EXECUTOR_REREGISTER_TIMEOUT);
+      stringify(flags.executor_reregistration_timeout);
   }
 
   if (authenticationToken.isSome()) {

@@ -35,8 +35,9 @@ STOUT = 3rdparty/stout
 BOOST = 3rdparty/boost-$(BOOST_VERSION)
 ELFIO = 3rdparty/elfio-$(ELFIO_VERSION)
 GLOG = 3rdparty/glog-$(GLOG_VERSION)
-GMOCK = 3rdparty/gmock-$(GMOCK_VERSION)
-GTEST = $(GMOCK)/gtest
+GOOGLETEST = 3rdparty/googletest-release-$(GOOGLETEST_VERSION)
+GMOCK = $(GOOGLETEST)/googlemock
+GTEST = $(GOOGLETEST)/googletest
 PROTOBUF = 3rdparty/protobuf-$(PROTOBUF_VERSION)
 PICOJSON = 3rdparty/picojson-$(PICOJSON_VERSION)
 NVML = 3rdparty/nvml-$(NVML_VERSION)
@@ -652,6 +653,8 @@ module_HEADERS =							\
   $(top_srcdir)/include/mesos/module/authenticator.hpp			\
   $(top_srcdir)/include/mesos/module/authorizer.hpp			\
   $(top_srcdir)/include/mesos/module/container_logger.hpp		\
+  $(top_srcdir)/include/mesos/module/contender.hpp			\
+  $(top_srcdir)/include/mesos/module/detector.hpp			\
   $(top_srcdir)/include/mesos/module/hook.hpp				\
   $(top_srcdir)/include/mesos/module/hook.proto				\
   $(top_srcdir)/include/mesos/module/http_authenticator.hpp		\
@@ -660,9 +663,8 @@ module_HEADERS =							\
   $(top_srcdir)/include/mesos/module/module.proto			\
   $(top_srcdir)/include/mesos/module/qos_controller.hpp			\
   $(top_srcdir)/include/mesos/module/resource_estimator.hpp		\
-  $(top_srcdir)/include/mesos/module/contender.hpp			\
-  $(top_srcdir)/include/mesos/module/detector.hpp			\
-  $(top_srcdir)/include/mesos/module/secret_generator.hpp
+  $(top_srcdir)/include/mesos/module/secret_generator.hpp		\
+  $(top_srcdir)/include/mesos/module/secret_resolver.hpp
 
 nodist_module_HEADERS =							\
   ../include/mesos/module/hook.pb.h					\
@@ -721,6 +723,11 @@ nodist_agent_HEADERS =							\
   ../include/mesos/agent/agent.pb.h					\
   ../include/mesos/slave/containerizer.pb.h				\
   ../include/mesos/slave/oversubscription.pb.h
+
+secretdir = $(pkgincludedir)/secret
+
+secret_HEADERS =							\
+  $(top_srcdir)/include/mesos/secret/resolver.hpp
 
 statedir = $(pkgincludedir)/state
 
@@ -925,6 +932,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   posix/rlimits.cpp							\
   sched/sched.cpp							\
   scheduler/scheduler.cpp						\
+  secret/resolver.cpp							\
   slave/constants.cpp							\
   slave/container_logger.cpp						\
   slave/flags.cpp							\
@@ -952,6 +960,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/paths.cpp					\
   slave/containerizer/mesos/utils.cpp					\
   slave/containerizer/mesos/io/switchboard.cpp				\
+  slave/containerizer/mesos/isolators/environment_secret.cpp		\
   slave/containerizer/mesos/isolators/docker/volume/driver.cpp		\
   slave/containerizer/mesos/isolators/docker/volume/paths.cpp		\
   slave/containerizer/mesos/isolators/filesystem/posix.cpp		\
@@ -1082,6 +1091,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/paths.hpp					\
   slave/containerizer/mesos/utils.hpp					\
   slave/containerizer/mesos/io/switchboard.hpp				\
+  slave/containerizer/mesos/isolators/environment_secret.hpp		\
   slave/containerizer/mesos/isolators/posix.hpp				\
   slave/containerizer/mesos/isolators/filesystem/posix.hpp		\
   slave/containerizer/mesos/isolators/filesystem/windows.hpp		\
@@ -1194,6 +1204,7 @@ MESOS_LINUX_FILES =									\
   slave/containerizer/mesos/isolators/network/cni/cni.cpp				\
   slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.cpp	\
   slave/containerizer/mesos/isolators/volume/image.cpp					\
+  slave/containerizer/mesos/isolators/volume/secret.cpp					\
   slave/containerizer/mesos/provisioner/backends/aufs.cpp				\
   slave/containerizer/mesos/provisioner/backends/bind.cpp				\
   slave/containerizer/mesos/provisioner/backends/overlay.cpp
@@ -1240,6 +1251,7 @@ MESOS_LINUX_FILES +=									\
   slave/containerizer/mesos/isolators/network/cni/cni.hpp				\
   slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.hpp	\
   slave/containerizer/mesos/isolators/volume/image.hpp					\
+  slave/containerizer/mesos/isolators/volume/secret.hpp					\
   slave/containerizer/mesos/provisioner/backends/aufs.hpp				\
   slave/containerizer/mesos/provisioner/backends/bind.hpp				\
   slave/containerizer/mesos/provisioner/backends/overlay.hpp
@@ -1298,7 +1310,7 @@ else
 EXTRA_DIST += $(MESOS_LINUX_FILES)
 endif
 
-if WITH_NETWORK_ISOLATOR
+if ENABLE_PORT_MAPPING_ISOLATOR
 libmesos_no_3rdparty_la_SOURCES += $(MESOS_NETWORK_ISOLATOR_FILES)
 else
 EXTRA_DIST += $(MESOS_NETWORK_ISOLATOR_FILES)
@@ -1362,6 +1374,7 @@ liblog_la_SOURCES =							\
   log/coordinator.cpp							\
   log/leveldb.cpp							\
   log/log.cpp								\
+  log/metrics.cpp							\
   log/recover.cpp							\
   log/replica.cpp							\
   log/tool/benchmark.cpp						\
@@ -1374,6 +1387,7 @@ liblog_la_SOURCES +=							\
   log/coordinator.hpp							\
   log/leveldb.hpp							\
   log/log.hpp								\
+  log/metrics.hpp							\
   log/network.hpp							\
   log/recover.hpp							\
   log/replica.hpp							\
@@ -1522,7 +1536,7 @@ mesos_io_switchboard_SOURCES =	\
 mesos_io_switchboard_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_io_switchboard_LDADD = libmesos.la $(LDADD)
 
-if WITH_NETWORK_ISOLATOR
+if ENABLE_PORT_MAPPING_ISOLATOR
 pkglibexec_PROGRAMS += mesos-network-helper
 mesos_network_helper_SOURCES = slave/containerizer/mesos/isolators/network/helper.cpp
 mesos_network_helper_CPPFLAGS = $(MESOS_CPPFLAGS)
@@ -2340,6 +2354,7 @@ mesos_tests_SOURCES =						\
   tests/containerizer/docker_containerizer_tests.cpp		\
   tests/containerizer/docker_spec_tests.cpp			\
   tests/containerizer/docker_tests.cpp				\
+  tests/containerizer/environment_secret_isolator_tests.cpp	\
   tests/containerizer/io_switchboard_tests.cpp			\
   tests/containerizer/isolator_tests.cpp			\
   tests/containerizer/launcher.cpp				\
@@ -2406,10 +2421,11 @@ mesos_tests_SOURCES +=						\
   tests/containerizer/runtime_isolator_tests.cpp		\
   tests/containerizer/sched_tests.cpp				\
   tests/containerizer/setns_test_helper.cpp			\
-  tests/containerizer/volume_image_isolator_tests.cpp
+  tests/containerizer/volume_image_isolator_tests.cpp		\
+  tests/containerizer/volume_secret_isolator_tests.cpp
 endif
 
-if WITH_NETWORK_ISOLATOR
+if ENABLE_PORT_MAPPING_ISOLATOR
 mesos_tests_SOURCES +=						\
   tests/containerizer/port_mapping_tests.cpp			\
   tests/containerizer/routing_tests.cpp

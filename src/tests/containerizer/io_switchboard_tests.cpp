@@ -167,15 +167,15 @@ TEST_F(IOSwitchboardServerTest, RedirectLog)
   Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
 
-  Try<std::array<int, 2>> stdoutPipe_ = os::pipe();
+  Try<std::array<int_fd, 2>> stdoutPipe_ = os::pipe();
   ASSERT_SOME(stdoutPipe_);
 
-  const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
+  const std::array<int_fd, 2>& stdoutPipe = stdoutPipe_.get();
 
-  Try<std::array<int, 2>> stderrPipe_ = os::pipe();
+  Try<std::array<int_fd, 2>> stderrPipe_ = os::pipe();
   ASSERT_SOME(stderrPipe_);
 
-  const std::array<int, 2>& stderrPipe = stderrPipe_.get();
+  const std::array<int_fd, 2>& stderrPipe = stderrPipe_.get();
 
   string stdoutPath = path::join(sandbox.get(), "stdout");
   Try<int> stdoutFd = os::open(
@@ -363,10 +363,10 @@ TEST_F(IOSwitchboardServerTest, SendHeartbeat)
   // We use a pipe in this test to prevent the switchboard from
   // reading EOF on its `stdoutFromFd` until we are ready for the
   // switchboard to terminate.
-  Try<std::array<int, 2>> stdoutPipe_ = os::pipe();
+  Try<std::array<int_fd, 2>> stdoutPipe_ = os::pipe();
   ASSERT_SOME(stdoutPipe_);
 
-  const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
+  const std::array<int_fd, 2>& stdoutPipe = stdoutPipe_.get();
 
   Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
@@ -470,10 +470,10 @@ TEST_F(IOSwitchboardServerTest, AttachInput)
   // We use a pipe in this test to prevent the switchboard from
   // reading EOF on its `stdoutFromFd` until we are ready for the
   // switchboard to terminate.
-  Try<std::array<int, 2>> stdoutPipe_ = os::pipe();
+  Try<std::array<int_fd, 2>> stdoutPipe_ = os::pipe();
   ASSERT_SOME(stdoutPipe_);
 
-  const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
+  const std::array<int_fd, 2>& stdoutPipe = stdoutPipe_.get();
 
   Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
@@ -601,10 +601,10 @@ TEST_F(IOSwitchboardServerTest, ReceiveHeartbeat)
   // We use a pipe in this test to prevent the switchboard from
   // reading EOF on its `stdoutFromFd` until we are ready for the
   // switchboard to terminate.
-  Try<std::array<int, 2>> stdoutPipe_ = os::pipe();
+  Try<std::array<int_fd, 2>> stdoutPipe_ = os::pipe();
   ASSERT_SOME(stdoutPipe_);
 
-  const std::array<int, 2>& stdoutPipe = stdoutPipe_.get();
+  const std::array<int_fd, 2>& stdoutPipe = stdoutPipe_.get();
 
   Try<int> nullFd = os::open(os::DEV_NULL, O_RDWR);
   ASSERT_SOME(nullFd);
@@ -711,7 +711,7 @@ TEST_F(IOSwitchboardTest, ContainerAttach)
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> create = MesosContainerizer::create(
       flags,
@@ -744,13 +744,9 @@ TEST_F(IOSwitchboardTest, ContainerAttach)
 
   Future<bool> launch = containerizer->launch(
       containerId,
-      None(),
-      executorInfo,
-      directory.get(),
-      None(),
-      SlaveID(),
+      createContainerConfig(None(), executorInfo, directory.get()),
       map<string, string>(),
-      true); // TODO(benh): Ever want to test not checkpointing?
+      None());
 
   AWAIT_ASSERT_TRUE(launch);
 
@@ -777,7 +773,7 @@ TEST_F(IOSwitchboardTest, OutputRedirectionWithTTY)
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> create = MesosContainerizer::create(
       flags,
@@ -813,13 +809,9 @@ TEST_F(IOSwitchboardTest, OutputRedirectionWithTTY)
 
   Future<bool> launch = containerizer->launch(
       containerId,
-      None(),
-      executorInfo,
-      directory.get(),
-      None(),
-      SlaveID(),
+      createContainerConfig(None(), executorInfo, directory.get()),
       map<string, string>(),
-      true); // TODO(benh): Ever want to test not checkpointing?
+      None());
 
   AWAIT_ASSERT_TRUE(launch);
 
@@ -842,7 +834,7 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Try<MesosContainerizer*> create = MesosContainerizer::create(
       flags,
@@ -871,13 +863,9 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
 
   Future<bool> launch = containerizer->launch(
       containerId,
-      None(),
-      executorInfo,
-      directory.get(),
-      None(),
-      SlaveID(),
+      createContainerConfig(None(), executorInfo, directory.get()),
       map<string, string>(),
-      true); // TODO(benh): Ever want to test not checkpointing?
+      None());
 
   AWAIT_ASSERT_TRUE(launch);
 
@@ -887,11 +875,12 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
 
   launch = containerizer->launch(
       childContainerId,
-      createCommandInfo("sleep 1000"),
-      None(),
-      None(),
-      state.id,
-      mesos::slave::ContainerClass::DEBUG);
+      createContainerConfig(
+          createCommandInfo("sleep 1000"),
+          None(),
+          mesos::slave::ContainerClass::DEBUG),
+      map<string, string>(),
+      None());
 
   AWAIT_ASSERT_TRUE(launch);
 
@@ -937,7 +926,7 @@ TEST_F(IOSwitchboardTest, DISABLED_RecoverThenKillSwitchboardContainerDestroyed)
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
 
@@ -1058,7 +1047,7 @@ TEST_F(IOSwitchboardTest, ContainerAttachAfterSlaveRestart)
   flags.launcher = "posix";
   flags.isolation = "posix/cpu";
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
 

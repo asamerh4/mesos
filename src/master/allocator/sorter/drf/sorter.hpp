@@ -125,7 +125,7 @@ private:
   // Resources (by name) that will be excluded from fair sharing.
   Option<std::set<std::string>> fairnessExcludeResourceNames;
 
-  // If true, sort() will recalculate all shares.
+  // If true, sort() will recalculate all shares and resort the tree.
   bool dirty = false;
 
   // The root node in the sorter tree.
@@ -195,8 +195,19 @@ private:
 // and "c", and leaf nodes for the clients "a/b" and "c/d".
 struct DRFSorter::Node
 {
-  Node(const std::string& _name, Node* _parent)
-    : name(_name), share(0), active(false), parent(_parent)
+  // Indicates whether a node is an active leaf node, an inactive leaf
+  // node, or an internal node. Sorter clients always correspond to
+  // leaf nodes, and only leaf nodes can be activated or deactivated.
+  // The root node is always an "internal" node.
+  enum Kind
+  {
+    ACTIVE_LEAF,
+    INACTIVE_LEAF,
+    INTERNAL
+  };
+
+  Node(const std::string& _name, Kind _kind, Node* _parent)
+    : name(_name), share(0), kind(_kind), parent(_parent)
   {
     // Compute the node's path. Three cases:
     //
@@ -232,13 +243,22 @@ struct DRFSorter::Node
 
   double share;
 
-  // True if this node represents an active sorter client. False if
-  // this node represents an inactive sorter client or an internal node.
-  //
-  // TODO(neilc): Replace this with a three-valued enum?
-  bool active;
+  Kind kind;
 
   Node* parent;
+
+  // Pointers to the child nodes. `children` is only non-empty if
+  // `kind` is INTERNAL_NODE. Two ordering invariants are maintained
+  // on the `children` vector:
+  //
+  // (1) All inactive leaves are stored at the end of the vector; that
+  // is, each `children` vector consists of zero or more active leaves
+  // and internal nodes, followed by zero or more inactive leaves. This
+  // means that code that only wants to iterate over active children
+  // can stop when the first inactive leaf is observed.
+  //
+  // (2) If the tree is not dirty, the active leaves and internal
+  // nodes are kept sorted by DRF share.
   std::vector<Node*> children;
 
   // If this node represents a sorter client, this returns the path of
@@ -253,14 +273,26 @@ struct DRFSorter::Node
   std::string clientPath() const
   {
     if (name == ".") {
+      CHECK(kind == ACTIVE_LEAF || kind == INACTIVE_LEAF);
       return CHECK_NOTNULL(parent)->path;
     }
 
     return path;
   }
 
+  bool isLeaf() const
+  {
+    if (kind == ACTIVE_LEAF || kind == INACTIVE_LEAF) {
+      CHECK(children.empty());
+      return true;
+    }
+
+    return false;
+  }
+
   void removeChild(const Node* child)
   {
+    // Sanity check: ensure we are removing an extant node.
     auto it = std::find(children.begin(), children.end(), child);
     CHECK(it != children.end());
 
@@ -269,10 +301,19 @@ struct DRFSorter::Node
 
   void addChild(Node* child)
   {
+    // Sanity check: don't allow duplicates to be inserted.
     auto it = std::find(children.begin(), children.end(), child);
     CHECK(it == children.end());
 
-    children.push_back(child);
+    // If we're inserting an inactive leaf, place it at the end of the
+    // `children` vector; otherwise, place it at the beginning. This
+    // maintains ordering invariant (1) above. It is up to the caller
+    // to maintain invariant (2) -- e.g., by marking the tree dirty.
+    if (child->kind == INACTIVE_LEAF) {
+      children.push_back(child);
+    } else {
+      children.insert(children.begin(), child);
+    }
   }
 
   // Allocation for a node.

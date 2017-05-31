@@ -77,6 +77,8 @@ public:
   Duration authentication_backoff_factor;
   Option<JSON::Object> executor_environment_variables;
   Duration executor_registration_timeout;
+  Duration executor_reregistration_timeout;
+  Option<Duration> executor_reregistration_retry_interval;
   Duration executor_shutdown_grace_period;
 #ifdef USE_SSL_SOCKET
   Option<Path> executor_secret_key;
@@ -127,7 +129,7 @@ public:
   std::string docker_socket;
   Option<JSON::Object> docker_config;
 
-#ifdef WITH_NETWORK_ISOLATOR
+#ifdef ENABLE_PORT_MAPPING_ISOLATOR
   uint16_t ephemeral_ports_per_container;
   Option<std::string> eth0_name;
   Option<std::string> lo_name;
@@ -154,6 +156,7 @@ public:
 #endif // USE_SSL_SOCKET
   Option<Path> http_credentials;
   Option<std::string> hooks;
+  Option<std::string> secret_resolver;
   Option<std::string> resource_estimator;
   Option<std::string> qos_controller;
   Duration qos_correction_interval_min;

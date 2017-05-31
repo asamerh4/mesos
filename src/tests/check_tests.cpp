@@ -952,6 +952,9 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   const v1::TaskStatus& healthResult = updateHealthResult->status();
 
   ASSERT_EQ(TASK_RUNNING, healthResult.state());
+  ASSERT_EQ(
+      v1::TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      healthResult.reason());
   EXPECT_EQ(taskInfo.task_id(), healthResult.task_id());
   EXPECT_TRUE(healthResult.has_healthy());
   EXPECT_TRUE(healthResult.healthy());
@@ -1308,7 +1311,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command checks)
@@ -1502,7 +1505,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command checks)
@@ -1663,7 +1666,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command checks)
@@ -1808,7 +1811,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command checks)
@@ -1887,10 +1890,10 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   // Default executor delegates launching both the task and its check to the
   // agent. To avoid a race, we explicitly synchronize.
-  Try<std::array<int, 2>> pipes_ = os::pipe();
+  Try<std::array<int_fd, 2>> pipes_ = os::pipe();
   ASSERT_SOME(pipes_);
 
-  const std::array<int, 2>& pipes = pipes_.get();
+  const std::array<int_fd, 2>& pipes = pipes_.get();
 
   const string filename = "nested_inherits_work_dir";
 
@@ -1976,7 +1979,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command checks)
@@ -2124,7 +2127,7 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Fetcher fetcher;
+  Fetcher fetcher(flags);
 
   // We have to explicitly create a `Containerizer` in non-local mode,
   // because `LaunchNestedContainerSession` (used by command checks)
@@ -2257,6 +2260,9 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   const v1::TaskStatus& healthResult = updateHealthResult->status();
 
   ASSERT_EQ(TASK_RUNNING, healthResult.state());
+  ASSERT_EQ(
+      v1::TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
+      healthResult.reason());
   EXPECT_EQ(taskInfo.task_id(), healthResult.task_id());
   EXPECT_TRUE(healthResult.has_healthy());
   EXPECT_TRUE(healthResult.healthy());
