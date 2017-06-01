@@ -7,8 +7,8 @@ layout: documentation
 # Mesos Configuration
 
 The Mesos master and agent can take a variety of configuration options
-through command-line arguments, or environment variables. A list of
-the available options can be seen by running `mesos-master --help` or
+through command-line arguments or environment variables. A list of the
+available options can be seen by running `mesos-master --help` or
 `mesos-agent --help`. Each option can be set in two ways:
 
 * By passing it to the binary using `--option_name=value`, either
@@ -120,63 +120,6 @@ Show the help message and exit. (default: false)
 </tr>
 <tr>
   <td>
-    --http_authenticators=VALUE
-  </td>
-  <td>
-HTTP authenticator implementation to use when handling requests to
-authenticated endpoints. Use the default
-<code>basic</code>, or load an alternate
-HTTP authenticator module using <code>--modules</code>.
-(default: basic, or basic and JWT if executor authentication is enabled)
-  </td>
-</tr>
-<tr>
-  <td>
-    --ip=VALUE
-  </td>
-  <td>
-IP address to listen on. This cannot be used in conjunction
-with <code>--ip_discovery_command</code>. (master default: 5050; agent default: 5051)
-  </td>
-</tr>
-<tr>
-  <td>
-    --ip_discovery_command=VALUE
-  </td>
-  <td>
-Optional IP discovery binary: if set, it is expected to emit
-the IP address which the master/agent will try to bind to.
-Cannot be used in conjunction with <code>--ip</code>.
-  </td>
-</tr>
-<tr>
-  <td>
-    --modules_dir=VALUE
-  </td>
-  <td>
-Directory path of the module manifest files. The manifest files are processed in
-alphabetical order. (See <code>--modules</code> for more information on module
-manifest files) Cannot be used in conjunction with <code>--modules</code>.
-  </td>
-</tr>
-<tr>
-  <td>
-    --port=VALUE
-  </td>
-  <td>
-Port to listen on.
-  </td>
-</tr>
-<tr>
-  <td>
-    --[no-]version
-  </td>
-  <td>
-Show version and exit. (default: false)
-  </td>
-</tr>
-<tr>
-  <td>
     --hooks=VALUE
   </td>
   <td>
@@ -205,6 +148,36 @@ Whether we should execute a lookup to find out the server's hostname,
 if not explicitly set (via, e.g., <code>--hostname</code>).
 True by default; if set to <code>false</code> it will cause Mesos
 to use the IP address, unless the hostname is explicitly set. (default: true)
+  </td>
+</tr>
+<tr>
+  <td>
+    --http_authenticators=VALUE
+  </td>
+  <td>
+HTTP authenticator implementation to use when handling requests to
+authenticated endpoints. Use the default <code>basic</code>, or load an
+alternate HTTP authenticator module using <code>--modules</code>.
+(default: basic, or basic and JWT if executor authentication is enabled)
+  </td>
+</tr>
+<tr>
+  <td>
+    --ip=VALUE
+  </td>
+  <td>
+IP address to listen on. This cannot be used in conjunction
+with <code>--ip_discovery_command</code>. (master default: 5050; agent default: 5051)
+  </td>
+</tr>
+<tr>
+  <td>
+    --ip_discovery_command=VALUE
+  </td>
+  <td>
+Optional IP discovery binary: if set, it is expected to emit
+the IP address which the master/agent will try to bind to.
+Cannot be used in conjunction with <code>--ip</code>.
   </td>
 </tr>
 <tr>
@@ -254,6 +227,32 @@ Example:
 <p/> Cannot be used in conjunction with --modules_dir.
   </td>
 </tr>
+<tr>
+  <td>
+    --modules_dir=VALUE
+  </td>
+  <td>
+Directory path of the module manifest files. The manifest files are processed in
+alphabetical order. (See <code>--modules</code> for more information on module
+manifest files). Cannot be used in conjunction with <code>--modules</code>.
+  </td>
+</tr>
+<tr>
+  <td>
+    --port=VALUE
+  </td>
+  <td>
+Port to listen on.
+  </td>
+</tr>
+<tr>
+  <td>
+    --[no-]version
+  </td>
+  <td>
+Show version and exit. (default: false)
+  </td>
+</tr>
 </table>
 
 *These logging options can also be supplied to both masters and agents.*
@@ -275,7 +274,7 @@ For more about logging, see the [logging documentation](logging.md).
     --[no-]quiet
   </td>
   <td>
-Disable logging to stderr (default: false)
+Disable logging to stderr. (default: false)
   </td>
 </tr>
 <tr>
@@ -316,7 +315,7 @@ written to <code>--log_dir</code>, if specified. (default: INFO)
   </td>
   <td>
 Whether the master/agent should initialize Google logging for the
-Mesos scheduler and executor drivers, in same way as described here.
+scheduler and executor drivers, in the same way as described here.
 The scheduler/executor drivers have separate logs and do not get
 written to the master/agent logs.
 <p/>
@@ -386,7 +385,7 @@ lose data when cleanup occurs. (Example: <code>/var/lib/mesos/master</code>)
     --zk=VALUE
   </td>
   <td>
-ZooKeeper URL (used for leader election amongst masters)
+ZooKeeper URL (used for leader election amongst masters).
 May be one of:
 <pre><code>zk://host1:port1,host2:port2,.../path
 zk://username:password@host1:port1,host2:port2,.../path
@@ -587,7 +586,7 @@ Note that if the flag <code>--authorizers</code> is provided with a value
 different than the default <code>local</code>, the ACLs
 passed through the <code>--acls</code> flag will be ignored.
 <p/>
-Currently there's no support for multiple authorizers. (default: local)
+Currently there is no support for multiple authorizers. (default: local)
   </td>
 </tr>
 <tr>
@@ -631,12 +630,29 @@ sharing implementation currently has limitations. E.g. See the problem of
 </tr>
 <tr>
   <td>
+    --[no_]filter_gpu_resources
+  </td>
+  <td>
+When set to true, this flag will cause the mesos master to filter all offers
+from agents with GPU resources by only sending them to frameworks that opt into
+the 'GPU_RESOURCES' framework capability. When set to false, this flag will
+cause the master to not filter offers from agents with GPU resources, and
+indiscriminately send them to all frameworks whether they set the
+'GPU_RESOURCES' capability or not.  This flag is meant as a temporary workaround
+towards the eventual deprecation of the 'GPU_RESOURCES' capability. Please see
+the following for more information:
+    <a href="https://www.mail-archive.com/dev@mesos.apache.org/msg37571.html">msg37571</a>
+    <a href="https://issues.apache.org/jira/browse/MESOS-7576">MESOS-7576</a>
+  </td>
+</tr>
+<tr>
+  <td>
     --framework_sorter=VALUE
   </td>
   <td>
-Policy to use for allocating resources
-between a given user's frameworks. Options
-are the same as for user_allocator. (default: drf)
+Policy to use for allocating resources between a given user's
+frameworks. Options are the same as for <code>--user_sorter</code>.
+(default: drf)
   </td>
 </tr>
 <tr>
@@ -831,8 +847,7 @@ Can root submit frameworks? (default: true)
     --user_sorter=VALUE
   </td>
   <td>
-Policy to use for allocating resources
-between users. May be one of:
+Policy to use for allocating resources between users. May be one of:
   dominant_resource_fairness (drf) (default: drf)
   </td>
 </tr>
@@ -862,9 +877,9 @@ using the <code>/weights</code> HTTP endpoint.
   </td>
   <td>
 Path to a file which contains a list of agents (one per line) to
-advertise offers for. The file is watched, and periodically re-read to
-refresh the agent whitelist. By default there is no whitelist / all
-machines are accepted. Path could be of the form
+advertise offers for. The file is watched and periodically re-read to
+refresh the agent whitelist. By default there is no whitelist: all
+machines are accepted. Path can be of the form
 <code>file:///path/to/file</code> or <code>/path/to/file</code>.
   </td>
 </tr>

@@ -128,8 +128,10 @@ using mesos::slave::ResourceEstimator;
 using std::find;
 using std::list;
 using std::map;
+using std::ostream;
 using std::ostringstream;
 using std::set;
+using std::shared_ptr;
 using std::string;
 using std::vector;
 
@@ -160,6 +162,20 @@ namespace internal {
 namespace slave {
 
 using namespace state;
+
+// Forward declarations.
+
+// Needed for logging task/task group.
+static string taskOrTaskGroup(
+    const Option<TaskInfo>& task,
+    const Option<TaskGroupInfo>& taskGroup);
+
+
+// Returns the command info for default executor.
+static CommandInfo defaultExecutorCommandInfo(
+    const std::string& launcherDir,
+    const Option<std::string>& user);
+
 
 Slave::Slave(const string& id,
              const slave::Flags& _flags,
@@ -1485,7 +1501,7 @@ void Slave::doReliableRegistration(Duration maxBackoff)
           completedFramework_->add_tasks()->CopyFrom(*task);
         }
 
-        foreach (const std::shared_ptr<Task>& task, executor->completedTasks) {
+        foreach (const shared_ptr<Task>& task, executor->completedTasks) {
           VLOG(2) << "Reregistering completed task " << task->task_id();
           completedFramework_->add_tasks()->CopyFrom(*task);
         }
@@ -2945,7 +2961,7 @@ void Slave::killTask(
       // send a TASK_KILLED update for all tasks in the group.
       Option<TaskGroupInfo> taskGroup = executor->getQueuedTaskGroup(taskId);
 
-      std::list<StatusUpdate> updates;
+      list<StatusUpdate> updates;
       if (taskGroup.isSome()) {
         foreach (const TaskInfo& task, taskGroup->tasks()) {
           updates.push_back(protobuf::createStatusUpdate(
@@ -3002,7 +3018,7 @@ void Slave::killTask(
         // send a TASK_KILLED update for all the other tasks.
         Option<TaskGroupInfo> taskGroup = executor->getQueuedTaskGroup(taskId);
 
-        std::list<StatusUpdate> updates;
+        list<StatusUpdate> updates;
         if (taskGroup.isSome()) {
           foreach (const TaskInfo& task, taskGroup->tasks()) {
             updates.push_back(protobuf::createStatusUpdate(
@@ -4882,6 +4898,26 @@ Executor* Slave::getExecutor(
 }
 
 
+Executor* Slave::getExecutor(const ContainerID& containerId) const
+{
+  const ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
+
+  // Locate the executor (for now we just loop since we don't
+  // index based on container id and this likely won't have a
+  // significant performance impact due to the low number of
+  // executors per-agent).
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      if (rootContainerId == executor->containerId) {
+        return executor;
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+
 ExecutorInfo Slave::getExecutorInfo(
     const FrameworkInfo& frameworkInfo,
     const TaskInfo& task) const
@@ -5113,7 +5149,7 @@ void Slave::executorLaunched(
                << "' for executor '" << executorId
                << "' of framework " << frameworkId
                << " failed to start: "
-               << (future.isFailed() ? future.failure() : " future discarded");
+               << (future.isFailed() ? future.failure() : "future discarded");
 
     ++metrics.container_launch_errors;
 
@@ -6549,126 +6585,6 @@ Future<ResourceUsage> Slave::usage()
 }
 
 
-// TODO(dhamon): Move these to their own metrics.hpp|cpp.
-double Slave::_tasks_staging()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    typedef hashmap<TaskID, TaskInfo> TaskMap;
-    foreachvalue (const TaskMap& tasks, framework->pending) {
-      count += tasks.size();
-    }
-
-    foreachvalue (Executor* executor, framework->executors) {
-      count += executor->queuedTasks.size();
-
-      foreachvalue (Task* task, executor->launchedTasks) {
-        if (task->state() == TASK_STAGING) {
-          count++;
-        }
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_tasks_starting()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      foreachvalue (Task* task, executor->launchedTasks) {
-        if (task->state() == TASK_STARTING) {
-          count++;
-        }
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_tasks_running()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      foreachvalue (Task* task, executor->launchedTasks) {
-        if (task->state() == TASK_RUNNING) {
-          count++;
-        }
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_tasks_killing()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      foreachvalue (Task* task, executor->launchedTasks) {
-        if (task->state() == TASK_KILLING) {
-          count++;
-        }
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_executors_registering()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      if (executor->state == Executor::REGISTERING) {
-        count++;
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_executors_running()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      if (executor->state == Executor::RUNNING) {
-        count++;
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_executors_terminating()
-{
-  double count = 0.0;
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      if (executor->state == Executor::TERMINATING) {
-        count++;
-      }
-    }
-  }
-  return count;
-}
-
-
-double Slave::_executor_directory_max_allowed_age_secs()
-{
-  return executorDirectoryMaxAllowedAge.secs();
-}
-
-
 // As a principle, we do not need to re-authorize actions that have already
 // been authorized by the master. However, we re-authorize the RUN_TASK action
 // on the agent even though the master has already authorized it because:
@@ -6844,6 +6760,126 @@ void Slave::sendExecutorTerminatedStatusUpdate(
 }
 
 
+// TODO(dhamon): Move these to their own metrics.hpp|cpp.
+double Slave::_tasks_staging()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    typedef hashmap<TaskID, TaskInfo> TaskMap;
+    foreachvalue (const TaskMap& tasks, framework->pending) {
+      count += tasks.size();
+    }
+
+    foreachvalue (Executor* executor, framework->executors) {
+      count += executor->queuedTasks.size();
+
+      foreachvalue (Task* task, executor->launchedTasks) {
+        if (task->state() == TASK_STAGING) {
+          count++;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_tasks_starting()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      foreachvalue (Task* task, executor->launchedTasks) {
+        if (task->state() == TASK_STARTING) {
+          count++;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_tasks_running()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      foreachvalue (Task* task, executor->launchedTasks) {
+        if (task->state() == TASK_RUNNING) {
+          count++;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_tasks_killing()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      foreachvalue (Task* task, executor->launchedTasks) {
+        if (task->state() == TASK_KILLING) {
+          count++;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_executors_registering()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      if (executor->state == Executor::REGISTERING) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_executors_running()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      if (executor->state == Executor::RUNNING) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_executors_terminating()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      if (executor->state == Executor::TERMINATING) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+
+double Slave::_executor_directory_max_allowed_age_secs()
+{
+  return executorDirectoryMaxAllowedAge.secs();
+}
+
+
 double Slave::_resources_total(const string& name)
 {
   double total = 0.0;
@@ -6943,6 +6979,15 @@ Framework::Framework(
     completedExecutors(slaveFlags.max_completed_executors_per_framework) {}
 
 
+Framework::~Framework()
+{
+  // We own the non-completed executor pointers, so they need to be deleted.
+  foreachvalue (Executor* executor, executors) {
+    delete executor;
+  }
+}
+
+
 void Framework::checkpointFramework() const
 {
   // Checkpoint the framework info.
@@ -6965,15 +7010,6 @@ void Framework::checkpointFramework() const
           << " to '" << path << "'";
 
   CHECK_SOME(state::checkpoint(path, pid.getOrElse(UPID())));
-}
-
-
-Framework::~Framework()
-{
-  // We own the non-completed executor pointers, so they need to be deleted.
-  foreachvalue (Executor* executor, executors) {
-    delete executor;
-  }
 }
 
 
@@ -7066,18 +7102,6 @@ Executor* Framework::addExecutor(const ExecutorInfo& executorInfo)
 }
 
 
-void Framework::destroyExecutor(const ExecutorID& executorId)
-{
-  if (executors.contains(executorId)) {
-    Executor* executor = executors[executorId];
-    executors.erase(executorId);
-
-    // Pass ownership of the executor pointer.
-    completedExecutors.push_back(Owned<Executor>(executor));
-  }
-}
-
-
 Executor* Framework::getExecutor(const ExecutorID& executorId) const
 {
   if (executors.contains(executorId)) {
@@ -7101,44 +7125,15 @@ Executor* Framework::getExecutor(const TaskID& taskId) const
 }
 
 
-// Return `true` if `task` was a pending task of this framework
-// before the removal; `false` otherwise.
-bool Framework::removePendingTask(
-    const TaskInfo& task,
-    const ExecutorInfo& executorInfo)
+void Framework::destroyExecutor(const ExecutorID& executorId)
 {
-  const ExecutorID executorId = executorInfo.executor_id();
+  if (executors.contains(executorId)) {
+    Executor* executor = executors[executorId];
+    executors.erase(executorId);
 
-  if (pending.contains(executorId) &&
-      pending.at(executorId).contains(task.task_id())) {
-    pending.at(executorId).erase(task.task_id());
-    if (pending.at(executorId).empty()) {
-      pending.erase(executorId);
-    }
-    return true;
+    // Pass ownership of the executor pointer.
+    completedExecutors.push_back(Owned<Executor>(executor));
   }
-
-  return false;
-}
-
-
-Executor* Slave::getExecutor(const ContainerID& containerId) const
-{
-  const ContainerID rootContainerId = protobuf::getRootContainerId(containerId);
-
-  // Locate the executor (for now we just loop since we don't
-  // index based on container id and this likely won't have a
-  // significant performance impact due to the low number of
-  // executors per-agent).
-  foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      if (rootContainerId == executor->containerId) {
-        return executor;
-      }
-    }
-  }
-
-  return nullptr;
 }
 
 
@@ -7307,6 +7302,47 @@ void Framework::recoverExecutor(
 }
 
 
+bool Framework::hasTask(const TaskID& taskId)
+{
+  foreachkey (const ExecutorID& executorId, pending) {
+    if (pending[executorId].contains(taskId)) {
+      return true;
+    }
+  }
+
+  foreachvalue (Executor* executor, executors) {
+    if (executor->queuedTasks.contains(taskId) ||
+        executor->launchedTasks.contains(taskId) ||
+        executor->terminatedTasks.contains(taskId)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+// Return `true` if `task` was a pending task of this framework
+// before the removal; `false` otherwise.
+bool Framework::removePendingTask(
+    const TaskInfo& task,
+    const ExecutorInfo& executorInfo)
+{
+  const ExecutorID executorId = executorInfo.executor_id();
+
+  if (pending.contains(executorId) &&
+      pending.at(executorId).contains(task.task_id())) {
+    pending.at(executorId).erase(task.task_id());
+    if (pending.at(executorId).empty()) {
+      pending.erase(executorId);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+
 Executor::Executor(
     Slave* _slave,
     const FrameworkID& _frameworkId,
@@ -7389,7 +7425,7 @@ void Executor::completeTask(const TaskID& taskId)
     << "Failed to find terminated task " << taskId;
 
   Task* task = terminatedTasks[taskId];
-  completedTasks.push_back(std::shared_ptr<Task>(task));
+  completedTasks.push_back(shared_ptr<Task>(task));
   terminatedTasks.erase(taskId);
 }
 
@@ -7761,7 +7797,79 @@ map<string, string> executorEnvironment(
 }
 
 
-CommandInfo defaultExecutorCommandInfo(
+ostream& operator<<(ostream& stream, const Executor& executor)
+{
+  stream << "'" << executor.id << "' of framework " << executor.frameworkId;
+
+  if (executor.pid.isSome() && executor.pid.get()) {
+    stream << " at " << executor.pid.get();
+  } else if (executor.http.isSome() ||
+             (executor.slave->state == Slave::RECOVERING &&
+              executor.state == Executor::REGISTERING &&
+              executor.http.isNone() && executor.pid.isNone())) {
+    stream << " (via HTTP)";
+  }
+
+  return stream;
+}
+
+
+ostream& operator<<(ostream& stream, Executor::State state)
+{
+  switch (state) {
+    case Executor::REGISTERING: return stream << "REGISTERING";
+    case Executor::RUNNING:     return stream << "RUNNING";
+    case Executor::TERMINATING: return stream << "TERMINATING";
+    case Executor::TERMINATED:  return stream << "TERMINATED";
+    default:                    return stream << "UNKNOWN";
+  }
+}
+
+
+ostream& operator<<(ostream& stream, Framework::State state)
+{
+  switch (state) {
+    case Framework::RUNNING:     return stream << "RUNNING";
+    case Framework::TERMINATING: return stream << "TERMINATING";
+    default:                     return stream << "UNKNOWN";
+  }
+}
+
+
+ostream& operator<<(ostream& stream, Slave::State state)
+{
+  switch (state) {
+    case Slave::RECOVERING:   return stream << "RECOVERING";
+    case Slave::DISCONNECTED: return stream << "DISCONNECTED";
+    case Slave::RUNNING:      return stream << "RUNNING";
+    case Slave::TERMINATING:  return stream << "TERMINATING";
+    default:                  return stream << "UNKNOWN";
+  }
+}
+
+
+static string taskOrTaskGroup(
+    const Option<TaskInfo>& task,
+    const Option<TaskGroupInfo>& taskGroup)
+{
+  ostringstream out;
+  if (task.isSome()) {
+    out << "task '" << task->task_id() << "'";
+  } else {
+    CHECK_SOME(taskGroup);
+
+    vector<TaskID> taskIds;
+    foreach (const TaskInfo& task, taskGroup->tasks()) {
+      taskIds.push_back(task.task_id());
+    }
+     out << "task group containing tasks " << taskIds;
+  }
+
+  return out.str();
+}
+
+
+static CommandInfo defaultExecutorCommandInfo(
     const string& launcherDir,
     const Option<string>& user)
 {
@@ -7787,78 +7895,6 @@ CommandInfo defaultExecutorCommandInfo(
   }
 
   return commandInfo;
-}
-
-
-std::ostream& operator<<(std::ostream& stream, const Executor& executor)
-{
-  stream << "'" << executor.id << "' of framework " << executor.frameworkId;
-
-  if (executor.pid.isSome() && executor.pid.get()) {
-    stream << " at " << executor.pid.get();
-  } else if (executor.http.isSome() ||
-             (executor.slave->state == Slave::RECOVERING &&
-              executor.state == Executor::REGISTERING &&
-              executor.http.isNone() && executor.pid.isNone())) {
-    stream << " (via HTTP)";
-  }
-
-  return stream;
-}
-
-
-std::ostream& operator<<(std::ostream& stream, Slave::State state)
-{
-  switch (state) {
-    case Slave::RECOVERING:   return stream << "RECOVERING";
-    case Slave::DISCONNECTED: return stream << "DISCONNECTED";
-    case Slave::RUNNING:      return stream << "RUNNING";
-    case Slave::TERMINATING:  return stream << "TERMINATING";
-    default:                  return stream << "UNKNOWN";
-  }
-}
-
-
-std::ostream& operator<<(std::ostream& stream, Framework::State state)
-{
-  switch (state) {
-    case Framework::RUNNING:     return stream << "RUNNING";
-    case Framework::TERMINATING: return stream << "TERMINATING";
-    default:                     return stream << "UNKNOWN";
-  }
-}
-
-
-std::ostream& operator<<(std::ostream& stream, Executor::State state)
-{
-  switch (state) {
-    case Executor::REGISTERING: return stream << "REGISTERING";
-    case Executor::RUNNING:     return stream << "RUNNING";
-    case Executor::TERMINATING: return stream << "TERMINATING";
-    case Executor::TERMINATED:  return stream << "TERMINATED";
-    default:                    return stream << "UNKNOWN";
-  }
-}
-
-
-string taskOrTaskGroup(
-    const Option<TaskInfo>& task,
-    const Option<TaskGroupInfo>& taskGroup)
-{
-  ostringstream out;
-  if (task.isSome()) {
-    out << "task '" << task->task_id() << "'";
-  } else {
-    CHECK_SOME(taskGroup);
-
-    vector<TaskID> taskIds;
-    foreach (const TaskInfo& task, taskGroup->tasks()) {
-      taskIds.push_back(task.task_id());
-    }
-     out << "task group containing tasks " << taskIds;
-  }
-
-  return out.str();
 }
 
 } // namespace slave {

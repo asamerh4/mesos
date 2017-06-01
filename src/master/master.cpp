@@ -761,7 +761,8 @@ void Master::initialize()
       flags.allocation_interval,
       defer(self(), &Master::offer, lambda::_1, lambda::_2),
       defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2),
-      flags.fair_sharing_excluded_resource_names);
+      flags.fair_sharing_excluded_resource_names,
+      flags.filter_gpu_resources);
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
   // callback is safe because we shut down the whitelistWatcher in
@@ -1326,17 +1327,14 @@ void Master::exited(const UPID& pid)
       //    removed but the framework is removed from the slave's
       //    structs, its tasks transitioned to LOST and resources
       //    recovered.
-      //
-      // NOTE: If the framework hasn't re-registered yet and no agents
-      // (>= Mesos 1.0) have re-registered that are running any of the
-      // framework's tasks, we can't determine if the framework has
-      // enabled checkpointing. In that case, we assume it has.
       hashset<FrameworkID> frameworkIds =
         slave->tasks.keys() | slave->executors.keys();
 
       foreach (const FrameworkID& frameworkId, frameworkIds) {
         Framework* framework = getFramework(frameworkId);
-        if (framework != nullptr && !framework->info.checkpoint()) {
+        CHECK_NOTNULL(framework);
+
+        if (!framework->info.checkpoint()) {
           LOG(INFO) << "Removing framework " << *framework
                     << " from disconnected agent " << *slave
                     << " because the framework is not checkpointing";
@@ -3839,8 +3837,7 @@ void Master::accept(
             "Task launched with invalid offers: " + error.get().message,
             TaskStatus::REASON_INVALID_OFFERS);
 
-        if (protobuf::frameworkHasCapability(
-                framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        if (framework->capabilities.partitionAware) {
           metrics->tasks_dropped++;
         } else {
           metrics->tasks_lost++;
@@ -4066,8 +4063,7 @@ void Master::_accept(
             slave == nullptr ? "Agent removed" : "Agent disconnected",
             reason);
 
-        if (protobuf::frameworkHasCapability(
-                framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        if (framework->capabilities.partitionAware) {
           metrics->tasks_dropped++;
         } else {
           metrics->tasks_lost++;
@@ -6022,28 +6018,8 @@ void Master::__reregisterSlave(
   machineId.set_ip(stringify(pid.address.ip));
 
   // For easy lookup, first determine the set of FrameworkIDs on the
-  // re-registering agent that are partition-aware. We examine both
-  // the frameworks and the tasks running on the agent. The former is
-  // necessary because the master might have failed over and not know
-  // about a framework running on the agent; the latter is necessary
-  // because pre-1.0 Mesos agents don't supply a list of running
-  // frameworks on re-registration.
+  // re-registering agent that are partition-aware.
   hashset<FrameworkID> partitionAwareFrameworks;
-
-  // TODO(neilc): Remove this loop when we remove compatibility with
-  // pre-1.0 Mesos agents.
-  foreach (const Task& task, tasks) {
-    Framework* framework = getFramework(task.framework_id());
-
-    if (framework == nullptr) {
-      continue;
-    }
-
-    if (protobuf::frameworkHasCapability(
-            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
-      partitionAwareFrameworks.insert(framework->id());
-    }
-  }
 
   foreach (const FrameworkInfo& framework, frameworks) {
     if (protobuf::frameworkHasCapability(
@@ -6081,11 +6057,10 @@ void Master::__reregisterSlave(
   vector<Task> recoveredTasks;
   foreach (const Task& task, tasks) {
     const FrameworkID& frameworkId = task.framework_id();
-    Framework* framework = getFramework(frameworkId);
 
     // Don't re-add tasks whose framework has been shutdown at the
     // master. Such frameworks will be shutdown on the agent below.
-    if (isCompletedFramework(task.framework_id())) {
+    if (isCompletedFramework(frameworkId)) {
       continue;
     }
 
@@ -6093,6 +6068,7 @@ void Master::__reregisterSlave(
     if (partitionAwareFrameworks.contains(frameworkId)) {
       recoveredTasks.push_back(task);
 
+      Framework* framework = getFramework(frameworkId);
       if (framework != nullptr) {
         framework->unreachableTasks.erase(task.task_id());
       }
@@ -6190,24 +6166,10 @@ void Master::___reregisterSlave(
   CHECK_NOTNULL(slave);
 
   // Send the latest framework pids to the slave.
-  hashset<FrameworkID> ids;
-
-  // TODO(joerg84): Remove this after a deprecation cycle starting
-  // with the 1.0 release. It is only required if an older (pre 1.0)
-  // agent reregisters with a newer master.  In that case the agent
-  // does not have the `frameworks` field set which is used below to
-  // retrieve the framework information.
-  foreach (const Task& task, tasks) {
-    ids.insert(task.framework_id());
-  }
-
   foreach (const FrameworkInfo& frameworkInfo, frameworks) {
     CHECK(frameworkInfo.has_id());
-    ids.insert(frameworkInfo.id());
-  }
+    Framework* framework = getFramework(frameworkInfo.id());
 
-  foreach (const FrameworkID& frameworkId, ids) {
-    Framework* framework = getFramework(frameworkId);
     if (framework != nullptr) {
       UpdateFrameworkMessage message;
       message.mutable_framework_id()->CopyFrom(framework->id());
@@ -6219,29 +6181,26 @@ void Master::___reregisterSlave(
       message.set_pid(framework->pid.getOrElse(UPID()));
 
       send(slave->pid, message);
+    } else {
+      // The agent is running a framework that the master doesn't know
+      // about. Recover the framework using the `FrameworkInfo`
+      // supplied by the agent.
+
+      // We skip recovering the framework if it has already been
+      // marked completed at the master. In this situation, the master
+      // has already told the agent to shutdown the framework in
+      // `__reregisterSlave`.
+      if (isCompletedFramework(frameworkInfo.id())) {
+        continue;
+      }
+
+      LOG(INFO) << "Recovering framework " << frameworkInfo.id()
+                << " from re-registering agent " << *slave;
+
+      recoverFramework(frameworkInfo);
     }
   }
 
-  // If the agent is running any frameworks the master doesn't know
-  // about, recover the framework using the `FrameworkInfo` supplied
-  // by the agent. We don't recover frameworks that have already
-  // completed at the master.
-  foreach (const FrameworkInfo& frameworkInfo, frameworks) {
-    if (getFramework(frameworkInfo.id()) != nullptr) {
-      continue;
-    }
-    if (isCompletedFramework(frameworkInfo.id())) {
-      continue;
-    }
-
-    LOG(INFO) << "Recovering framework " << frameworkInfo.id()
-              << " from re-registering agent " << *slave;
-
-    recoverFramework(frameworkInfo);
-  }
-
-  // NOTE: Here we always send the message. Slaves whose version are
-  // less than 0.22.0 will drop it silently which is OK.
   LOG(INFO) << "Sending updated checkpointed resources "
             << slave->checkpointedResources
             << " to agent " << *slave;
@@ -6480,14 +6439,8 @@ void Master::statusUpdate(StatusUpdate update, const UPID& pid)
 
   LOG(INFO) << "Status update " << update << " from agent " << *slave;
 
-  // We ensure that the uuid of task status matches the update's uuid, in case
-  // the task status uuid is not set by the slave.
-  //
-  // TODO(vinod): This can be `CHECK(update.status().has_uuid())` from 0.27.0
-  // since a >= 0.26.0 slave will always correctly set task status uuid.
-  if (update.has_uuid()) {
-    update.mutable_status()->set_uuid(update.uuid());
-  }
+  // Agents >= 0.26 should always correctly set task status uuid.
+  CHECK(update.status().has_uuid());
 
   bool validStatusUpdate = true;
 
@@ -6773,23 +6726,10 @@ void Master::_markUnreachable(
   // PARTITION_AWARE capability.
   foreachkey (const FrameworkID& frameworkId, utils::copy(slave->tasks)) {
     Framework* framework = getFramework(frameworkId);
-
-    if (framework == nullptr) {
-      // If the framework is only running tasks on pre-1.0 agents and
-      // the framework hasn't yet re-registered, the master doesn't
-      // have a FrameworkInfo for it, and hence we cannot accurately
-      // determine whether the framework is partition-aware. We assume
-      // it is NOT partition-aware, since using TASK_LOST ensures
-      // compatibility with the previous (and default) Mesos behavior.
-      LOG(WARNING) << "Unable to determine if framework " << frameworkId
-                   << " is partition-aware, because the cluster contains"
-                   << " agents running an old version of Mesos; upgrading"
-                   << " the agents to Mesos 1.0 or later is recommended";
-    }
+    CHECK_NOTNULL(framework);
 
     TaskState newTaskState = TASK_UNREACHABLE;
-    if (framework == nullptr || !protobuf::frameworkHasCapability(
-            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+    if (!framework->capabilities.partitionAware) {
       newTaskState = TASK_LOST;
     }
 
@@ -6814,11 +6754,9 @@ void Master::_markUnreachable(
       updateTask(task, update);
       removeTask(task);
 
-      if (framework == nullptr || !framework->connected()) {
-        string status = (framework == nullptr ? "unknown" : "disconnected");
-
+      if (!framework->connected()) {
         LOG(WARNING) << "Dropping update " << update
-                     << " for " << status
+                     << " for disconnected "
                      << " framework " << frameworkId;
       } else {
         forward(update, UPID(), framework);
@@ -7062,8 +7000,7 @@ void Master::_reconcileTasks(
       // the framework does not have the PARTITION_AWARE capability,
       // send TASK_LOST for backward compatibility.
       TaskState taskState = TASK_UNKNOWN;
-      if (!protobuf::frameworkHasCapability(
-              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      if (!framework->capabilities.partitionAware) {
         taskState = TASK_LOST;
       }
 
@@ -7089,8 +7026,7 @@ void Master::_reconcileTasks(
       const TimeInfo& unreachableTime = slaves.unreachable[slaveId.get()];
 
       TaskState taskState = TASK_UNREACHABLE;
-      if (!protobuf::frameworkHasCapability(
-              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      if (!framework->capabilities.partitionAware) {
         taskState = TASK_LOST;
       }
 
@@ -7114,8 +7050,7 @@ void Master::_reconcileTasks(
       // framework does not have the PARTITION_AWARE capability, send
       // TASK_LOST for backward compatibility.
       TaskState taskState = TASK_UNKNOWN;
-      if (!protobuf::frameworkHasCapability(
-              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      if (!framework->capabilities.partitionAware) {
         taskState = TASK_LOST;
       }
 
@@ -7627,16 +7562,8 @@ void Master::reconcileKnownSlave(
   // for resources. First we index the executors for fast lookup below.
   multihashmap<FrameworkID, ExecutorID> slaveExecutors;
   foreach (const ExecutorInfo& executor, executors) {
-    // TODO(bmahler): The slave ensures the framework id is set in the
-    // framework info when re-registering. This can be killed in 0.15.0
-    // as we've added code in 0.14.0 to ensure the framework id is set
-    // in the scheduler driver.
-    if (!executor.has_framework_id()) {
-      LOG(ERROR) << "Agent " << *slave
-                 << " re-registered with executor '" << executor.executor_id()
-                 << "' without setting the framework id";
-      continue;
-    }
+    // Master validates that `framework_id` is set during task launch.
+    CHECK(executor.has_framework_id());
     slaveExecutors.put(executor.framework_id(), executor.executor_id());
   }
 

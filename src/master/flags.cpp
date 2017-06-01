@@ -171,23 +171,21 @@ mesos::internal::master::Flags::Flags()
   add(&Flags::whitelist,
       "whitelist",
       "Path to a file which contains a list of agents (one per line) to\n"
-      "advertise offers for. The file is watched, and periodically re-read to\n"
-      "refresh the agent whitelist. By default there is no whitelist / all\n"
-      "machines are accepted. Path could be of the form\n"
+      "advertise offers for. The file is watched and periodically re-read to\n"
+      "refresh the agent whitelist. By default there is no whitelist: all\n"
+      "machines are accepted. Path can be of the form\n"
       "`file:///path/to/file` or `/path/to/file`.\n");
 
   add(&Flags::user_sorter,
       "user_sorter",
-      "Policy to use for allocating resources\n"
-      "between users. May be one of:\n"
+      "Policy to use for allocating resources between users. May be one of:\n"
       "  dominant_resource_fairness (drf)",
       "drf");
 
   add(&Flags::framework_sorter,
       "framework_sorter",
-      "Policy to use for allocating resources\n"
-      "between a given user's frameworks. Options\n"
-      "are the same as for user_allocator.",
+      "Policy to use for allocating resources between a given user's\n"
+      "frameworks. Options are the same as for `--user_sorter`.",
       "drf");
 
   add(&Flags::allocation_interval,
@@ -433,7 +431,7 @@ mesos::internal::master::Flags::Flags()
       "modules_dir",
       "Directory path of the module manifest files.\n"
       "The manifest files are processed in alphabetical order.\n"
-      "(See --modules for more information on module manifest files)\n"
+      "(See --modules for more information on module manifest files).\n"
       "Cannot be used in conjunction with --modules.\n");
 
   add(&Flags::authenticators,
@@ -459,6 +457,22 @@ mesos::internal::master::Flags::Flags()
       "problem of \"scarce\" resources:\n"
       "  http://www.mail-archive.com/dev@mesos.apache.org/msg35631.html\n"
       "  https://issues.apache.org/jira/browse/MESOS-5377");
+
+  add(&Flags::filter_gpu_resources,
+      "filter_gpu_resources",
+      "When set to true, this flag will cause the mesos master to\n"
+      "filter all offers from agents with GPU resources by only sending\n"
+      "them to frameworks that opt into the `GPU_RESOURCES` framework\n"
+      "capability. When set to false, this flag will cause the master\n"
+      "to not filter offers from agents with GPU resources, and\n"
+      "indiscriminately send them to all frameworks whether they set\n"
+      "the `GPU_RESOURCES` capability or not. This flag is meant as a\n"
+      "temporary workaround towards the eventual deprecation of the\n"
+      "`GPU_RESOURCES` capability. Please see the following for more\n"
+      "information:\n"
+      "  https://www.mail-archive.com/dev@mesos.apache.org/msg37571.html\n"
+      "  https://issues.apache.org/jira/browse/MESOS-7576",
+      true);
 
   add(&Flags::hooks,
       "hooks",
@@ -509,13 +523,13 @@ mesos::internal::master::Flags::Flags()
       "different than the default `" + string(DEFAULT_AUTHORIZER) + "`, the\n"
       "ACLs passed through the `--acls` flag will be ignored.\n"
       "\n"
-      "Currently there's no support for multiple authorizers.",
+      "Currently there is no support for multiple authorizers.",
       DEFAULT_AUTHORIZER);
 
   add(&Flags::http_authenticators,
       "http_authenticators",
       "HTTP authenticator implementation to use when handling requests to\n"
-      "authenticated endpoints. Use the default\n"
+      "authenticated endpoints. Use the default "
       "`" + string(DEFAULT_BASIC_HTTP_AUTHENTICATOR) + "`, or load an\n"
       "alternate HTTP authenticator module using `--modules`.\n"
       "\n"
@@ -615,7 +629,7 @@ mesos::internal::master::Flags::Flags()
 
   add(&Flags::zk,
       "zk",
-      "ZooKeeper URL (used for leader election amongst masters)\n"
+      "ZooKeeper URL (used for leader election amongst masters).\n"
       "May be one of:\n"
       "  `zk://host1:port1,host2:port2,.../path`\n"
       "  `zk://username:password@host1:port1,host2:port2,.../path`\n"
