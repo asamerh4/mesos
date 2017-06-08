@@ -53,6 +53,8 @@
 #include "internal/devolve.hpp"
 #include "internal/evolve.hpp"
 
+#include "logging/logging.hpp"
+
 using mesos::executor::Call;
 using mesos::executor::Event;
 
@@ -1323,7 +1325,7 @@ private:
 } // namespace mesos {
 
 
-class Flags : public virtual flags::FlagsBase
+class Flags : public virtual mesos::internal::logging::Flags
 {
 public:
   Flags()
@@ -1360,6 +1362,13 @@ int main(int argc, char** argv)
   if (load.isError()) {
     cerr << flags.usage(load.error()) << endl;
     return EXIT_FAILURE;
+  }
+
+  mesos::internal::logging::initialize(argv[0], flags, true); // Catch signals.
+
+  // Log any flag warnings (after logging is initialized).
+  foreach (const flags::Warning& warning, load->warnings) {
+    LOG(WARNING) << warning.message;
   }
 
   Option<string> value = os::getenv("MESOS_FRAMEWORK_ID");
