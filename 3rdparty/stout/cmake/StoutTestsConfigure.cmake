@@ -45,12 +45,12 @@ set(GTEST_INCLUDE_DIR ${GOOGLETEST_ROOT}/googletest/include)
 
 # Convenience variables for `lib` directories of built third-party dependencies.
 if (WIN32)
-  set(GMOCK_LIB_DIR ${GOOGLETEST_ROOT}-build/googlemock/${CMAKE_BUILD_TYPE})
-  set(GTEST_LIB_DIR ${GOOGLETEST_ROOT}-build/googlemock/gtest/${CMAKE_BUILD_TYPE})
-else (WIN32)
+  set(GMOCK_LIB_DIR ${GOOGLETEST_ROOT}-build/googlemock)
+  set(GTEST_LIB_DIR ${GOOGLETEST_ROOT}-build/googlemock/gtest)
+else ()
   set(GMOCK_LIB_DIR ${GOOGLETEST_ROOT}-lib/lib)
   set(GTEST_LIB_DIR ${GOOGLETEST_ROOT}-lib/lib/gtest)
-endif (WIN32)
+endif ()
 
 # Convenience variables for "lflags", the symbols we pass to CMake to generate
 # things like `-L/path/to/glog` or `-lglog`.
@@ -101,4 +101,4 @@ if (NOT WIN32)
     ${STOUT_TEST_LIBS}
     ${GTEST_LFLAG}
     )
-endif (NOT WIN32)
+endif ()
