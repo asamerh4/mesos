@@ -19,6 +19,7 @@
 set(STOUT ${MESOS_3RDPARTY_SRC}/stout)
 
 EXTERNAL("boost"       ${BOOST_VERSION}       "${MESOS_3RDPARTY_BIN}")
+EXTERNAL("glog"        ${GLOG_VERSION}        "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("elfio"       ${ELFIO_VERSION}       "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("picojson"    ${PICOJSON_VERSION}    "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("http_parser" ${HTTP_PARSER_VERSION} "${MESOS_3RDPARTY_BIN}")
@@ -28,20 +29,13 @@ EXTERNAL("libapr"      ${LIBAPR_VERSION}      "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("nvml"        ${NVML_VERSION}        "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("protobuf"    ${PROTOBUF_VERSION}    "${MESOS_3RDPARTY_BIN}")
 
-if (NOT WIN32)
-  EXTERNAL("glog" ${GLOG_VERSION} "${MESOS_3RDPARTY_BIN}")
-elseif (WIN32)
-  # Glog 0.3.3 does not compile out of the box on Windows.
-  # Therefore, we require a specific commit on glog master.
-  EXTERNAL("glog" "da816ea70" "${MESOS_3RDPARTY_BIN}")
-
+if (WIN32)
   # NOTE: We expect cURL and zlib exist on Unix (usually pulled in with a
   # package manager), but Windows has no package manager, so we have to go
   # get it.
   EXTERNAL("curl" ${CURL_VERSION} "${MESOS_3RDPARTY_BIN}")
-
   EXTERNAL("zlib" ${ZLIB_VERSION} "${MESOS_3RDPARTY_BIN}")
-endif (NOT WIN32)
+endif ()
 
 # Intermediate convenience variables for oddly-structured directories.
 set(GLOG_LIB_ROOT     ${GLOG_ROOT}-lib/lib)
@@ -70,28 +64,28 @@ if (WIN32)
     ${LIBEVENT_ROOT}/include
     ${LIBEVENT_ROOT}-build/include)
   set(ZLIB_INCLUDE_DIR     ${ZLIB_ROOT} ${ZLIB_ROOT}-build)
-else (WIN32)
+else ()
   set(GLOG_INCLUDE_DIR     ${GLOG_LIB_ROOT}/include)
   set(PROTOBUF_INCLUDE_DIR ${PROTOBUF_LIB_ROOT}/include)
   set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_LIB_ROOT}/include)
-endif (WIN32)
+endif ()
 
 # Convenience variables for `lib` directories of built third-party dependencies.
 set(LIBEV_LIB_DIR       ${LIBEV_ROOT}-build/.libs)
 
 if (WIN32)
-  set(HTTP_PARSER_LIB_DIR ${HTTP_PARSER_ROOT}-build/${CMAKE_BUILD_TYPE})
-  set(CURL_LIB_DIR        ${CURL_ROOT}-build/lib/${CMAKE_BUILD_TYPE})
-  set(GLOG_LIB_DIR        ${GLOG_ROOT}-build/${CMAKE_BUILD_TYPE})
+  set(HTTP_PARSER_LIB_DIR ${HTTP_PARSER_ROOT}-build)
+  set(CURL_LIB_DIR        ${CURL_ROOT}-build/lib)
+  set(GLOG_LIB_DIR        ${GLOG_ROOT}-build)
   set(LIBEVENT_LIB_DIR    ${LIBEVENT_ROOT}-build/lib)
-  set(PROTOBUF_LIB_DIR    ${PROTOBUF_ROOT}-build/${CMAKE_BUILD_TYPE})
-  set(ZLIB_LIB_DIR        ${ZLIB_ROOT}-build/${CMAKE_BUILD_TYPE})
-else (WIN32)
+  set(PROTOBUF_LIB_DIR    ${PROTOBUF_ROOT}-build)
+  set(ZLIB_LIB_DIR        ${ZLIB_ROOT}-build)
+else ()
   set(HTTP_PARSER_LIB_DIR ${HTTP_PARSER_ROOT}-build)
   set(GLOG_LIB_DIR        ${GLOG_LIB_ROOT}/lib)
   set(LIBEVENT_LIB_DIR    ${LIBEVENT_LIB_ROOT}/lib)
   set(PROTOBUF_LIB_DIR    ${PROTOBUF_LIB_ROOT}/lib)
-endif (WIN32)
+endif ()
 
 # Convenience variables for "lflags", the symbols we pass to CMake to generate
 # things like `-L/path/to/glog` or `-lglog`.
@@ -107,10 +101,24 @@ if (WIN32)
   # libcurl.lib. Hence, we have to special case it here because CMake assumes
   # the library names are generated correctly.
   set(CURL_LFLAG     libcurl)
-  set(PROTOBUF_LFLAG libprotobufd)
 
-  # Windows requires a static build of zlib.
-  set(ZLIB_LFLAG     zlibstaticd)
+  set(PROTOBUF_LFLAG libprotobuf)
+
+  # The generator expression below appends the letter "d"
+  # when building the Debug configuration.
+  string(APPEND PROTOBUF_LFLAG $<$<CONFIG:Debug>:d>)
+
+  # Zlib generates different libraries depending on the linkage
+  # and configuration.  i.e.:
+  #   * For a static Debug build: `zlibstaticd`.
+  #   * For a shared Release build: `zlib`.
+  set(ZLIB_LFLAG zlib)
+
+  if (NOT BUILD_SHARED_LIBS)
+    string(APPEND ZLIB_LFLAG static)
+  endif ()
+
+  string(APPEND ZLIB_LFLAG $<$<CONFIG:Debug>:d>)
 
   # Windows requires Dbghelp.lib when linking to glog.
   # NOTE: CMake's dependency graph does not pull in the `Dbghelp` library
@@ -119,19 +127,19 @@ if (WIN32)
   # to the build system directly (such as, as a git submodule), glog's
   # targets would be inherited.
   set(GLOG_LFLAG     glog Dbghelp)
-else (WIN32)
+else ()
   set(CURL_LFLAG     curl)
   set(DL_LFLAG       dl)
   set(PROTOBUF_LFLAG protobuf)
   set(SASL_LFLAG     sasl2)
-endif (WIN32)
+endif ()
 
 # Convenience variable for `protoc`, the Protobuf compiler.
 if (NOT WIN32)
   set(PROTOC ${PROTOBUF_LIB_ROOT}/bin/protoc)
-else (NOT WIN32)
-  set(PROTOC ${PROTOBUF_ROOT}-build/${CMAKE_BUILD_TYPE}/protoc.exe)
-endif (NOT WIN32)
+else ()
+  set(PROTOC ${PROTOBUF_ROOT}-build/$<CONFIG>/protoc.exe)
+endif ()
 
 # Configure the process library, the last of our third-party libraries.
 #######################################################################
