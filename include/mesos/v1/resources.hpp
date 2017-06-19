@@ -285,6 +285,15 @@ public:
       const Resource& resource,
       const Option<std::string>& role = None());
 
+  // Tests if the given Resource object is allocatable to the given role.
+  // A resource object is allocatable to 'role' if:
+  //   * it is reserved to an ancestor of that role in the hierarchy, OR
+  //   * it is reserved to 'role' itself, OR
+  //   * it is unreserved.
+  static bool isAllocatableTo(
+      const Resource& resource,
+      const std::string& role);
+
   // Tests if the given Resource object is unreserved.
   static bool isUnreserved(const Resource& resource);
 
@@ -296,6 +305,9 @@ public:
 
   // Tests if the given Resource object is shared.
   static bool isShared(const Resource& resource);
+
+  // Tests if the given Resource object has refined reservations.
+  static bool hasRefinedReservations(const Resource& resource);
 
   // Returns the summed up Resources given a hashmap<Key, Resources>.
   //
@@ -380,6 +392,10 @@ public:
   // and will be ignored.
   Resources reserved(const Option<std::string>& role = None()) const;
 
+  // Returns resources allocatable to role. See `isAllocatableTo` for the
+  // definition of 'allocatableTo'.
+  Resources allocatableTo(const std::string& role) const;
+
   // Returns the unreserved resources.
   Resources unreserved() const;
 
@@ -411,13 +427,30 @@ public:
   // 'reservation' field is cleared.
   // Returns an Error when the role is invalid or the reservation
   // is set when the role is '*'.
+  //
+  // TODO(mpark): Switch over to using `(push|pop)Reservation` and remove this
+  //              once we change to the 'post-reservation-refinement' format.
   Try<Resources> flatten(
       const std::string& role,
       const Option<Resource::ReservationInfo>& reservation = None()) const;
 
   // Equivalent to `flatten("*")` except it returns a Resources directly
   // because the result is always a valid in this case.
+  //
+  // TODO(mpark): Switch over to using `toUnreserved` and remove this once
+  //              we change to the 'post-reservation-refinement' format.
   Resources flatten() const;
+
+  // Returns a `Resources` object with the new reservation added to the back.
+  // The new reservation must be a valid refinement of the current reservation.
+  Resources pushReservation(const Resource::ReservationInfo& reservation) const;
+
+  // Returns a `Resources` object with the last reservation removed.
+  // Every resource in `Resources` must have `resource.reservations_size() > 0`.
+  Resources popReservation() const;
+
+  // Returns a `Resources` object with all of the reservations removed.
+  Resources toUnreserved() const;
 
   // Returns a Resources object that contains all the scalar resources
   // in this object, but with their AllocationInfo, ReservationInfo,

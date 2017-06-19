@@ -20,9 +20,9 @@ include(ExternalProject)
 #############################################
 if (REBUNDLED)
   set(FETCH_URL ${CMAKE_CURRENT_SOURCE_DIR})
-else (REBUNDLED)
+else ()
   set(FETCH_URL ${3RDPARTY_DEPENDENCIES})
-endif (REBUNDLED)
+endif ()
 
 
 # DEPENDENCIES FOR THE PROCESS LIBRARY AND STOUT.
@@ -53,8 +53,42 @@ if (WIN32)
   # NOTE: The Windows version of Glog is patched and only available in the
   # 3rdparty repo, not the local repo.
   set(GLOG_URL   ${3RDPARTY_DEPENDENCIES}/glog-${GLOG_VERSION}.tar.gz)
-endif (WIN32)
+endif ()
 
+# This `CMAKE_FORWARD_ARGS` variable is sent as the `CMAKE_ARGS` argument to
+# the `ExternalProject_Add` macro (along with any per-project arguments), and
+# is used when the external project is configured as a CMake project.
+# If either the `CONFIGURE_COMMAND` or `BUILD_COMMAND` arguments of
+# `ExternalProject_Add` are used, then the `CMAKE_ARGS` argument will be
+# ignored.
+#
+# NOTE: The CMAKE_GENERATOR_TOOLSET is impliticly set by `ExternalProject_Add`,
+# and cannot be included twice.
+list(APPEND CMAKE_FORWARD_ARGS
+  # TODO(andschwa): Set the CMAKE_GENERATOR explicitly as an argmuent to
+  # `ExternalProject_Add`.
+  -G${CMAKE_GENERATOR}
+
+  -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS}
+  )
+
+# This only matters for single-configuration generators.
+# E.g. Makefile, but not Visual Studio.
+if (NOT "${CMAKE_BUILD_TYPE}" STREQUAL "")
+  list(APPEND CMAKE_FORWARD_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
+endif ()
+
+foreach (lang C CXX)
+  list(APPEND CMAKE_FORWARD_ARGS
+    -DCMAKE_${lang}_FLAGS=${CMAKE_${lang}_FLAGS}
+    )
+
+  foreach (config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    list(APPEND CMAKE_FORWARD_ARGS
+      -DCMAKE_${lang}_FLAGS_${config}=${CMAKE_${lang}_FLAGS_${config}}
+      )
+  endforeach ()
+endforeach ()
 
 # Define build/patch/configure commands for third-party libs.
 #############################################################
@@ -95,38 +129,24 @@ if (NOT WIN32)
   PATCH_CMD(${MESOS_3RDPARTY_SRC}/libev-4.22.patch LIBEV_PATCH_CMD)
 
   set(LIBEVENT_INSTALL_CMD mkdir -p ${LIBEVENT_LIB_ROOT} && cp -r ${LIBEVENT_ROOT}-build/lib/. ${LIBEVENT_LIB_DIR} && cp -r ${LIBEVENT_ROOT}-build/include/. ${LIBEVENT_INCLUDE_DIR} && cp -r ${LIBEVENT_ROOT}/include/. ${LIBEVENT_INCLUDE_DIR})
-elseif (WIN32)
+else ()
   set(GLOG_INSTALL_CMD ${CMAKE_NOOP})
   set(GLOG_PATCH_CMD ${PATCHEXE_LOCATION} -p1 < ${MESOS_3RDPARTY_SRC}/glog-${GLOG_VERSION}.patch)
 
   set(LIBEVENT_INSTALL_CMD ${CMAKE_NOOP})
 
   set(LIBAPR_INSTALL_CMD ${CMAKE_NOOP})
-
-  set(LIBEVENT_C_FLAGS "/MTd /Zi")
-  set(LIBEVENT_CMAKE_ARGS
-    ${LIBEVENT_CMAKE_ARGS}
-    -DCMAKE_C_FLAGS_DEBUG=${LIBEVENT_C_FLAGS}
-    -DCMAKE_C_FLAGS_RELEASE=${LIBEVENT_C_FLAGS}
-    -DEVENT__DISABLE_OPENSSL=TRUE
-    )
-endif (NOT WIN32)
+endif ()
 
 set(HTTP_PARSER_UPDATE_CMD ${CMAKE_COMMAND} -E copy ${MESOS_3RDPARTY_SRC}/http-parser/CMakeLists.txt.template ${HTTP_PARSER_ROOT}/CMakeLists.txt)
 
-if (NOT WIN32)
-  PATCH_CMD(${MESOS_3RDPARTY_SRC}/http-parser-${HTTP_PARSER_VERSION}.patch HTTP_PARSER_PATCH_CMD)
-elseif (WIN32)
-  # Set the patch command which will utilize patch.exe under
-  # `\Users\<user>\AppData\Local\Temp with no elevation prompt`
-  set(HTTP_PARSER_PATCH_CMD ${PATCHEXE_LOCATION} --binary -p1 < ${MESOS_3RDPARTY_SRC}/http-parser-${HTTP_PARSER_VERSION}.patch)
-endif (NOT WIN32)
-
 set(LIBEVENT_CMAKE_ARGS
   ${LIBEVENT_CMAKE_ARGS}
-  -LH
-  -DEVENT__HAVE_SYS_STAT_H=1
-  -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS}
+  # NOTE: Libevent does not respect the BUILD_SHARED_LIBS global flag.
+  -DEVENT__BUILD_SHARED_LIBRARIES=${BUILD_SHARED_LIBS}
+  -DEVENT__DISABLE_BENCHMARK=ON
+  -DEVENT__DISABLE_TESTS=ON
+  -DEVENT__DISABLE_SAMPLES=ON
   )
 
 if (ENABLE_SSL)
@@ -134,19 +154,19 @@ if (ENABLE_SSL)
     ${LIBEVENT_CMAKE_ARGS}
     -DEVENT__DISABLE_OPENSSL=OFF
     )
-else (ENABLE_SSL)
+else ()
   set(LIBEVENT_CMAKE_ARGS
     ${LIBEVENT_CMAKE_ARGS}
     -DEVENT__DISABLE_OPENSSL=ON
     )
-endif (ENABLE_SSL)
+endif ()
 
 if (NOT WIN32)
   set(LIBEVENT_CMAKE_ARGS
     ${LIBEVENT_CMAKE_ARGS}
     -DCMAKE_C_FLAGS=-fPIC
     )
-endif (NOT WIN32)
+endif ()
 
 
 # Third-party libraries. Tell the build system how to pull in and build third-
@@ -179,8 +199,8 @@ ExternalProject_Add(
 ExternalProject_Add(
   ${GLOG_TARGET}
   PREFIX            ${GLOG_CMAKE_ROOT}
-  CMAKE_ARGS        -DBUILD_SHARED_LIBS=OFF -DCMAKE_CXX_FLAGS_DEBUG=${CMAKE_CXX_FLAGS_DEBUG}
   PATCH_COMMAND     ${GLOG_PATCH_CMD}
+  CMAKE_ARGS        ${CMAKE_FORWARD_ARGS};-DBUILD_TESTING=OFF
   CONFIGURE_COMMAND ${GLOG_CONFIG_CMD}
   BUILD_COMMAND     ${GLOG_BUILD_CMD}
   INSTALL_COMMAND   ${GLOG_INSTALL_CMD}
@@ -212,7 +232,7 @@ ExternalProject_Add(
   ${HTTP_PARSER_TARGET}
   PREFIX            ${HTTP_PARSER_CMAKE_ROOT}
   UPDATE_COMMAND    ${HTTP_PARSER_UPDATE_CMD}
-  PATCH_COMMAND     ${HTTP_PARSER_PATCH_CMD}
+  CMAKE_ARGS        ${CMAKE_FORWARD_ARGS}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${HTTP_PARSER_URL}
   URL_HASH          ${HTTP_PARSER_HASH}
@@ -223,6 +243,7 @@ if (NOT ENABLE_LIBEVENT)
     ${LIBEV_TARGET}
     PREFIX            ${LIBEV_CMAKE_ROOT}
     PATCH_COMMAND     ${LIBEV_PATCH_CMD}
+    CMAKE_ARGS        ${CMAKE_FORWARD_ARGS}
     CONFIGURE_COMMAND ${LIBEV_CONFIG_CMD}
     BUILD_COMMAND     ${LIBEV_BUILD_CMD}
     INSTALL_COMMAND   ${LIBEV_INSTALL_CMD}
@@ -232,37 +253,44 @@ if (NOT ENABLE_LIBEVENT)
 elseif (ENABLE_LIBEVENT)
   ExternalProject_Add(
     ${LIBEVENT_TARGET}
-    PREFIX          ${LIBEVENT_CMAKE_ROOT}
-    CMAKE_ARGS      ${LIBEVENT_CMAKE_ARGS}
-    INSTALL_COMMAND ${LIBEVENT_INSTALL_CMD}
-    URL             ${LIBEVENT_URL}
-    URL_HASH        ${LIBEVENT_HASH}
+    PREFIX            ${LIBEVENT_CMAKE_ROOT}
+    CMAKE_ARGS        ${CMAKE_FORWARD_ARGS};${LIBEVENT_CMAKE_ARGS}
+    INSTALL_COMMAND   ${LIBEVENT_INSTALL_CMD}
+    URL               ${LIBEVENT_URL}
+    URL_HASH          ${LIBEVENT_HASH}
     )
-endif (NOT ENABLE_LIBEVENT)
+endif ()
 
 if (WIN32)
   ExternalProject_Add(
     ${LIBAPR_TARGET}
-    PREFIX          ${LIBAPR_CMAKE_ROOT}
-    CMAKE_ARGS      -DBUILD_SHARED_LIBS=OFF
-    INSTALL_COMMAND ${LIBAPR_INSTALL_CMD}
-    URL             ${LIBAPR_URL}
-    URL_HASH        ${LIBAPR_HASH}
+    PREFIX            ${LIBAPR_CMAKE_ROOT}
+    CMAKE_ARGS        ${CMAKE_FORWARD_ARGS}
+    INSTALL_COMMAND   ${LIBAPR_INSTALL_CMD}
+    URL               ${LIBAPR_URL}
+    URL_HASH          ${LIBAPR_HASH}
     )
-endif (WIN32)
+endif ()
 
 
 # Windows third-party libraries. Windows has no package manager, so we download
 # them here.
 ###############################################################################
 if (WIN32)
+  set(CURL_CMAKE_ARGS ${CMAKE_FORWARD_ARGS} -DBUILD_CURL_TESTS=OFF)
+
+  # NOTE: curl does not respect BUILD_SHARED_LIBS.
+  if (NOT BUILD_SHARED_LIBS)
+    # This is both a CMake argument, and a pre-processor definition.
+    list(APPEND CURL_CMAKE_ARGS -DCURL_STATICLIB=ON)
+  endif ()
+
   # TODO(hausdorff): maybe try to incorporate this into findpackage for Windows
   ExternalProject_Add(
     ${CURL_TARGET}
     PREFIX            ${CURL_CMAKE_ROOT}
-    CMAKE_ARGS        -DBUILD_CURL_TESTS=OFF -DCURL_STATICLIB=ON -DCMAKE_C_FLAGS_DEBUG="/MTd"
     PATCH_COMMAND     ${CMAKE_NOOP}
-    BUILD_COMMAND     msbuild /p:RuntimeLibrary=MT_StaticDebug lib/libcurl.vcxproj
+    CMAKE_ARGS        ${CURL_CMAKE_ARGS}
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${CURL_URL}
     URL_HASH          ${CURL_HASH}
@@ -270,14 +298,13 @@ if (WIN32)
 
   ExternalProject_Add(
     ${ZLIB_TARGET}
-    PREFIX          ${ZLIB_CMAKE_ROOT}
-    CMAKE_ARGS      -DBUILD_SHARED_LIBS=OFF
-    BUILD_COMMAND   ${GLOG_BUILD_CMD}
-    INSTALL_COMMAND ${CMAKE_NOOP}
-    URL             ${ZLIB_URL}
-    URL_HASH        ${ZLIB_HASH}
+    PREFIX            ${ZLIB_CMAKE_ROOT}
+    CMAKE_ARGS        ${CMAKE_FORWARD_ARGS}
+    INSTALL_COMMAND   ${CMAKE_NOOP}
+    URL               ${ZLIB_URL}
+    URL_HASH          ${ZLIB_HASH}
   )
-endif (WIN32)
+endif ()
 
 
 # DEPENDENCIES FOR THE PROCESS LIBRARY TESTS AND STOUT TESTS.
@@ -299,47 +326,44 @@ set(PROTOBUF_URL ${FETCH_URL}/protobuf-${PROTOBUF_VERSION}.tar.gz)
 # MESOS-3250)" comment above for explanation.
 if (NOT WIN32)
   set(GOOGLETEST_INSTALL_CMD mkdir -p ${GOOGLETEST_ROOT}-lib/lib && cp -r ${GOOGLETEST_ROOT}-build/googlemock/. ${GOOGLETEST_ROOT}-lib/lib)
-elseif (WIN32)
+else ()
   set(GOOGLETEST_INSTALL_CMD ${CMAKE_NOOP})
-endif (NOT WIN32)
+endif ()
 
-if (NOT WIN32)
-  set(PROTOBUF_CONFIG_CMD  ${PROTOBUF_ROOT}/src/../configure --prefix=${PROTOBUF_LIB_ROOT})
-  set(PROTOBUF_BUILD_CMD   make)
-  set(PROTOBUF_INSTALL_CMD make install)
-elseif (WIN32)
-  set(PROTOBUF_CONFIG_CMD  cmake -G ${CMAKE_GENERATOR} ../protobuf-${PROTOBUF_VERSION}/cmake -DBUILD_SHARED_LIBS=OFF -Dprotobuf_MSVC_STATIC_RUNTIME=ON -Dprotobuf_BUILD_TESTS=OFF)
-  set(PROTOBUF_BUILD_CMD   msbuild protobuf.sln)
-  set(PROTOBUF_INSTALL_CMD ${CMAKE_NOOP})
-endif (NOT WIN32)
-
-# NOTE: An implicit consequence of the following code is that on non-Windows
-# platforms, gmock and gtest are assumed to be CMake projects, and are thus
-# configured and built using default CMake commands. The reason is that on
-# non-Windows platforms, we choose to set `GOOGLETEST_CONFIG_CMD` and
-# `GOOGLETEST_BUILD_CMD` with stub commands, which cause CMake to "fall back" to
-# trying to build them with CMake.
 ExternalProject_Add(
   ${GOOGLETEST_TARGET}
   PREFIX            ${GOOGLETEST_CMAKE_ROOT}
-  CMAKE_ARGS        -DBUILD_SHARED_LIBS=FALSE
-  CONFIGURE_COMMAND ${GOOGLETEST_CONFIG_CMD}
-  BUILD_COMMAND     ${GOOGLETEST_BUILD_CMD}
+  # NOTE: googletest cannot be built as a shared library, or the test runner
+  # will crash with a double-free.
+  CMAKE_ARGS        ${CMAKE_FORWARD_ARGS};-DBUILD_SHARED_LIBS=OFF
   INSTALL_COMMAND   ${GOOGLETEST_INSTALL_CMD}
   URL               ${GOOGLETEST_URL}
   URL_HASH          ${GOOGLETEST_HASH}
   )
 
-ExternalProject_Add(
-  ${PROTOBUF_TARGET}
-  PREFIX            ${PROTOBUF_CMAKE_ROOT}
-  CMAKE_ARGS        -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS} -DCMAKE_CXX_FLAGS_DEBUG="/MTd"
-  CONFIGURE_COMMAND ${PROTOBUF_CONFIG_CMD}
-  BUILD_COMMAND     ${PROTOBUF_BUILD_CMD}
-  INSTALL_COMMAND   ${PROTOBUF_INSTALL_CMD}
-  URL               ${PROTOBUF_URL}
-  URL_HASH          ${PROTOBUF_HASH}
-  )
+if (NOT WIN32)
+  # NOTE: `ExternalProject_Add` is used separately because older versions
+  # of CMake used on Linux do not understand the `SOURCE_SUBDIR` command.
+  ExternalProject_Add(
+    ${PROTOBUF_TARGET}
+    PREFIX            ${PROTOBUF_CMAKE_ROOT}
+    CONFIGURE_COMMAND ${PROTOBUF_ROOT}/configure --prefix=${PROTOBUF_LIB_ROOT}
+    BUILD_COMMAND     make
+    INSTALL_COMMAND   make install
+    URL               ${PROTOBUF_URL}
+    URL_HASH          ${PROTOBUF_HASH}
+    )
+else ()
+  ExternalProject_Add(
+    ${PROTOBUF_TARGET}
+    PREFIX            ${PROTOBUF_CMAKE_ROOT}
+    SOURCE_SUBDIR     cmake
+    CMAKE_ARGS        ${CMAKE_FORWARD_ARGS};-Dprotobuf_BUILD_TESTS=OFF
+    INSTALL_COMMAND   ${CMAKE_NOOP}
+    URL               ${PROTOBUF_URL}
+    URL_HASH          ${PROTOBUF_HASH}
+    )
+endif ()
 
 
 # BUILDING THE STOUT TESTS.
@@ -365,9 +389,9 @@ set(LEVELDB_URL   ${FETCH_URL}/leveldb-${LEVELDB_VERSION}.tar.gz)
 # 3rdparty repo, not the local repo.
 if (NOT WIN32)
   set(ZOOKEEPER_URL ${FETCH_URL}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz)
-elseif (WIN32)
+else ()
   set(ZOOKEEPER_URL ${3RDPARTY_DEPENDENCIES}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz)
-endif (NOT WIN32)
+endif ()
 
 
 # Third-party libraries. Tell the build system how to pull in and build third-
@@ -380,17 +404,29 @@ if (NOT WIN32)
     ${MESOS_3RDPARTY_SRC}/zookeeper-${ZOOKEEPER_VERSION}.patch
     ZOOKEEPER_PATCH_CMD)
 
+  # NOTE: ZooKeeper's `configure` script must be run with within the
+  # correct directory or it  will fail to find necessary files, hence the `cd`.
+  set(ZOOKEEPER_CONFIG_CMD cd ${ZOOKEEPER_C_ROOT} && ./configure)
+  if (BUILD_SHARED_LIBS)
+    set(ZOOKEEPER_CONFIG_CMD ${ZOOKEEPER_CONFIG_CMD} --enable-shared=yes --enable-static=no)
+  else ()
+    set(ZOOKEEPER_CONFIG_CMD ${ZOOKEEPER_CONFIG_CMD} --enable-shared=no --enable-static=yes)
+  endif ()
+
+  # NOTE: The `--with-pic` does not mean compile with `-fPIC`.
+  set(ZOOKEEPER_CONFIG_CMD ${ZOOKEEPER_CONFIG_CMD} --with-pic --srcdir=${ZOOKEEPER_C_ROOT} --prefix=${ZOOKEEPER_LIB})
+
   ExternalProject_Add(
     ${ZOOKEEPER_TARGET}
     PREFIX            ${ZOOKEEPER_CMAKE_ROOT}
     PATCH_COMMAND     ${ZOOKEEPER_PATCH_CMD}
-    CONFIGURE_COMMAND cd ${ZOOKEEPER_C_ROOT} && ./configure --enable-shared=no --with-pic --srcdir=. --prefix=${ZOOKEEPER_LIB}
+    CONFIGURE_COMMAND ${ZOOKEEPER_CONFIG_CMD}
     BUILD_COMMAND     cd ${ZOOKEEPER_C_ROOT} && make
     INSTALL_COMMAND   cd ${ZOOKEEPER_C_ROOT} && make install
     URL               ${ZOOKEEPER_URL}
     URL_HASH          ${ZOOKEEPER_HASH}
     )
-elseif (WIN32)
+else ()
   ExternalProject_Add(
     ${ZOOKEEPER_TARGET}
     PREFIX            ${ZOOKEEPER_CMAKE_ROOT}
@@ -400,29 +436,28 @@ elseif (WIN32)
     # already. The `--binary` option will instead fail to apply the patch.
     PATCH_COMMAND     ${PATCHEXE_LOCATION} -p1 < ${MESOS_3RDPARTY_SRC}/zookeeper-${ZOOKEEPER_VERSION}.patch
     SOURCE_SUBDIR     src/c
-    CMAKE_ARGS        -DWANT_CPPUNIT=0
+    CMAKE_ARGS        ${CMAKE_FORWARD_ARGS};-DWANT_CPPUNIT=OFF
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${ZOOKEEPER_URL}
     URL_HASH          ${ZOOKEEPER_HASH}
     )
-endif (NOT WIN32)
+endif ()
 
 if (NOT WIN32)
-  set(LEVELDB_CONFIG_CMD  cd ${LEVELDB_ROOT} && ./configure --prefix=${LEVELDB_ROOT}-lib)
-  set(LEVELDB_BUILD_CMD   cd ${LEVELDB_ROOT} && make OPT=-O2\ -g\ -fPIC)
-  set(LEVELDB_INSTALL_CMD cd ${LEVELDB_ROOT} && make install)
   PATCH_CMD(
     ${MESOS_3RDPARTY_SRC}/leveldb-${LEVELDB_VERSION}.patch
     LEVELDB_PATCH_CMD)
 
+  # NOTE: Building leveldb as a shared library is not yet supported.
   ExternalProject_Add(
     ${LEVELDB_TARGET}
     PREFIX            ${LEVELDB_TARGET}
     PATCH_COMMAND     ${LEVELDB_PATCH_CMD}
     CONFIGURE_COMMAND ${CMAKE_NOOP}
-    BUILD_COMMAND     ${LEVELDB_BUILD_CMD}
+    BUILD_IN_SOURCE   1
+    BUILD_COMMAND     make OPT=-O2\ -DNDEBUG\ -fPIC all
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${LEVELDB_URL}
     URL_HASH          ${LEVELDB_HASH}
     )
-endif (NOT WIN32)
+endif ()

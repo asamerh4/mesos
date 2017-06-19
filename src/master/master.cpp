@@ -392,6 +392,7 @@ bool Framework::isTrackedUnderRole(const string& role) const
          master->roles.at(role)->frameworks.contains(id());
 }
 
+
 void Framework::trackUnderRole(const string& role)
 {
   CHECK(master->isWhitelistedRole(role))
@@ -404,6 +405,7 @@ void Framework::trackUnderRole(const string& role)
   }
   master->roles.at(role)->addFramework(this);
 }
+
 
 void Framework::untrackUnderRole(const string& role)
 {
@@ -2282,6 +2284,7 @@ void Master::drop(
                << ": " << message;
 }
 
+
 void Master::drop(
     Framework* framework,
     const scheduler::Call& call,
@@ -2332,7 +2335,7 @@ void Master::receive(
   Option<Error> error = validation::scheduler::call::validate(call);
 
   if (error.isSome()) {
-    drop(from, call, error.get().message);
+    drop(from, call, error->message);
     return;
   }
 
@@ -3846,7 +3849,7 @@ void Master::accept(
   // notifications.
   if (error.isSome()) {
     LOG(WARNING) << "ACCEPT call used invalid offers '" << accept.offer_ids()
-                 << "': " << error.get().message;
+                 << "': " << error->message;
 
     TaskState newTaskState = TASK_DROPPED;
     if (!framework->capabilities.partitionAware) {
@@ -3876,7 +3879,7 @@ void Master::accept(
             newTaskState,
             TaskStatus::SOURCE_MASTER,
             None(),
-            "Task launched with invalid offers: " + error.get().message,
+            "Task launched with invalid offers: " + error->message,
             TaskStatus::REASON_INVALID_OFFERS);
 
         if (framework->capabilities.partitionAware) {
@@ -4192,10 +4195,16 @@ void Master::_accept(
 
         // Make sure this reserve operation is valid.
         Option<Error> error = validation::operation::validate(
-            operation.reserve(), principal, framework->info);
+            operation.reserve(),
+            principal,
+            slave->capabilities,
+            framework->info);
 
         if (error.isSome()) {
-          drop(framework, operation, error.get().message);
+          drop(
+              framework,
+              operation,
+              error->message + "; on agent " + stringify(*slave));
           continue;
         }
 
@@ -4250,7 +4259,7 @@ void Master::_accept(
             operation.unreserve());
 
         if (error.isSome()) {
-          drop(framework, operation, error.get().message);
+          drop(framework, operation, error->message);
           continue;
         }
 
@@ -4308,10 +4317,14 @@ void Master::_accept(
             operation.create(),
             slave->checkpointedResources,
             principal,
+            slave->capabilities,
             framework->info);
 
         if (error.isSome()) {
-          drop(framework, operation, error.get().message);
+          drop(
+              framework,
+              operation,
+              error->message + "; on agent " + stringify(*slave));
           continue;
         }
 
@@ -4368,7 +4381,7 @@ void Master::_accept(
             slave->pendingTasks);
 
         if (error.isSome()) {
-          drop(framework, operation, error.get().message);
+          drop(framework, operation, error->message);
           continue;
         }
 
@@ -4860,7 +4873,7 @@ void Master::acceptInverseOffers(
 
   if (error.isSome()) {
     LOG(WARNING) << "ACCEPT_INVERSE_OFFERS call used invalid offers '"
-                 << accept.inverse_offer_ids() << "': " << error.get().message;
+                 << accept.inverse_offer_ids() << "': " << error->message;
   }
 }
 
@@ -9417,6 +9430,7 @@ void Slave::addExecutor(const FrameworkID& frameworkId,
   executors[frameworkId][executorInfo.executor_id()] = executorInfo;
   usedResources[frameworkId] += executorInfo.resources();
 }
+
 
 void Slave::removeExecutor(const FrameworkID& frameworkId,
                            const ExecutorID& executorId)

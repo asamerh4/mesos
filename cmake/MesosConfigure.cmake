@@ -57,26 +57,12 @@ include(CompilationConfigure)
 include(Mesos3rdpartyConfigure)
 include(Process3rdpartyConfigure)
 
-# Generate a batch script that will build Mesos. Any project referencing Mesos
-# can then build it by calling this script.
-if (WIN32)
-  VS_BUILD_CMD(
-      MESOS
-      ${CMAKE_BINARY_DIR}/${PROJECT_NAME}.sln
-      ${CMAKE_BUILD_TYPE}
-      ""
-      "")
-
-  string(REPLACE ";" " " MESOS_BUILD_CMD "${MESOS_BUILD_CMD}")
-  file(WRITE ${CMAKE_BINARY_DIR}/make.bat ${MESOS_BUILD_CMD})
-endif (WIN32)
-
-if (WIN32)
-  set(MESOS_DEFAULT_LIBRARY_LINKAGE "STATIC")
-else (WIN32)
+if (BUILD_SHARED_LIBS)
   set(MESOS_DEFAULT_LIBRARY_LINKAGE "SHARED")
   set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-endif (WIN32)
+else ()
+  set(MESOS_DEFAULT_LIBRARY_LINKAGE "STATIC")
+endif ()
 
 # DEFINE DIRECTORY STRUCTURE MESOS PROJECT.
 ###########################################
@@ -151,7 +137,7 @@ if (NOT WIN32)
   set(
     MESOS_CNI_PORT_MAPPER mesos-cni-port-mapper
     CACHE STRING "Target for the CNI port-mapper plugin")
-endif (NOT WIN32)
+endif ()
 
 set(
   MESOS_MASTER mesos-master
@@ -216,6 +202,6 @@ if (NOT WIN32)
     file(COPY "${CMAKE_BINARY_DIR}/bin/tmp/${OUTPUT_BIN_FILE}"
       DESTINATION "${CMAKE_BINARY_DIR}/bin"
       FILE_PERMISSIONS WORLD_EXECUTE OWNER_READ OWNER_WRITE)
-  endforeach (BIN_FILE)
+  endforeach ()
   file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/bin/tmp")
-endif (NOT WIN32)
+endif ()

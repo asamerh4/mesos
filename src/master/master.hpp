@@ -92,6 +92,7 @@ namespace mesos {
 
 // Forward declarations.
 class Authorizer;
+class ObjectApprover;
 
 namespace internal {
 
@@ -1368,18 +1369,31 @@ private:
         const FrameworkID& id) const;
 
     process::Future<process::http::Response> _updateMaintenanceSchedule(
-        const mesos::maintenance::Schedule& schedule) const;
+        const mesos::maintenance::Schedule& schedule,
+        const Option<process::http::authentication::Principal>&
+            principal) const;
 
-    mesos::maintenance::Schedule _getMaintenanceSchedule() const;
+    process::Future<process::http::Response> __updateMaintenanceSchedule(
+        const mesos::maintenance::Schedule& schedule,
+        const process::Owned<ObjectApprover>& approver) const;
 
-    process::Future<mesos::maintenance::ClusterStatus>
-      _getMaintenanceStatus() const;
+    process::Future<process::http::Response> ___updateMaintenanceSchedule(
+        const mesos::maintenance::Schedule& schedule,
+        bool applied) const;
+
+    mesos::maintenance::Schedule _getMaintenanceSchedule(
+        const process::Owned<ObjectApprover>& approver) const;
+
+    process::Future<mesos::maintenance::ClusterStatus> _getMaintenanceStatus(
+        const process::Owned<ObjectApprover>& approver) const;
 
     process::Future<process::http::Response> _startMaintenance(
-        const google::protobuf::RepeatedPtrField<MachineID>& machineIds) const;
+        const google::protobuf::RepeatedPtrField<MachineID>& machineIds,
+        const process::Owned<ObjectApprover>& approver) const;
 
     process::Future<process::http::Response> _stopMaintenance(
-        const google::protobuf::RepeatedPtrField<MachineID>& machineIds) const;
+        const google::protobuf::RepeatedPtrField<MachineID>& machineIds,
+        const process::Owned<ObjectApprover>& approver) const;
 
     process::Future<process::http::Response> _reserve(
         const SlaveID& slaveId,

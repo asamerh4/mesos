@@ -1118,10 +1118,15 @@ Future<Response> Master::Http::_createVolumes(
   operation.mutable_create()->mutable_volumes()->CopyFrom(volumes);
 
   Option<Error> validate = validation::operation::validate(
-      operation.create(), slave->checkpointedResources, principal);
+      operation.create(),
+      slave->checkpointedResources,
+      principal,
+      slave->capabilities);
 
   if (validate.isSome()) {
-    return BadRequest("Invalid CREATE operation: " + validate.get().message);
+    return BadRequest(
+        "Invalid CREATE operation on agent " + stringify(*slave) + ": " +
+        validate.get().message);
   }
 
   return master->authorizeCreateVolume(operation.create(), principal)
@@ -1998,10 +2003,32 @@ Future<Response> Master::Http::setLoggingLevel(
   Duration duration =
     Nanoseconds(call.set_logging_level().duration().nanoseconds());
 
-  return dispatch(process::logging(), &Logging::set_level, level, duration)
-      .then([]() -> Response {
-        return OK();
-      });
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::SET_LOG_LEVEL);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then([level, duration](const Owned<ObjectApprover>& approver)
+      -> Future<Response> {
+    Try<bool> approved = approver->approved((ObjectApprover::Object()));
+
+    if (approved.isError()) {
+      return InternalServerError("Authorization error: " + approved.error());
+    } else if (!approved.get()) {
+      return Forbidden();
+    }
+
+    return dispatch(process::logging(), &Logging::set_level, level, duration)
+        .then([]() -> Response {
+          return OK();
+        });
+  });
 }
 
 
@@ -2230,10 +2257,12 @@ Future<Response> Master::Http::_reserve(
   operation.mutable_reserve()->mutable_resources()->CopyFrom(resources);
 
   Option<Error> error = validation::operation::validate(
-      operation.reserve(), principal);
+      operation.reserve(), principal, slave->capabilities);
 
   if (error.isSome()) {
-    return BadRequest("Invalid RESERVE operation: " + error.get().message);
+    return BadRequest(
+        "Invalid RESERVE operation on agent " + stringify(*slave) + ": " +
+        error.get().message);
   }
 
   return master->authorizeReserveResources(operation.reserve(), principal)
@@ -2319,7 +2348,10 @@ Future<Response> Master::Http::slaves(
                              reserved) {
                   writer->field(role, [&resources](JSON::ArrayWriter* writer) {
                     foreach (const Resource& resource, resources) {
-                      writer->element(JSON::Protobuf(resource));
+                      // TODO(mpark): Replace the `modelProtobufJSON` back to
+                      // `JSON::Protobuf` once MESOS-7674 is resolved and
+                      // `Resource.role` is deprecated.
+                      writer->element(modelProtobufJSON(resource));
                     }
                   });
                 }
@@ -2332,7 +2364,10 @@ Future<Response> Master::Http::slaves(
               "unreserved_resources_full",
               [&unreservedResources](JSON::ArrayWriter* writer) {
                 foreach (const Resource& resource, unreservedResources) {
-                  writer->element(JSON::Protobuf(resource));
+                  // TODO(mpark): Replace the `modelProtobufJSON` back to
+                  // `JSON::Protobuf` once MESOS-7674 is resolved and
+                  // `Resource.role` is deprecated.
+                  writer->element(modelProtobufJSON(resource));
                 }
               });
 
@@ -2342,7 +2377,10 @@ Future<Response> Master::Http::slaves(
               "used_resources_full",
               [&usedResources](JSON::ArrayWriter* writer) {
                 foreach (const Resource& resource, usedResources) {
-                  writer->element(JSON::Protobuf(resource));
+                  // TODO(mpark): Replace the `modelProtobufJSON` back to
+                  // `JSON::Protobuf` once MESOS-7674 is resolved and
+                  // `Resource.role` is deprecated.
+                  writer->element(modelProtobufJSON(resource));
                 }
               });
 
@@ -2352,7 +2390,10 @@ Future<Response> Master::Http::slaves(
               "offered_resources_full",
               [&offeredResources](JSON::ArrayWriter* writer) {
                 foreach (const Resource& resource, offeredResources) {
-                  writer->element(JSON::Protobuf(resource));
+                  // TODO(mpark): Replace the `modelProtobufJSON` back to
+                  // `JSON::Protobuf` once MESOS-7674 is resolved and
+                  // `Resource.role` is deprecated.
+                  writer->element(modelProtobufJSON(resource));
                 }
               });
         });
@@ -4004,14 +4045,23 @@ string Master::Http::MAINTENANCE_SCHEDULE_HELP()
         "",
         "POST: Validates the request body as JSON",
         "and updates the maintenance schedule."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "GET: The response will contain only the maintenance schedule for",
+        "those machines the current principal is allowed to see. If none",
+        "an empty response will be returned.",
+        "",
+        "POST: The current principal must be authorized to modify the",
+        "maintenance schedule of all the machines in the request. If the",
+        "principal is unauthorized to modify the schedule for at least one",
+        "machine, the whole request will fail."));
 }
 
 
 // /master/maintenance/schedule endpoint handler.
 Future<Response> Master::Http::maintenanceSchedule(
     const Request& request,
-    const Option<Principal>&) const
+    const Option<Principal>& principal) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4024,8 +4074,27 @@ Future<Response> Master::Http::maintenanceSchedule(
 
   // JSON-ify and return the current maintenance schedule.
   if (request.method == "GET") {
-    const mesos::maintenance::Schedule schedule = _getMaintenanceSchedule();
-    return OK(JSON::protobuf(schedule), request.url.query.get("jsonp"));
+    Future<Owned<ObjectApprover>> approver;
+
+    if (master->authorizer.isSome()) {
+      Option<authorization::Subject> subject = createSubject(principal);
+
+      approver = master->authorizer.get()->getObjectApprover(
+          subject, authorization::GET_MAINTENANCE_SCHEDULE);
+    } else {
+      approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    }
+
+    Option<string> jsonp = request.url.query.get("jsonp");
+
+    return approver.then(defer(
+        master->self(),
+        [this, jsonp](
+            const Owned<ObjectApprover>& approver) -> Future<Response> {
+          const mesos::maintenance::Schedule schedule =
+            _getMaintenanceSchedule(approver);
+          return OK(JSON::protobuf(schedule), jsonp);
+        }));
   }
 
   // Parse the POST body as JSON.
@@ -4042,24 +4111,57 @@ Future<Response> Master::Http::maintenanceSchedule(
     return BadRequest(protoSchedule.error());
   }
 
-  return _updateMaintenanceSchedule(protoSchedule.get());
+  return _updateMaintenanceSchedule(protoSchedule.get(), principal);
 }
 
 
-mesos::maintenance::Schedule Master::Http::_getMaintenanceSchedule() const
+mesos::maintenance::Schedule Master::Http::_getMaintenanceSchedule(
+    const Owned<ObjectApprover>& approver) const
 {
   // TODO(josephw): Return more than one schedule.
-  const mesos::maintenance::Schedule schedule =
-    master->maintenance.schedules.empty() ?
-      mesos::maintenance::Schedule() :
-      master->maintenance.schedules.front();
+  if (master->maintenance.schedules.empty()) {
+    return mesos::maintenance::Schedule();
+  }
+
+  mesos::maintenance::Schedule schedule;
+
+  foreach (const mesos::maintenance::Window& window,
+           master->maintenance.schedules.front().windows()) {
+    mesos::maintenance::Window window_;
+
+    foreach (const MachineID& machine_id, window.machine_ids()) {
+      ObjectApprover::Object object;
+      object.machine_id = &machine_id;
+
+      Try<bool> approved = approver->approved(object);
+
+      if (approved.isError()) {
+        LOG(WARNING) << "Error during MachineID authorization: "
+                     << approved.error();
+        // TODO(arojas): Consider exposing these errors to the caller.
+        continue;
+      }
+
+      if (!approved.get()) {
+        continue;
+      }
+
+      window_.add_machine_ids()->CopyFrom(machine_id);
+    }
+
+    if (window_.machine_ids_size() > 0) {
+      window_.mutable_unavailability()->CopyFrom(window.unavailability());
+      schedule.add_windows()->CopyFrom(window_);
+    }
+  }
 
   return schedule;
 }
 
 
 Future<Response> Master::Http::_updateMaintenanceSchedule(
-    const mesos::maintenance::Schedule& schedule) const
+    const mesos::maintenance::Schedule& schedule,
+    const Option<process::http::authentication::Principal>& principal) const
 {
   // Validate that the schedule only transitions machines between
   // `UP` and `DRAINING` modes.
@@ -4071,80 +4173,124 @@ Future<Response> Master::Http::_updateMaintenanceSchedule(
     return BadRequest(isValid.error());
   }
 
-  return master->registrar->apply(Owned<Operation>(
-      new maintenance::UpdateSchedule(schedule)))
-    .then(defer(master->self(), [=](bool result) -> Future<Response> {
-      // See the top comment in "master/maintenance.hpp" for why this check
-      // is here, and is appropriate.
-      CHECK(result);
+  Future<Owned<ObjectApprover>> approver;
 
-      // Update the master's local state with the new schedule.
-      // NOTE: We only add or remove differences between the current schedule
-      // and the new schedule.  This is because the `MachineInfo` struct
-      // holds more information than a maintenance schedule.
-      // For example, the `mode` field is not part of a maintenance schedule.
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
 
-      // TODO(josephw): allow more than one schedule.
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::UPDATE_MAINTENANCE_SCHEDULE);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
 
-      // Put the machines in the updated schedule into a set.
-      // Save the unavailability, to help with updating some machines.
-      hashmap<MachineID, Unavailability> unavailabilities;
-      foreach (const mesos::maintenance::Window& window, schedule.windows()) {
-        foreach (const MachineID& id, window.machine_ids()) {
-          unavailabilities[id] = window.unavailability();
-        }
+  return approver.then(defer(
+      master->self(),
+      [this, schedule](const Owned<ObjectApprover>& approver) {
+        return __updateMaintenanceSchedule(schedule, approver);
+      }));
+}
+
+Future<Response> Master::Http::__updateMaintenanceSchedule(
+    const mesos::maintenance::Schedule& schedule,
+    const Owned<ObjectApprover>& approver) const
+{
+  foreach (const mesos::maintenance::Window& window, schedule.windows()) {
+    foreach (const MachineID& machine, window.machine_ids()) {
+      ObjectApprover::Object object;
+      object.machine_id = &machine;
+
+      Try<bool> approved = approver->approved(object);
+
+      if (approved.isError()) {
+        return InternalServerError("Authorization error: " + approved.error());
+      } else if (!approved.get()) {
+        return Forbidden();
       }
+    }
+  }
 
-      // NOTE: Copies are needed because `updateUnavailability()` in this loop
-      // modifies the container.
-      foreachkey (const MachineID& id, utils::copy(master->machines)) {
-        // Update the `unavailability` for each existing machine, except for
-        // machines going from `UP` to `DRAINING` (handled in the next loop).
-        // Each machine will only be touched by 1 of the 2 loops here to
-        // avoid sending inverse offer twice for a single machine since
-        // `updateUnavailability` will trigger an inverse offer.
-        // TODO(gyliu513): Merge this logic with `Master::updateUnavailability`,
-        // having it in two places results in more conditionals to handle.
-        if (unavailabilities.contains(id)) {
-          if (master->machines[id].info.mode() == MachineInfo::UP) {
-            continue;
-          }
-
-          master->updateUnavailability(id, unavailabilities[id]);
-          continue;
-        }
-
-        // Transition each removed machine back to the `UP` mode and remove the
-        // unavailability.
-        master->machines[id].info.set_mode(MachineInfo::UP);
-        master->updateUnavailability(id, None());
-      }
-
-      // Save each new machine, with the unavailability
-      // and starting in `DRAINING` mode.
-      foreach (const mesos::maintenance::Window& window, schedule.windows()) {
-        foreach (const MachineID& id, window.machine_ids()) {
-          if (master->machines.contains(id) &&
-              master->machines[id].info.mode() != MachineInfo::UP) {
-            continue;
-          }
-
-          MachineInfo info;
-          info.mutable_id()->CopyFrom(id);
-          info.set_mode(MachineInfo::DRAINING);
-
-          master->machines[id].info.CopyFrom(info);
-
-          master->updateUnavailability(id, window.unavailability());
-        }
-      }
-
-      // Replace the old schedule(s) with the new schedule.
-      master->maintenance.schedules.clear();
-      master->maintenance.schedules.push_back(schedule);
-
-      return OK();
+  return master->registrar
+    ->apply(Owned<Operation>(new maintenance::UpdateSchedule(schedule)))
+    .then(defer(master->self(), [this, schedule](bool result) {
+      return ___updateMaintenanceSchedule(schedule, result);
     }));
+}
+
+Future<Response> Master::Http::___updateMaintenanceSchedule(
+    const mesos::maintenance::Schedule& schedule,
+    bool applied) const
+{
+  // See the top comment in "master/maintenance.hpp" for why this check
+  // is here, and is appropriate.
+  CHECK(applied);
+
+  // Update the master's local state with the new schedule.
+  // NOTE: We only add or remove differences between the current schedule
+  // and the new schedule.  This is because the `MachineInfo` struct
+  // holds more information than a maintenance schedule.
+  // For example, the `mode` field is not part of a maintenance schedule.
+
+  // TODO(josephw): allow more than one schedule.
+
+  // Put the machines in the updated schedule into a set.
+  // Save the unavailability, to help with updating some machines.
+  hashmap<MachineID, Unavailability> unavailabilities;
+  foreach (const mesos::maintenance::Window& window, schedule.windows()) {
+    foreach (const MachineID& id, window.machine_ids()) {
+      unavailabilities[id] = window.unavailability();
+    }
+  }
+
+  // NOTE: Copies are needed because `updateUnavailability()` in this loop
+  // modifies the container.
+  foreachkey (const MachineID& id, utils::copy(master->machines)) {
+    // Update the `unavailability` for each existing machine, except for
+    // machines going from `UP` to `DRAINING` (handled in the next loop).
+    // Each machine will only be touched by 1 of the 2 loops here to
+    // avoid sending inverse offer twice for a single machine since
+    // `updateUnavailability` will trigger an inverse offer.
+    // TODO(gyliu513): Merge this logic with `Master::updateUnavailability`,
+    // having it in two places results in more conditionals to handle.
+    if (unavailabilities.contains(id)) {
+      if (master->machines[id].info.mode() == MachineInfo::UP) {
+        continue;
+      }
+
+      master->updateUnavailability(id, unavailabilities[id]);
+      continue;
+    }
+
+    // Transition each removed machine back to the `UP` mode and remove the
+    // unavailability.
+    master->machines[id].info.set_mode(MachineInfo::UP);
+    master->updateUnavailability(id, None());
+  }
+
+  // Save each new machine, with the unavailability
+  // and starting in `DRAINING` mode.
+  foreach (const mesos::maintenance::Window& window, schedule.windows()) {
+    foreach (const MachineID& id, window.machine_ids()) {
+      if (master->machines.contains(id) &&
+          master->machines[id].info.mode() != MachineInfo::UP) {
+        continue;
+      }
+
+      MachineInfo info;
+      info.mutable_id()->CopyFrom(id);
+      info.set_mode(MachineInfo::DRAINING);
+
+      master->machines[id].info.CopyFrom(info);
+
+      master->updateUnavailability(id, window.unavailability());
+    }
+  }
+
+  // Replace the old schedule(s) with the new schedule.
+  master->maintenance.schedules.clear();
+  master->maintenance.schedules.push_back(schedule);
+
+  return OK();
 }
 
 
@@ -4155,13 +4301,31 @@ Future<Response> Master::Http::getMaintenanceSchedule(
 {
   CHECK_EQ(mesos::master::Call::GET_MAINTENANCE_SCHEDULE, call.type());
 
-  mesos::master::Response response;
-  response.set_type(mesos::master::Response::GET_MAINTENANCE_SCHEDULE);
-  response.mutable_get_maintenance_schedule()->mutable_schedule()->CopyFrom(
-      _getMaintenanceSchedule());
+  Future<Owned<ObjectApprover>> approver;
 
-  return OK(serialize(contentType, evolve(response)),
-            stringify(contentType));
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::GET_MAINTENANCE_SCHEDULE);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(
+      master->self(),
+      [this, contentType](
+          const Owned<ObjectApprover>& approver) -> Future<Response> {
+        mesos::master::Response response;
+
+        response.set_type(mesos::master::Response::GET_MAINTENANCE_SCHEDULE);
+
+        response.mutable_get_maintenance_schedule()->mutable_schedule()
+          ->CopyFrom(_getMaintenanceSchedule(approver));
+
+        return OK(serialize(contentType, evolve(response)),
+                  stringify(contentType));
+      }));
 }
 
 
@@ -4176,7 +4340,7 @@ Future<Response> Master::Http::updateMaintenanceSchedule(
   mesos::maintenance::Schedule schedule =
     call.update_maintenance_schedule().schedule();
 
-  return _updateMaintenanceSchedule(schedule);
+  return _updateMaintenanceSchedule(schedule, principal);
 }
 
 
@@ -4198,14 +4362,17 @@ string Master::Http::MACHINE_DOWN_HELP()
         "POST: Validates the request body as JSON and transitions",
         "  the list of machines into DOWN mode.  Currently, only",
         "  machines in DRAINING mode are allowed to be brought down."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "The current principal must be allowed to bring down all the machines",
+        "in the request, otherwise the request will fail."));
 }
 
 
 // /master/machine/down endpoint handler.
 Future<Response> Master::Http::machineDown(
     const Request& request,
-    const Option<Principal>&) const
+    const Option<Principal>& principal) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4228,12 +4395,28 @@ Future<Response> Master::Http::machineDown(
     return BadRequest(ids.error());
   }
 
-  return _startMaintenance(ids.get());
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::START_MAINTENANCE);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(
+      master->self(),
+      [this, ids](const Owned<ObjectApprover>& approver) {
+        return _startMaintenance(ids.get(), approver);
+      }));
 }
 
 
 Future<Response> Master::Http::_startMaintenance(
-    const RepeatedPtrField<MachineID>& machineIds) const
+    const RepeatedPtrField<MachineID>& machineIds,
+    const Owned<ObjectApprover>& approver) const
 {
   // Validate every machine in the list.
   Try<Nothing> isValid = maintenance::validation::machines(machineIds);
@@ -4254,6 +4437,16 @@ Future<Response> Master::Http::_startMaintenance(
       return BadRequest(
           "Machine '" + stringify(JSON::protobuf(id)) +
             "' is not in DRAINING mode and cannot be brought down");
+    }
+
+    ObjectApprover::Object object;
+    object.machine_id = &id;
+    Try<bool> approved = approver->approved(object);
+
+    if (approved.isError()) {
+      return InternalServerError("Authorization error: " + approved.error());
+    } else if (!approved.get()) {
+      return Forbidden();
     }
   }
 
@@ -4313,9 +4506,24 @@ Future<Response> Master::Http::startMaintenance(
   CHECK_EQ(mesos::master::Call::START_MAINTENANCE, call.type());
   CHECK(call.has_start_maintenance());
 
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::START_MAINTENANCE);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
   RepeatedPtrField<MachineID> machineIds = call.start_maintenance().machines();
 
-  return _startMaintenance(machineIds);
+  return approver.then(defer(
+      master->self(),
+      [this, machineIds](const Owned<ObjectApprover>& approver) {
+        return _startMaintenance(machineIds, approver);
+      }));
 }
 
 
@@ -4337,14 +4545,17 @@ string Master::Http::MACHINE_UP_HELP()
         "POST: Validates the request body as JSON and transitions",
         "  the list of machines into UP mode.  This also removes",
         "  the list of machines from the maintenance schedule."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "The current principal must be allowed to bring up all the machines",
+        "in the request, otherwise the request will fail."));
 }
 
 
 // /master/machine/up endpoint handler.
 Future<Response> Master::Http::machineUp(
     const Request& request,
-    const Option<Principal>&) const
+    const Option<Principal>& principal) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4367,12 +4578,28 @@ Future<Response> Master::Http::machineUp(
     return BadRequest(ids.error());
   }
 
-  return _stopMaintenance(ids.get());
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::STOP_MAINTENANCE);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(
+      master->self(),
+      [this, ids](const Owned<ObjectApprover>& approver) {
+        return _stopMaintenance(ids.get(), approver);
+      }));
 }
 
 
 Future<Response> Master::Http::_stopMaintenance(
-    const RepeatedPtrField<MachineID>& machineIds) const
+    const RepeatedPtrField<MachineID>& machineIds,
+    const Owned<ObjectApprover>& approver) const
 {
   // Validate every machine in the list.
   Try<Nothing> isValid = maintenance::validation::machines(machineIds);
@@ -4392,6 +4619,16 @@ Future<Response> Master::Http::_stopMaintenance(
       return BadRequest(
           "Machine '" + stringify(JSON::protobuf(id)) +
             "' is not in DOWN mode and cannot be brought up");
+    }
+
+    ObjectApprover::Object object;
+    object.machine_id = &id;
+    Try<bool> approved = approver->approved(object);
+
+    if (approved.isError()) {
+      return InternalServerError("Authorization error: " + approved.error());
+    } else if (!approved.get()) {
+      return Forbidden();
     }
   }
 
@@ -4453,7 +4690,23 @@ Future<Response> Master::Http::stopMaintenance(
 
   RepeatedPtrField<MachineID> machineIds = call.stop_maintenance().machines();
 
-  return _stopMaintenance(machineIds);
+
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::STOP_MAINTENANCE);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver.then(defer(
+      master->self(),
+      [this, machineIds](const Owned<ObjectApprover>& approver) {
+        return _stopMaintenance(machineIds, approver);
+      }));
 }
 
 
@@ -4478,14 +4731,18 @@ string Master::Http::MAINTENANCE_STATUS_HELP()
         "**NOTE**:",
         "Inverse offer responses are cleared if the master fails over.",
         "However, new inverse offers will be sent once the master recovers."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "The response will contain only the maintenance status for those",
+        "machines the current principal is allowed to see. If none, an empty",
+        "response will be returned."));
 }
 
 
 // /master/maintenance/status endpoint handler.
 Future<Response> Master::Http::maintenanceStatus(
     const Request& request,
-    const Option<Principal>&) const
+    const Option<Principal>& principal) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
@@ -4496,16 +4753,33 @@ Future<Response> Master::Http::maintenanceStatus(
     return MethodNotAllowed({"GET"}, request.method);
   }
 
-  return _getMaintenanceStatus()
-    .then([request](const mesos::maintenance::ClusterStatus& status)
-      -> Response {
-      return OK(JSON::protobuf(status), request.url.query.get("jsonp"));
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::GET_MAINTENANCE_STATUS);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  Option<string> jsonp = request.url.query.get("jsonp");
+
+  return approver
+    .then(defer(
+      master->self(),
+      [this](const Owned<ObjectApprover>& approver) {
+        return _getMaintenanceStatus(approver);
+      }))
+    .then([jsonp](const mesos::maintenance::ClusterStatus& status) -> Response {
+      return OK(JSON::protobuf(status), jsonp);
     });
 }
 
 
-Future<mesos::maintenance::ClusterStatus>
-  Master::Http::_getMaintenanceStatus() const
+Future<mesos::maintenance::ClusterStatus> Master::Http::_getMaintenanceStatus(
+    const Owned<ObjectApprover>& approver) const
 {
   return master->allocator->getInverseOfferStatuses()
     .then(defer(
@@ -4522,6 +4796,21 @@ Future<mesos::maintenance::ClusterStatus>
         const MachineID& id,
         const Machine& machine,
         master->machines) {
+      ObjectApprover::Object object;
+      object.machine_id = &id;
+      Try<bool> approved = approver->approved(object);
+
+      if (approved.isError()) {
+        LOG(WARNING) << "Error during MachineID authorization: "
+                     << approved.error();
+        // TODO(arojas): Consider exposing these errors to the caller.
+        continue;
+      }
+
+      if (!approved.get()) {
+        continue;
+      }
+
       switch (machine.info.mode()) {
         case MachineInfo::DRAINING: {
           mesos::maintenance::ClusterStatus::DrainingMachine* drainingMachine =
@@ -4567,17 +4856,33 @@ Future<Response> Master::Http::getMaintenanceStatus(
 {
   CHECK_EQ(mesos::master::Call::GET_MAINTENANCE_STATUS, call.type());
 
-  return _getMaintenanceStatus()
+  Future<Owned<ObjectApprover>> approver;
+
+  if (master->authorizer.isSome()) {
+    Option<authorization::Subject> subject = createSubject(principal);
+
+    approver = master->authorizer.get()->getObjectApprover(
+        subject, authorization::GET_MAINTENANCE_STATUS);
+  } else {
+    approver = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return approver
+    .then(defer(
+      master->self(),
+      [this](const Owned<ObjectApprover>& approver) {
+        return _getMaintenanceStatus(approver);
+      }))
     .then([contentType](const mesos::maintenance::ClusterStatus& status)
           -> Response {
-      mesos::master::Response response;
-      response.set_type(mesos::master::Response::GET_MAINTENANCE_STATUS);
-      response.mutable_get_maintenance_status()->mutable_status()
-        ->CopyFrom(status);
+        mesos::master::Response response;
+        response.set_type(mesos::master::Response::GET_MAINTENANCE_STATUS);
+        response.mutable_get_maintenance_status()->mutable_status()
+            ->CopyFrom(status);
 
-      return OK(serialize(contentType, evolve(response)),
-                stringify(contentType));
-    });
+        return OK(serialize(contentType, evolve(response)),
+                  stringify(contentType));
+      });
 }
 
 

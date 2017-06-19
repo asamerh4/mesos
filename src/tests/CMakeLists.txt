@@ -35,7 +35,7 @@ if (NOT WIN32)
     kill_policy_test_helper.cpp
     containerizer/memory_test_helper.cpp
     )
-endif (NOT WIN32)
+endif ()
 
 if (LINUX)
   set(TEST_HELPER_SRC
@@ -43,7 +43,7 @@ if (LINUX)
     containerizer/capabilities_test_helper.cpp
     containerizer/setns_test_helper.cpp
     )
-endif (LINUX)
+endif ()
 
 # Test utilities.
 #################
@@ -73,7 +73,7 @@ if (NOT WIN32)
     script.cpp
     containerizer/memory_test_helper.cpp
     )
-endif (NOT WIN32)
+endif ()
 
 if (LINUX)
   set(MESOS_TESTS_UTILS_SRC
@@ -81,7 +81,7 @@ if (LINUX)
     containerizer/capabilities_test_helper.cpp
     containerizer/setns_test_helper.cpp
     )
-endif (LINUX)
+endif ()
 
 # All the test sources.
 #######################
@@ -135,7 +135,7 @@ if (ENABLE_SSL)
     ${MESOS_TESTS_SRC}
     secret_generator_tests.cpp
     )
-endif (ENABLE_SSL)
+endif ()
 
 set(MESOS_TESTS_SRC
   ${MESOS_TESTS_SRC}
@@ -146,6 +146,7 @@ set(MESOS_TESTS_SRC
 
 set(MESOS_TESTS_SRC
   ${MESOS_TESTS_SRC}
+  containerizer/containerizer_tests.cpp
   containerizer/docker_tests.cpp
   )
 
@@ -211,7 +212,7 @@ if (NOT WIN32)
     containerizer/provisioner_paths_tests.cpp
     containerizer/volume_sandbox_path_isolator_tests.cpp
     )
-endif (NOT WIN32)
+endif ()
 
 if (LINUX)
   set(MESOS_TESTS_SRC
@@ -237,7 +238,7 @@ if (LINUX)
     containerizer/volume_image_isolator_tests.cpp
     containerizer/volume_secret_isolator_tests.cpp
     )
-endif (LINUX)
+endif ()
 
 # INCLUDE DIRECTIVES (generates, e.g., -I/path/to/thing on Linux).
 ##################################################################
@@ -305,7 +306,7 @@ if (NOT WIN32)
     ${TEST_HTTP_EXECUTOR}
     ${TEST_HTTP_FRAMEWORK}
     )
-endif (NOT WIN32)
+endif ()
 
 add_dependencies(${TEST_HELPER_TARGET} ${MESOS_TESTS_DEPENDENCIES})
 

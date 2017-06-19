@@ -19,12 +19,13 @@
 option(VERBOSE "Enable verbose CMake statements and compilation output" ON)
 set(CMAKE_VERBOSE_MAKEFILE ${VERBOSE})
 
-option(ENABLE_DEBUG "Set default build configuration to debug" ON)
-if (ENABLE_DEBUG)
-  set(CMAKE_BUILD_TYPE Debug)
-endif (ENABLE_DEBUG)
+if (NOT WIN32)
+  set(DEFAULT_BUILD_SHARED_LIBS ON)
+else ()
+  set(DEFAULT_BUILD_SHARED_LIBS OFF)
+endif ()
 
-option(BUILD_SHARED_LIBS "Build shared libraries." OFF)
+option(BUILD_SHARED_LIBS "Build shared libraries." ${DEFAULT_BUILD_SHARED_LIBS})
 
 option(ENABLE_PRECOMPILED_HEADERS
   "Enable auto-generated precompiled headers using cotire" ${WIN32})
@@ -33,7 +34,7 @@ if (NOT WIN32 AND ENABLE_PRECOMPILED_HEADERS)
   message(
     FATAL_ERROR
     "Precompiled headers are only supported on Windows.  See MESOS-7322.")
-endif (NOT WIN32 AND ENABLE_PRECOMPILED_HEADERS)
+endif ()
 
 if (ENABLE_PRECOMPILED_HEADERS)
   # By default Cotire generates both precompiled headers and a "unity" build.
@@ -42,18 +43,7 @@ if (ENABLE_PRECOMPILED_HEADERS)
   # and read. We disable "unity" builds for now.
   set(COTIRE_ADD_UNITY_BUILD FALSE)
   set(COTIRE_VERBOSE ${VERBOSE})
-endif (ENABLE_PRECOMPILED_HEADERS)
-
-# Enable optimization?
-option(ENABLE_OPTIMIZE "Enable optimization" TRUE)
-if (ENABLE_OPTIMIZE)
-  if (WIN32)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2")
-  else (WIN32)
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -O2")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
-  endif (WIN32)
-endif (ENABLE_OPTIMIZE)
+endif ()
 
 if (WIN32)
   # In MSVC 1900, there are two bugs in the linker, one that causes linking
@@ -67,8 +57,8 @@ if (WIN32)
       "The x64 toolset MUST be used. See MESOS-6720 for details. "
       "Please use `cmake -T ${PREFERRED_TOOLSET}`."
   )
-  endif (NOT CMAKE_GENERATOR_TOOLSET MATCHES ${PREFERRED_TOOLSET})
-endif (WIN32)
+  endif ()
+endif ()
 
 
 # 3RDPARTY OPTIONS.
@@ -99,7 +89,7 @@ if (WIN32 AND HAS_AUTHENTICATION)
     "Windows builds of Mesos currently do not support agent to master "
     "authentication. To build without this capability, pass "
     "`-DHAS_AUTHENTICATION=0` as an argument when you run CMake.")
-endif (WIN32 AND HAS_AUTHENTICATION)
+endif ()
 
 # If 'REBUNDLED' is set to FALSE, this will cause Mesos to build against the
 # specified dependency repository. This is especially useful for Windows
@@ -123,7 +113,7 @@ if (WIN32 AND REBUNDLED)
     "  * zlib\n"
     "do not come rebundled in the Mesos repository.  They will be downloaded from "
     "the Internet, even though the `REBUNDLED` flag was set.")
-endif (WIN32 AND REBUNDLED)
+endif ()
 
 if (WIN32 AND (NOT ENABLE_LIBEVENT))
   message(
@@ -131,13 +121,13 @@ if (WIN32 AND (NOT ENABLE_LIBEVENT))
     "Windows builds of Mesos currently do not support libev, the default event "
     "loop used by Mesos.  To opt into using libevent, pass "
     "`-DENABLE_LIBEVENT=1` as an argument when you run CMake.")
-endif (WIN32 AND (NOT ENABLE_LIBEVENT))
+endif ()
 
 if (ENABLE_SSL AND (NOT ENABLE_LIBEVENT))
   message(
     FATAL_ERROR
     "'ENABLE_SSL' currently requires 'ENABLE_LIBEVENT'.")
-endif (ENABLE_SSL AND (NOT ENABLE_LIBEVENT))
+endif ()
 
 
 # SYSTEM CHECKS.
@@ -154,7 +144,7 @@ if (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
     "    `cmake -G \"Visual Studio 15 2017 Win64\"`.\n"
     "  * OS X: add `x86_64` to the `CMAKE_OSX_ARCHITECTURES`:\n"
     "    `cmake -DCMAKE_OSX_ARCHITECTURES=x86_64`.\n")
-endif (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
+endif ()
 
 # Make sure C++ 11 features we need are supported.
 # This is split into two cases: Windows and "other platforms".
@@ -173,7 +163,7 @@ if (WIN32)
       "Mesos is deprecating support for ${CMAKE_GENERATOR}. "
       "Please use ${PREFERRED_GENERATOR}."
   )
-  endif (NOT CMAKE_GENERATOR MATCHES ${PREFERRED_GENERATOR})
+  endif ()
 
   # We don't support compilation against mingw headers (which, e.g., Clang on
   # Windows does at this point), because this is likely to cost us more effort
@@ -183,7 +173,7 @@ if (WIN32)
       FATAL_ERROR
       "Mesos does not support compiling on Windows with "
       "${CMAKE_CXX_COMPILER_ID}. Please use MSVC.")
-  endif (NOT CMAKE_CXX_COMPILER_ID MATCHES MSVC)
+  endif ()
 
   # MSVC 1900 supports C++11; earlier versions don't. So, warn if you try to
   # use anything else.
@@ -192,8 +182,8 @@ if (WIN32)
       FATAL_ERROR
       "Mesos does not support compiling on MSVC versions earlier than 1900. "
       "Please use MSVC 1900 (included with Visual Studio 2015 or later).")
-  endif (${MSVC_VERSION} LESS 1900)
-endif (WIN32)
+  endif ()
+endif ()
 
 
 # POSIX CONFIGURATION.
@@ -204,7 +194,7 @@ if (NOT WIN32)
       FATAL_ERROR
       "The compiler ${CMAKE_CXX_COMPILER} does not support the `-std=c++11` "
       "flag. Please use a different C++ compiler.")
-  endif (NOT COMPILER_SUPPORTS_CXX11)
+  endif ()
 
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
@@ -217,7 +207,7 @@ if (NOT WIN32)
   set(LIBEXEC_INSTALL_DIR     ${EXEC_INSTALL_PREFIX}/libexec)
   set(PKG_LIBEXEC_INSTALL_DIR ${LIBEXEC_INSTALL_DIR}/mesos)
   set(LIB_INSTALL_DIR         ${EXEC_INSTALL_PREFIX}/libmesos)
-endif (NOT WIN32)
+endif ()
 
 
 # LINUX CONFIGURATION.
@@ -230,21 +220,46 @@ string(COMPARE EQUAL ${CMAKE_SYSTEM_NAME} "Linux" LINUX)
 if (WIN32)
   # Speed up incremental linking for the VS compiler/linker, for more info, see:
   # https://blogs.msdn.microsoft.com/vcblog/2014/11/12/speeding-up-the-incremental-developer-build-scenario/
-  foreach(t EXE SHARED STATIC MODULE)
-    string(APPEND CMAKE_${t}_LINKER_FLAGS_DEBUG " /debug:fastlink")
-  endforeach()
+  foreach (type EXE SHARED STATIC MODULE)
+    string(APPEND CMAKE_${type}_LINKER_FLAGS_DEBUG " /debug:fastlink")
+  endforeach ()
 
   # COFF/PE and friends are somewhat limited in the number of sections they
   # allow for an object file. We use this to avoid those problems.
-  set(CMAKE_CXX_FLAGS
-    "${CMAKE_CXX_FLAGS} /bigobj -DGOOGLE_GLOG_DLL_DECL= -DCURL_STATICLIB /vd2")
+  string(APPEND CMAKE_CXX_FLAGS " /bigobj -DGOOGLE_GLOG_DLL_DECL= /vd2")
 
-  # Enable multi-threaded compilation.
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
+  # Build against the multi-threaded version of the C runtime library (CRT).
+  if (BUILD_SHARED_LIBS)
+    message(WARNING "Building with shared libraries is a work-in-progress.")
 
-  # Build against the multi-threaded, static version of the runtime library.
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
+    # Use dynamic CRT.
+    set(CRT " /MD")
+  else ()
+    # Use static CRT.
+    set(CRT " /MT")
+
+    # TODO(andschwa): Define this closer to its usage; anything that includes
+    # `curl.h` has to set this so that the declspec is correct.
+    string(APPEND CMAKE_CXX_FLAGS " -DCURL_STATICLIB")
+  endif ()
+
+  # NOTE: We APPEND ${CRT} rather than REPLACE so it gets picked up by
+  # dependencies.
+  foreach (lang C CXX)
+    # Enable multi-threaded compilation.
+    # NOTE: We do not add CRT here because dependencies will use it incorrectly.
+    string(APPEND CMAKE_${lang}_FLAGS " /MP")
+
+    # Debug library for debug configuration.
+    string(APPEND CMAKE_${lang}_FLAGS_DEBUG "${CRT}d")
+
+    # All other configurations.
+    foreach (config RELEASE RELWITHDEBINFO MINSIZEREL)
+      string(APPEND CMAKE_${lang}_FLAGS_${config} ${CRT})
+    endforeach ()
+  endforeach ()
 
   # Convenience flags to simplify Windows support in C++ source; used to
   # `#ifdef` out some platform-specific parts of Mesos.  We choose to define
@@ -285,7 +300,7 @@ if (WIN32)
   # [1] https://google-glog.googlecode.com/svn/trunk/doc/glog.html#windows
   # [2] https://code.google.com/p/google-glog/source/browse/trunk/src/windows/glog/logging.h?r=113
   list(APPEND MESOS_CPPFLAGS -DNOGDI -DNOMINMAX)
-endif (WIN32)
+endif ()
 
 # GLOBAL CONFIGURATION.
 #######################
@@ -295,7 +310,7 @@ if (HAS_AUTHENTICATION)
   # symbol, and our intention is to only define it if the CMake variable
   # `HAS_AUTHENTICATION` is set.
   list(APPEND MESOS_CPPFLAGS -DHAS_AUTHENTICATION=1)
-endif (HAS_AUTHENTICATION)
+endif ()
 
 # Enable the INT64 support for PicoJSON.
 # NOTE: PicoJson requires __STDC_FORMAT_MACROS to be defined before importing
@@ -313,21 +328,21 @@ list(APPEND MESOS_CPPFLAGS
 
 if (ENABLE_SSL)
   list(APPEND MESOS_CPPFLAGS -DUSE_SSL_SOCKET=1)
-endif (ENABLE_SSL)
+endif ()
 
 # Calculate some build information.
 string(TIMESTAMP BUILD_DATE "%Y-%m-%d %H:%M:%S UTC" UTC)
 if (WIN32)
   string(TIMESTAMP BUILD_TIME "%s" UTC)
   set(BUILD_USER "$ENV{USERNAME}")
-else (WIN32)
+else ()
   execute_process(
     COMMAND date +%s
     OUTPUT_VARIABLE BUILD_TIME
     OUTPUT_STRIP_TRAILING_WHITESPACE
     )
   set(BUILD_USER "$ENV{USER}")
-endif (WIN32)
+endif ()
 
 # Emit the BUILD_DATE, BUILD_TIME, and BUILD_USER variables into a file.
 # This will be updated each time `cmake` is run.

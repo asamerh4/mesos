@@ -810,12 +810,10 @@ TEST_F(RoleTest, Validate)
   EXPECT_NONE(roles::validate("foo.bar"));
   EXPECT_NONE(roles::validate("foo..bar"));
   EXPECT_NONE(roles::validate("..."));
-
-  // TODO(neilc): These expectations will change when MESOS-7505 is fixed.
-  EXPECT_SOME(roles::validate("foo/bar"));
-  EXPECT_SOME(roles::validate("foo/.bar"));
-  EXPECT_SOME(roles::validate("foo/bar/baz"));
-  EXPECT_SOME(roles::validate("a/b/c/d/e/f/g/h"));
+  EXPECT_NONE(roles::validate("foo/bar"));
+  EXPECT_NONE(roles::validate("foo/.bar"));
+  EXPECT_NONE(roles::validate("foo/bar/baz"));
+  EXPECT_NONE(roles::validate("a/b/c/d/e/f/g/h"));
 
   EXPECT_SOME(roles::validate(""));
   EXPECT_SOME(roles::validate("."));
@@ -846,6 +844,16 @@ TEST_F(RoleTest, Validate)
   EXPECT_NONE(roles::validate({"foo", "bar", "*"}));
 
   EXPECT_SOME(roles::validate({"foo", ".", "*"}));
+}
+
+
+TEST_F(RoleTest, isStrictSubroleOf)
+{
+  EXPECT_TRUE(roles::isStrictSubroleOf("foo/bar", "foo"));
+  EXPECT_TRUE(roles::isStrictSubroleOf("foo/bar/baz", "foo"));
+  EXPECT_FALSE(roles::isStrictSubroleOf("foo", "foo"));
+  EXPECT_FALSE(roles::isStrictSubroleOf("bar", "foo"));
+  EXPECT_FALSE(roles::isStrictSubroleOf("foobar", "foo"));
 }
 
 
@@ -900,13 +908,10 @@ TEST_F(RoleTest, EndpointBadAuthentication)
 // subdirectory).
 //
 // TODO(bbannier): Figure out a way to run the test command on Windows.
-//
-// TODO(neilc): Re-enable this when MESOS-7505 is fixed.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(
-    RoleTest, DISABLED_VolumesInOverlappingHierarchies)
+TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, VolumesInOverlappingHierarchies)
 {
   constexpr char PATH[] = "path";
-  constexpr Megabytes DISK_SIZE(1);
+  constexpr Bytes DISK_SIZE = Megabytes(1);
 
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
