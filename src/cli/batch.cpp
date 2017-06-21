@@ -446,7 +446,7 @@ protected:
         }
         if(!persistentVolumeReserved &&
              !persistentVolumeCreated &&
-             offered.contains(Resources(plainResources).flatten())){
+             offered.contains(Resources(plainResources).toUnreserved())){
           cout << "Requested reserved resources: "
                << plainResources
                << " for -> **"
@@ -961,8 +961,10 @@ cout << R"( ___  ___  ___
   }
 
   // Always enable the TASK_KILLING_STATE capability.
-  vector<FrameworkInfo::Capability::Type> frameworkCapabilities =
-    { FrameworkInfo::Capability::TASK_KILLING_STATE };
+  vector<FrameworkInfo::Capability::Type> frameworkCapabilities = {
+    FrameworkInfo::Capability::RESERVATION_REFINEMENT,
+    FrameworkInfo::Capability::TASK_KILLING_STATE,
+  };
 
   // Enable PARTITION_AWARE unless disabled by the user.
   if (flags.partition_aware) {
