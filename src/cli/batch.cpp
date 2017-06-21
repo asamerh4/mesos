@@ -355,8 +355,8 @@ protected:
             plain.set_name(_resource.name());
             plain.set_type(_resource.type());
             plain.mutable_scalar()->CopyFrom(_resource.scalar());
-            plain.set_role(_resource.role());
-            plain.mutable_reservation()->CopyFrom(_resource.reservation());
+            // plain.set_role(_resource.role());
+            plain.mutable_reservations()->CopyFrom(_resource.reservations());
             // Push to plainResources
             plainResources.push_back(plain);
             // Push to disk
@@ -722,8 +722,8 @@ protected:
         plain.set_name(_resource.name());
         plain.set_type(_resource.type());
         plain.mutable_scalar()->CopyFrom(_resource.scalar());
-        plain.set_role(_resource.role());
-        plain.mutable_reservation()->CopyFrom(_resource.reservation());
+        // plain.set_role(_resource.role());
+        plain.mutable_reservations()->CopyFrom(_resource.reservations());
         plainResources.push_back(plain);
         // Push to disk
         disk.push_back(_resource);
