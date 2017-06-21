@@ -221,9 +221,9 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservation)
   FrameworkInfo frameworkInfo = createFrameworkInfo();
 
   Resources unreserved = Resources::parse("disk:1024").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -254,8 +254,9 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservation)
   ASSERT_EQ(1u, offers->size());
   Offer offer = offers.get()[0];
 
-  EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+  EXPECT_TRUE(Resources(offer.resources())
+                .contains(allocatedResources(
+                    dynamicallyReserved, frameworkInfo.role())));
 
   Future<OfferID> rescindedOfferId;
 
@@ -340,9 +341,9 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservationRoleMismatch)
   FrameworkInfo frameworkInfo = createFrameworkInfo();
 
   Resources unreserved = Resources::parse("disk:1024").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -419,9 +420,9 @@ TEST_F(PersistentVolumeEndpointsTest, UnreserveVolumeResources)
   FrameworkInfo frameworkInfo = createFrameworkInfo();
 
   Resources unreserved = Resources::parse("disk:1024").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -478,11 +479,12 @@ TEST_F(PersistentVolumeEndpointsTest, InvalidVolume)
   AWAIT_READY(slaveRegisteredMessage);
   const SlaveID& slaveId = slaveRegisteredMessage->slave_id();
 
-  // This volume has role "*", which is not allowed.
-  Try<Resource> disk = Resources::parse("disk", "64", "*");
-  ASSERT_SOME(disk);
+  // This volume is reserved for role "*", which is not allowed.
+  Resource disk = Resources::parse("disk", "64", "*").get();
+  disk.add_reservations()->CopyFrom(createDynamicReservationInfo("*"));
+
   Resource volume = createPersistentVolume(
-      disk.get(),
+      disk,
       "id1",
       "path1",
       DEFAULT_CREDENTIAL.principal(),
@@ -504,8 +506,9 @@ TEST_F(PersistentVolumeEndpointsTest, InvalidVolume)
         body);
 
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
-    ASSERT_EQ(response->body,
-             "Invalid reservation: role \"*\" cannot be dynamically reserved");
+    ASSERT_EQ(
+        response->body,
+        "Invalid reservation: role \"*\" cannot be reserved");
   }
 
   {
@@ -516,8 +519,9 @@ TEST_F(PersistentVolumeEndpointsTest, InvalidVolume)
         body);
 
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
-    ASSERT_EQ(response->body,
-             "Invalid reservation: role \"*\" cannot be dynamically reserved");
+    ASSERT_EQ(
+        response->body,
+        "Invalid reservation: role \"*\" cannot be reserved");
   }
 }
 
@@ -1521,9 +1525,9 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
 
   // Make a dynamic reservation for 512MB of disk.
   Resources unreserved = Resources::parse("disk:512").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   EXPECT_CALL(sched, registered(_, _, _));
 
@@ -1672,9 +1676,9 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
 
   // Make a dynamic reservation for 512MB of disk.
   Resources unreserved = Resources::parse("disk:512").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -1743,8 +1747,11 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
   ASSERT_EQ(1u, offers->size());
   offer = offers.get()[0];
 
-  EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+  EXPECT_TRUE(Resources(offer.resources())
+                .contains(allocatedResources(
+                    dynamicallyReserved, frameworkInfo.role())))
+    << Resources(offer.resources()) << " vs "
+    << allocatedResources(dynamicallyReserved, frameworkInfo.role());
 
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers));
@@ -1803,9 +1810,9 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
 
   // Reserve all CPUs on `slave1` via HTTP endpoint.
   Resources slave1Unreserved = Resources::parse("cpus:4").get();
-  Resources slave1Reserved = slave1Unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources slave1Reserved =
+    slave1Unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -1840,9 +1847,9 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
 
   // Use the offers API to reserve all CPUs on `slave2`.
   Resources slave2Unreserved = Resources::parse("cpus:3").get();
-  Resources slave2Reserved = slave2Unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources slave2Reserved =
+    slave2Unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   for (size_t i = 0; i < offers->size(); i++) {
     const Offer& offer = offers.get()[i];
@@ -1908,9 +1915,9 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
   FrameworkInfo frameworkInfo = createFrameworkInfo();
 
   Resources unreserved = Resources::parse("cpus:1;mem:512;disk:1024").get();
-  Resources dynamicallyReserved = unreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -1961,9 +1968,9 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
       allocatedResources(volume, frameworkInfo.role())));
 
   Resources taskUnreserved = Resources::parse("cpus:1;mem:256").get();
-  Resources taskResources = taskUnreserved.flatten(
-      frameworkInfo.role(),
-      createReservationInfo(DEFAULT_CREDENTIAL.principal())).get();
+  Resources taskResources =
+    taskUnreserved.pushReservation(createDynamicReservationInfo(
+        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
 
   TaskInfo taskInfo = createTask(offer.slave_id(), taskResources, "sleep 1000");
 
@@ -2026,7 +2033,14 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1",
             "reservation": {
               "principal": "test-principal"
-            }
+            },
+            "reservations":[
+              {
+                "principal": "test-principal",
+                "role": "role1",
+                "type": "DYNAMIC"
+              }
+            ]
           },
           {
             "name": "mem",
@@ -2037,7 +2051,14 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1",
             "reservation": {
               "principal": "test-principal"
-            }
+            },
+            "reservations": [
+              {
+                "principal": "test-principal",
+                "role": "role1",
+                "type": "DYNAMIC"
+              }
+            ]
           },
           {
             "name": "disk",
@@ -2048,7 +2069,14 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1",
             "reservation": {
               "principal": "test-principal"
-            }
+            },
+            "reservations": [
+              {
+                "principal": "test-principal",
+                "role": "role1",
+                "type": "DYNAMIC"
+              }
+            ]
           },
           {
             "name": "disk",
@@ -2060,6 +2088,13 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "reservation": {
               "principal": "test-principal"
             },
+            "reservations": [
+              {
+                "principal": "test-principal",
+                "role": "role1",
+                "type": "DYNAMIC"
+              }
+            ],
             "disk": {
               "persistence": {
                 "id": "id1",
@@ -2105,6 +2140,7 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
         },
         {
           "name": "ports",
+          "role": "*",
           "ranges": {
             "range": [
               {
@@ -2113,7 +2149,6 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
               }
             ]
           },
-          "role": "*",
           "type": "RANGES"
         }
       ])~");
@@ -2128,10 +2163,17 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1"
           },
           "name": "cpus",
+          "role": "role1",
           "reservation": {
             "principal": "test-principal"
           },
-          "role": "role1",
+          "reservations": [
+            {
+              "principal": "test-principal",
+              "role": "role1",
+              "type": "DYNAMIC"
+            }
+          ],
           "scalar": {
             "value": 1.0
           },
@@ -2142,10 +2184,17 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1"
           },
           "name": "mem",
+          "role": "role1",
           "reservation": {
             "principal": "test-principal"
           },
-          "role": "role1",
+          "reservations": [
+            {
+              "principal": "test-principal",
+              "role": "role1",
+              "type": "DYNAMIC"
+            }
+          ],
           "scalar": {
             "value": 256.0
           },
@@ -2196,6 +2245,7 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1"
           },
           "name": "ports",
+          "role": "*",
           "ranges": {
             "range": [
               {
@@ -2204,7 +2254,6 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
               }
             ]
           },
-          "role": "*",
           "type": "RANGES"
         },
         {
@@ -2222,10 +2271,17 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             }
           },
           "name": "disk",
+          "role": "role1",
           "reservation": {
             "principal": "test-principal"
           },
-          "role": "role1",
+          "reservations": [
+            {
+              "principal": "test-principal",
+              "role": "role1",
+              "type": "DYNAMIC"
+            }
+          ],
           "scalar": {
             "value": 64.0
           },
@@ -2236,10 +2292,17 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1"
           },
           "name": "mem",
+          "role": "role1",
           "reservation": {
             "principal": "test-principal"
           },
-          "role": "role1",
+          "reservations": [
+            {
+              "principal": "test-principal",
+              "role": "role1",
+              "type": "DYNAMIC"
+            }
+          ],
           "scalar": {
             "value": 256.0
           },
@@ -2250,10 +2313,17 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
             "role": "role1"
           },
           "name": "disk",
+          "role": "role1",
           "reservation": {
             "principal": "test-principal"
           },
-          "role": "role1",
+          "reservations": [
+            {
+              "principal": "test-principal",
+              "role": "role1",
+              "type": "DYNAMIC"
+            }
+          ],
           "scalar": {
             "value": 960.0
           },

@@ -1540,10 +1540,10 @@ TEST_F(SlaveTest, StateEndpoint)
   EXPECT_FALSE(state.values["capabilities"].as<JSON::Array>().values.empty());
   JSON::Value slaveCapabilities = state.values.at("capabilities");
 
-  // Agents should always have MULTI_ROLE and HIERARCHICAL_ROLE capabilities
-  // in current implementation.
-  Try<JSON::Value> expectedCapabilities =
-    JSON::parse("[\"MULTI_ROLE\",\"HIERARCHICAL_ROLE\"]");
+  // Agents should always have MULTI_ROLE, HIERARCHICAL_ROLE, and
+  // RESERVATION_REFINEMENT capabilities in current implementation.
+  Try<JSON::Value> expectedCapabilities = JSON::parse(
+      "[\"MULTI_ROLE\",\"HIERARCHICAL_ROLE\",\"RESERVATION_REFINEMENT\"]");
 
   ASSERT_SOME(expectedCapabilities);
   EXPECT_TRUE(slaveCapabilities.contains(expectedCapabilities.get()));
@@ -4703,9 +4703,8 @@ TEST_F(SlaveTest, CheckpointedResourcesIncludedInUsage)
   // Wait for slave to be initialized.
   Clock::settle();
 
-  Resource dynamicReservation = Resources::parse("cpus", "1", "role1").get();
-  dynamicReservation.mutable_reservation()->CopyFrom(
-      createReservationInfo("principal"));
+  Resource dynamicReservation = createReservedResource(
+      "cpus", "1", createDynamicReservationInfo("role1", "principal"));
 
   Resource persistentVolume = createPersistentVolume(
       Megabytes(64),

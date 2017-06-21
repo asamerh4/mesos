@@ -246,7 +246,7 @@ protected:
         // No active executor running in the cluster.
         // Launch a new task with executor.
 
-        if (Resources(offer.resources()).flatten()
+        if (Resources(offer.resources()).toUnreserved()
             .contains(EXECUTOR_RESOURCES + taskResources)) {
           LOG(INFO)
             << "Starting executor and task " << tasksLaunched
@@ -262,7 +262,9 @@ protected:
         // Offer from the same agent that has an active executor.
         // Launch more tasks on that executor.
 
-        if (Resources(offer.resources()).flatten().contains(taskResources)) {
+        if (Resources(offer.resources())
+              .toUnreserved()
+              .contains(taskResources)) {
           LOG(INFO)
             << "Starting task " << tasksLaunched << " on " << offer.hostname();
 
@@ -575,6 +577,8 @@ int main(int argc, char** argv)
   framework.set_user(os::user().get());
   framework.set_name("Long Lived Framework (C++)");
   framework.set_checkpoint(flags.checkpoint);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   Option<Credential> credential = None();
 

@@ -95,7 +95,7 @@ public:
       // Launch tasks.
       vector<TaskInfo> tasks;
       while (tasksLaunched < totalTasks &&
-             remaining.flatten().contains(taskResources)) {
+             remaining.toUnreserved().contains(taskResources)) {
         int taskId = tasksLaunched++;
 
         cout << "Launching task " << taskId << " using offer "
@@ -107,9 +107,17 @@ public:
         task.mutable_slave_id()->MergeFrom(offer.slave_id());
         task.mutable_executor()->MergeFrom(executor);
 
-        Try<Resources> flattened = taskResources.flatten(role);
-        CHECK_SOME(flattened);
-        Option<Resources> resources = remaining.find(flattened.get());
+        Option<Resources> resources = [&]() {
+          if (role == "*") {
+            return remaining.find(taskResources);
+          }
+
+          Resource::ReservationInfo reservation;
+          reservation.set_type(Resource::ReservationInfo::STATIC);
+          reservation.set_role(role);
+
+          return remaining.find(taskResources.pushReservation(reservation));
+        }();
 
         CHECK_SOME(resources);
         task.mutable_resources()->MergeFrom(resources.get());
@@ -250,6 +258,8 @@ int main(int argc, char** argv)
   framework.set_user(""); // Have Mesos fill in the current user.
   framework.set_name("Test Framework (C++)");
   framework.set_role(flags.role);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   value = os::getenv("MESOS_CHECKPOINT");
   if (value.isSome()) {

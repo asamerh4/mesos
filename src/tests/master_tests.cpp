@@ -4052,6 +4052,11 @@ TEST_F(MasterTest, StateEndpointFrameworkInfo)
   AWAIT_READY(slaveRegisteredMessage);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+
+  // TODO(mpark): Remove this once `RESERVATION_REFINEMENT`
+  // is removed from `DEFAULT_FRAMEWORK_INFO`.
+  frameworkInfo.clear_capabilities();
+
   frameworkInfo.set_webui_url("http://localhost:8080/");
 
   vector<FrameworkInfo::Capability::Type> capabilities = {
@@ -4284,10 +4289,10 @@ TEST_F(MasterTest, StateEndpointAgentCapabilities)
   ASSERT_EQ(1u, slaveInfo.values.count("capabilities"));
   JSON::Value slaveCapabilities = slaveInfo.values.at("capabilities");
 
-  // Agents should always have MULTI_ROLE and HIERARCHICAL_ROLE capabilities
-  // in current implementation.
-  Try<JSON::Value> expectedCapabilities =
-    JSON::parse("[\"MULTI_ROLE\",\"HIERARCHICAL_ROLE\"]");
+  // Agents should always have MULTI_ROLE, HIERARCHICAL_ROLE, and
+  // RESERVATION_REFINEMENT capabilities in current implementation.
+  Try<JSON::Value> expectedCapabilities = JSON::parse(
+      "[\"MULTI_ROLE\",\"HIERARCHICAL_ROLE\",\"RESERVATION_REFINEMENT\"]");
 
   ASSERT_SOME(expectedCapabilities);
   EXPECT_TRUE(slaveCapabilities.contains(expectedCapabilities.get()));

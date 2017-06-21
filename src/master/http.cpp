@@ -69,6 +69,7 @@
 #include "common/build.hpp"
 #include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
+#include "common/resources_utils.hpp"
 
 #include "internal/devolve.hpp"
 
@@ -1095,6 +1096,8 @@ Future<Response> Master::Http::createVolumes(
       return BadRequest(error.get().message);
     }
 
+    convertResourceFormat(&volume.get(), POST_RESERVATION_REFINEMENT);
+
     volumes += volume.get();
   }
 
@@ -1269,6 +1272,8 @@ Future<Response> Master::Http::destroyVolumes(
     if (error.isSome()) {
       return BadRequest(error.get().message);
     }
+
+    convertResourceFormat(&volume.get(), POST_RESERVATION_REFINEMENT);
 
     volumes += volume.get();
   }
@@ -1500,11 +1505,15 @@ mesos::master::Response::GetFrameworks::Framework model(
     _framework.mutable_inverse_offers()->Add()->CopyFrom(*offer);
   }
 
-  foreach (const Resource& resource, framework.totalUsedResources) {
+  foreach (Resource resource, framework.totalUsedResources) {
+    convertResourceFormat(&resource, ENDPOINT);
+
     _framework.mutable_allocated_resources()->Add()->CopyFrom(resource);
   }
 
-  foreach (const Resource& resource, framework.totalOfferedResources) {
+  foreach (Resource resource, framework.totalOfferedResources) {
+    convertResourceFormat(&resource, ENDPOINT);
+
     _framework.mutable_offered_resources()->Add()->CopyFrom(resource);
   }
 
@@ -2234,6 +2243,8 @@ Future<Response> Master::Http::reserve(
       return BadRequest(error.get().message);
     }
 
+    convertResourceFormat(&resource.get(), POST_RESERVATION_REFINEMENT);
+
     resources += resource.get();
   }
 
@@ -2271,11 +2282,11 @@ Future<Response> Master::Http::_reserve(
         return Forbidden();
       }
 
-      // NOTE: `flatten()` is important. To make a dynamic reservation,
-      // we want to ensure that the required resources are available
-      // and unreserved; `flatten()` removes the role and
-      // ReservationInfo from the resources.
-      return _operation(slaveId, resources.flatten(), operation);
+      // We only allow "pushing" a single reservation at a time, so we require
+      // the resources with one reservation "popped" to be present on the agent.
+      Resources required = resources.popReservation();
+
+      return _operation(slaveId, required, operation);
     }));
 }
 
@@ -2347,27 +2358,22 @@ Future<Response> Master::Http::slaves(
                              const Resources& resources,
                              reserved) {
                   writer->field(role, [&resources](JSON::ArrayWriter* writer) {
-                    foreach (const Resource& resource, resources) {
-                      // TODO(mpark): Replace the `modelProtobufJSON` back to
-                      // `JSON::Protobuf` once MESOS-7674 is resolved and
-                      // `Resource.role` is deprecated.
-                      writer->element(modelProtobufJSON(resource));
+                    foreach (Resource resource, resources) {
+                      convertResourceFormat(&resource, ENDPOINT);
+                      writer->element(JSON::Protobuf(resource));
                     }
                   });
                 }
               });
-
 
           Resources unreservedResources = slave->totalResources.unreserved();
 
           writer->field(
               "unreserved_resources_full",
               [&unreservedResources](JSON::ArrayWriter* writer) {
-                foreach (const Resource& resource, unreservedResources) {
-                  // TODO(mpark): Replace the `modelProtobufJSON` back to
-                  // `JSON::Protobuf` once MESOS-7674 is resolved and
-                  // `Resource.role` is deprecated.
-                  writer->element(modelProtobufJSON(resource));
+                foreach (Resource resource, unreservedResources) {
+                  convertResourceFormat(&resource, ENDPOINT);
+                  writer->element(JSON::Protobuf(resource));
                 }
               });
 
@@ -2376,11 +2382,9 @@ Future<Response> Master::Http::slaves(
           writer->field(
               "used_resources_full",
               [&usedResources](JSON::ArrayWriter* writer) {
-                foreach (const Resource& resource, usedResources) {
-                  // TODO(mpark): Replace the `modelProtobufJSON` back to
-                  // `JSON::Protobuf` once MESOS-7674 is resolved and
-                  // `Resource.role` is deprecated.
-                  writer->element(modelProtobufJSON(resource));
+                foreach (Resource resource, usedResources) {
+                  convertResourceFormat(&resource, ENDPOINT);
+                  writer->element(JSON::Protobuf(resource));
                 }
               });
 
@@ -2389,11 +2393,9 @@ Future<Response> Master::Http::slaves(
           writer->field(
               "offered_resources_full",
               [&offeredResources](JSON::ArrayWriter* writer) {
-                foreach (const Resource& resource, offeredResources) {
-                  // TODO(mpark): Replace the `modelProtobufJSON` back to
-                  // `JSON::Protobuf` once MESOS-7674 is resolved and
-                  // `Resource.role` is deprecated.
-                  writer->element(modelProtobufJSON(resource));
+                foreach (Resource resource, offeredResources) {
+                  convertResourceFormat(&resource, ENDPOINT);
+                  writer->element(JSON::Protobuf(resource));
                 }
               });
         });
@@ -4989,6 +4991,8 @@ Future<Response> Master::Http::unreserve(
     if (error.isSome()) {
       return BadRequest(error.get().message);
     }
+
+    convertResourceFormat(&resource.get(), POST_RESERVATION_REFINEMENT);
 
     resources += resource.get();
   }

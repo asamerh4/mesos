@@ -52,9 +52,15 @@ Try<Resources> applyCheckpointedResources(
 
     Resource stripped = resource;
 
+    // Since only unreserved and statically reserved resources can be specified
+    // on the agent, we strip away all of the dynamic reservations here to
+    // deduce the agent resources on which to apply the checkpointed resources.
     if (Resources::isDynamicallyReserved(resource)) {
-      stripped.set_role("*");
-      stripped.clear_reservation();
+      Resource::ReservationInfo reservation = stripped.reservations(0);
+      stripped.clear_reservations();
+      if (reservation.type() == Resource::ReservationInfo::STATIC) {
+        stripped.add_reservations()->CopyFrom(reservation);
+      }
     }
 
     // Strip persistence and volume from the disk info so that we can
@@ -142,7 +148,8 @@ void convertResourceFormat(Resource* resource, ResourceFormat format)
       }
 
       // Unreserved resources.
-      if (resource->role() == "*" && !resource->has_reservation()) {
+      if (resource->role() == "*") {
+        CHECK(!resource->has_reservation());
         resource->clear_role();
         return;
       }

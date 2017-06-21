@@ -178,7 +178,8 @@ public:
       // If there is an active task, or if the offer is not
       // big enough, reject the offer.
       if (taskActive ||
-          !resources.flatten().contains(taskResources + executorResources)) {
+          !resources.toUnreserved().contains(
+              taskResources + executorResources)) {
         Filters filters;
         filters.set_refuse_seconds(600);
 
@@ -498,6 +499,8 @@ int main(int argc, char** argv)
   framework.set_name("Balloon Framework (C++)");
   framework.set_checkpoint(flags.checkpoint);
   framework.set_role("*");
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   BalloonScheduler scheduler(framework, executor, flags);
 

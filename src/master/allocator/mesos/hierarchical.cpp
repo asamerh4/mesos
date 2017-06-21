@@ -900,14 +900,14 @@ void HierarchicalAllocatorProcess::updateAllocation(
   frameworkSorter->remove(slaveId, offeredResources);
   frameworkSorter->add(slaveId, updatedOfferedResources);
 
-  // Check that the `flattened` quantities for framework allocations
+  // Check that the unreserved quantities for framework allocations
   // have not changed by the above operations.
   const Resources updatedFrameworkAllocation =
     frameworkSorter->allocation(frameworkId.value(), slaveId);
 
   CHECK_EQ(
-      frameworkAllocation.flatten().createStrippedScalarQuantity(),
-      updatedFrameworkAllocation.flatten().createStrippedScalarQuantity());
+      frameworkAllocation.toUnreserved().createStrippedScalarQuantity(),
+      updatedFrameworkAllocation.toUnreserved().createStrippedScalarQuantity());
 
   LOG(INFO) << "Updated allocation of framework " << frameworkId
             << " on agent " << slaveId
@@ -1545,8 +1545,8 @@ void HierarchicalAllocatorProcess::__allocate()
 
     // NOTE: `allocationScalarQuantities` omits dynamic reservation,
     // persistent volume info, and allocation info. We additionally
-    // strip the `Resource.role` here via `flatten()`.
-    return quotaRoleSorter->allocationScalarQuantities(role).flatten();
+    // remove the resource's `role` here via `toUnreserved()`.
+    return quotaRoleSorter->allocationScalarQuantities(role).toUnreserved();
   };
 
   // Due to the two stages in the allocation algorithm and the nature of
@@ -1672,6 +1672,21 @@ void HierarchicalAllocatorProcess::__allocate()
         // stage.
         if (!allocatable(resources)) {
           break;
+        }
+
+        // When reservation refinements are present, old frameworks without the
+        // RESERVATION_REFINEMENT capability won't be able to understand the
+        // new format. While it's possible to translate the refined reservations
+        // into the old format by "hiding" the intermediate reservations in the
+        // "stack", this leads to ambiguity when processing RESERVE / UNRESERVE
+        // operations. This is due to the loss of information when we drop the
+        // intermediatereservations. Therefore, for now we simply filter out
+        // resources with refined reservations if the framework does not have
+        // the capability.
+        if (!framework.capabilities.reservationRefinement) {
+          resources = resources.filter([](const Resource& resource) {
+            return !Resources::hasRefinedReservations(resource);
+          });
         }
 
         // If the framework filters these resources, ignore. The unallocated
@@ -1846,6 +1861,21 @@ void HierarchicalAllocatorProcess::__allocate()
         // Remove revocable resources if the framework has not opted for them.
         if (!framework.capabilities.revocableResources) {
           resources = resources.nonRevocable();
+        }
+
+        // When reservation refinements are present, old frameworks without the
+        // RESERVATION_REFINEMENT capability won't be able to understand the
+        // new format. While it's possible to translate the refined reservations
+        // into the old format by "hiding" the intermediate reservations in the
+        // "stack", this leads to ambiguity when processing RESERVE / UNRESERVE
+        // operations. This is due to the loss of information when we drop the
+        // intermediatereservations. Therefore, for now we simply filter out
+        // resources with refined reservations if the framework does not have
+        // the capability.
+        if (!framework.capabilities.reservationRefinement) {
+          resources = resources.filter([](const Resource& resource) {
+            return !Resources::hasRefinedReservations(resource);
+          });
         }
 
         // If the resources are not allocatable, ignore. We cannot break

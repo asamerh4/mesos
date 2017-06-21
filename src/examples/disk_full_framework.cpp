@@ -153,7 +153,7 @@ public:
 
       // If we've already launched the task, or if the offer is not
       // big enough, reject the offer.
-      if (taskActive || !resources.flatten().contains(taskResources)) {
+      if (taskActive || !resources.toUnreserved().contains(taskResources)) {
         Filters filters;
         filters.set_refuse_seconds(600);
 
@@ -436,6 +436,8 @@ int main(int argc, char** argv)
   framework.set_user(""); // Have Mesos fill the current user.
   framework.set_name("Disk Full Framework (C++)");
   framework.set_checkpoint(true);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   DiskFullScheduler scheduler(flags, framework);
 
