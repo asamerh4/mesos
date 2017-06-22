@@ -193,6 +193,9 @@ TEST(AmbientCapabilities, ROOT_SetAmbient)
   wanted.set(capabilities::AMBIENT, {capabilities::CHOWN});
   EXPECT_ERROR(manager->set(wanted));
 
+  // Clear the ambient set so we don't use stale values in later checks.
+  wanted.set(capabilities::AMBIENT, {});
+
   // Keep the full bounding and permitted capabilities because we want
   // to be able to recover privilege later.
   wanted.set(capabilities::BOUNDING, initial->get(capabilities::BOUNDING));
@@ -218,17 +221,13 @@ TEST(AmbientCapabilities, ROOT_SetAmbient)
 
   // We should now have the capabilities that we set.
   Try<ProcessCapabilities> actual = manager->get();
-  EXPECT_SOME_EQ(wanted, actual)
-    << "wanted capabilities: " << wanted << "\n"
-    << "actual capabilities: " << actual.get();
+  EXPECT_SOME_EQ(wanted, actual);
 
   ASSERT_SOME(manager->set(initial.get())) << initial.get();
 
   // And check that we did it right.
   actual = manager->get();
-  ASSERT_SOME_EQ(initial.get(), actual)
-    << "wanted capabilities: " << initial.get() << "\n"
-    << "actual capabilities: " << actual.get();
+  ASSERT_SOME_EQ(initial.get(), actual);
 }
 
 } // namespace tests {

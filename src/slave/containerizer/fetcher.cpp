@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "slave/containerizer/fetcher.hpp"
+
 #include <unordered_map>
 
 #include <process/async.hpp>
@@ -21,6 +23,8 @@
 #include <process/collect.hpp>
 #include <process/dispatch.hpp>
 #include <process/owned.hpp>
+
+#include <process/metrics/metrics.hpp>
 
 #include <stout/hashset.hpp>
 #include <stout/net.hpp>
@@ -35,8 +39,6 @@
 #include <stout/os/read.hpp>
 
 #include "hdfs/hdfs.hpp"
-
-#include "slave/containerizer/fetcher.hpp"
 
 using std::list;
 using std::map;
@@ -252,11 +254,26 @@ void Fetcher::kill(const ContainerID& containerId)
 }
 
 
+FetcherProcess::FetcherProcess(const Flags& _flags)
+    : ProcessBase(process::ID::generate("fetcher")),
+      flags(_flags),
+      cache(_flags.fetcher_cache_size),
+      fetchesTotal("containerizer/fetcher/task_fetches_total"),
+      fetchesFailed("containerizer/fetcher/task_fetches_failed")
+{
+  process::metrics::add(fetchesTotal);
+  process::metrics::add(fetchesFailed);
+}
+
+
 FetcherProcess::~FetcherProcess()
 {
   foreachkey (const ContainerID& containerId, subprocessPids) {
     kill(containerId);
   }
+
+  process::metrics::remove(fetchesTotal);
+  process::metrics::remove(fetchesFailed);
 }
 
 
@@ -321,16 +338,14 @@ Future<Nothing> FetcherProcess::fetch(
     const string& sandboxDirectory,
     const Option<string>& user)
 {
+  ++fetchesTotal;
+
   VLOG(1) << "Starting to fetch URIs for container: " << containerId
           << ", directory: " << sandboxDirectory;
 
-  // TODO(bernd-mesos): This will disappear once we inject flags at
-  // Fetcher/FetcherProcess creation time. For now we trust this is
-  // always the exact same value.
-  cache.setSpace(flags.fetcher_cache_size);
-
   Try<Nothing> validated = validateUris(commandInfo);
   if (validated.isError()) {
+    ++fetchesFailed;
     return Failure("Could not fetch: " + validated.error());
   }
 
@@ -536,6 +551,7 @@ Future<Nothing> FetcherProcess::__fetch(
         }
       }
 
+      ++fetchesFailed;
       return future; // Always propagate the failure!
     })
     // Call to `operator` here forces the conversion on MSVC. This is implicit
@@ -597,7 +613,7 @@ static off_t delta(
 
 
 // For testing only.
-Try<list<Path>> FetcherProcess::cacheFiles()
+Try<list<Path>> FetcherProcess::cacheFiles() const
 {
   list<Path> result;
 
@@ -623,13 +639,13 @@ Try<list<Path>> FetcherProcess::cacheFiles()
 
 
 // For testing only.
-size_t FetcherProcess::cacheSize()
+size_t FetcherProcess::cacheSize() const
 {
   return cache.size();
 }
 
 
-Bytes FetcherProcess::availableCacheSpace()
+Bytes FetcherProcess::availableCacheSpace() const
 {
   return cache.availableSpace();
 }
@@ -964,14 +980,15 @@ FetcherProcess::Cache::get(
 
 bool FetcherProcess::Cache::contains(
     const Option<string>& user,
-    const string& uri)
+    const string& uri) const
 {
   const string key = cacheKey(user, uri);
   return table.get(key).isSome();
 }
 
 
-bool FetcherProcess::Cache::contains(const shared_ptr<Cache::Entry>& entry)
+bool FetcherProcess::Cache::contains(
+    const shared_ptr<Cache::Entry>& entry) const
 {
   Option<shared_ptr<Cache::Entry>> found = table.get(entry->key);
   if (found.isNone()) {
@@ -1129,20 +1146,9 @@ Try<Nothing> FetcherProcess::Cache::adjust(
 }
 
 
-size_t FetcherProcess::Cache::size()
+size_t FetcherProcess::Cache::size() const
 {
   return table.size();
-}
-
-
-void FetcherProcess::Cache::setSpace(const Bytes& bytes)
-{
-  if (space > 0) {
-    // Dynamic cache size changes not supported.
-    CHECK_EQ(space, bytes);
-  } else {
-    space = bytes;
-  }
 }
 
 
@@ -1175,7 +1181,7 @@ void FetcherProcess::Cache::releaseSpace(const Bytes& bytes)
 }
 
 
-Bytes FetcherProcess::Cache::availableSpace()
+Bytes FetcherProcess::Cache::availableSpace() const
 {
   if (tally > space) {
     LOG(WARNING) << "Fetcher cache space overflow - space used: " << tally
@@ -1223,7 +1229,7 @@ void FetcherProcess::Cache::Entry::unreference()
 }
 
 
-bool FetcherProcess::Cache::Entry::isReferenced()
+bool FetcherProcess::Cache::Entry::isReferenced() const
 {
   return referenceCount > 0;
 }
