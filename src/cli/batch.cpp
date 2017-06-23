@@ -963,7 +963,7 @@ cout << R"( ___  ___  ___
   // Always enable the TASK_KILLING_STATE capability.
   vector<FrameworkInfo::Capability::Type> frameworkCapabilities = {
     FrameworkInfo::Capability::RESERVATION_REFINEMENT,
-    FrameworkInfo::Capability::TASK_KILLING_STATE,
+    FrameworkInfo::Capability::TASK_KILLING_STATE
   };
 
   // Enable PARTITION_AWARE unless disabled by the user.
