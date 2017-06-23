@@ -4202,8 +4202,8 @@ void Master::_accept(
   CHECK_READY(_authorizations);
   list<Future<bool>> authorizations = _authorizations.get();
 
-  // We iterate by copy here since we call `convertResourceFormat` on it
-  // after validation which modifies the `Operation`.
+  // We iterate by copy here since we call `validateAndUpgradeResources`
+  // on it which modifies the `Operation`.
   foreach (Offer::Operation operation, accept.operations()) {
     switch (operation.type()) {
       // The RESERVE operation allows a principal to reserve resources.
@@ -4231,16 +4231,21 @@ void Master::_accept(
           continue;
         }
 
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
+        Option<Error> error = validateAndUpgradeResources(
+            operation.mutable_reserve()->mutable_resources());
 
-        // Make sure this reserve operation is valid.
-        Option<Error> error = validation::operation::validate(
-            operation.reserve(),
-            principal,
-            slave->capabilities,
-            framework->info);
+        if (error.isNone()) {
+          Option<Principal> principal = framework->info.has_principal()
+            ? Principal(framework->info.principal())
+            : Option<Principal>::none();
+
+          // Make sure this reserve operation is valid.
+          error = validation::operation::validate(
+              operation.reserve(),
+              principal,
+              slave->capabilities,
+              framework->info);
+        }
 
         if (error.isSome()) {
           drop(
@@ -4249,8 +4254,6 @@ void Master::_accept(
               error->message + "; on agent " + stringify(*slave));
           continue;
         }
-
-        convertResourceFormat(&operation, POST_RESERVATION_REFINEMENT);
 
         // Test the given operation on the included resources.
         Try<Resources> resources = _offeredResources.apply(operation);
@@ -4298,16 +4301,18 @@ void Master::_accept(
           continue;
         }
 
-        // Make sure this unreserve operation is valid.
-        Option<Error> error = validation::operation::validate(
-            operation.unreserve());
+        Option<Error> error = validateAndUpgradeResources(
+            operation.mutable_unreserve()->mutable_resources());
+
+        if (error.isNone()) {
+          // Make sure this unreserve operation is valid.
+          error = validation::operation::validate(operation.unreserve());
+        }
 
         if (error.isSome()) {
           drop(framework, operation, error->message);
           continue;
         }
-
-        convertResourceFormat(&operation, POST_RESERVATION_REFINEMENT);
 
         // Test the given operation on the included resources.
         Try<Resources> resources = _offeredResources.apply(operation);
@@ -4354,17 +4359,22 @@ void Master::_accept(
           continue;
         }
 
-        Option<Principal> principal = framework->info.has_principal()
-          ? Principal(framework->info.principal())
-          : Option<Principal>::none();
+        Option<Error> error = validateAndUpgradeResources(
+            operation.mutable_create()->mutable_volumes());
 
-        // Make sure this create operation is valid.
-        Option<Error> error = validation::operation::validate(
-            operation.create(),
-            slave->checkpointedResources,
-            principal,
-            slave->capabilities,
-            framework->info);
+        if (error.isNone()) {
+          Option<Principal> principal = framework->info.has_principal()
+            ? Principal(framework->info.principal())
+            : Option<Principal>::none();
+
+          // Make sure this create operation is valid.
+          error = validation::operation::validate(
+              operation.create(),
+              slave->checkpointedResources,
+              principal,
+              slave->capabilities,
+              framework->info);
+        }
 
         if (error.isSome()) {
           drop(
@@ -4373,8 +4383,6 @@ void Master::_accept(
               error->message + "; on agent " + stringify(*slave));
           continue;
         }
-
-        convertResourceFormat(&operation, POST_RESERVATION_REFINEMENT);
 
         Try<Resources> resources = _offeredResources.apply(operation);
         if (resources.isError()) {
@@ -4421,19 +4429,22 @@ void Master::_accept(
           continue;
         }
 
-        // Make sure this destroy operation is valid.
-        Option<Error> error = validation::operation::validate(
-            operation.destroy(),
-            slave->checkpointedResources,
-            slave->usedResources,
-            slave->pendingTasks);
+        Option<Error> error = validateAndUpgradeResources(
+            operation.mutable_destroy()->mutable_volumes());
+
+        if (error.isNone()) {
+          // Make sure this destroy operation is valid.
+          error = validation::operation::validate(
+              operation.destroy(),
+              slave->checkpointedResources,
+              slave->usedResources,
+              slave->pendingTasks);
+        }
 
         if (error.isSome()) {
           drop(framework, operation, error->message);
           continue;
         }
-
-        convertResourceFormat(&operation, POST_RESERVATION_REFINEMENT);
 
         // If any offer from this slave contains a volume that needs
         // to be destroyed, we should process it, but we should also
@@ -4486,7 +4497,8 @@ void Master::_accept(
         Offer::Operation _operation;
         _operation.set_type(Offer::Operation::LAUNCH);
 
-        foreach (const TaskInfo& task, operation.launch().task_infos()) {
+        foreach (
+            TaskInfo& task, *operation.mutable_launch()->mutable_task_infos()) {
           Future<bool> authorization = authorizations.front();
           authorizations.pop_front();
 
@@ -4555,10 +4567,9 @@ void Master::_accept(
           // Make a copy of the original task so that we can fill the missing
           // `framework_id` in `ExecutorInfo` if needed. This field was added
           // to the API later and thus was made optional.
-          TaskInfo task_(task);
           if (task.has_executor() && !task.executor().has_framework_id()) {
-            task_.mutable_executor()
-                ->mutable_framework_id()->CopyFrom(framework->id());
+            task.mutable_executor()->mutable_framework_id()->CopyFrom(
+                framework->id());
           }
 
           // For backwards compatibility with the v0 and v1 API, when
@@ -4574,9 +4585,9 @@ void Master::_accept(
 
             const HealthCheck& healthCheck = task.health_check();
             if (healthCheck.has_command() && !healthCheck.has_http()) {
-              task_.mutable_health_check()->set_type(HealthCheck::COMMAND);
+              task.mutable_health_check()->set_type(HealthCheck::COMMAND);
             } else if (healthCheck.has_http() && !healthCheck.has_command()) {
-              task_.mutable_health_check()->set_type(HealthCheck::HTTP);
+              task.mutable_health_check()->set_type(HealthCheck::HTTP);
             }
           }
 
@@ -4589,21 +4600,28 @@ void Master::_accept(
           Resources available =
             _offeredResources.nonShared() + offeredSharedResources;
 
-          const Option<Error>& validationError = validation::task::validate(
-              task_,
-              framework,
-              slave,
-              available);
+          Option<Error> error =
+            validateAndUpgradeResources(task.mutable_resources());
 
-          if (validationError.isSome()) {
+          if (error.isNone() && task.has_executor()) {
+            error = validateAndUpgradeResources(
+                task.mutable_executor()->mutable_resources());
+          }
+
+          if (error.isNone()) {
+            error =
+              validation::task::validate(task, framework, slave, available);
+          }
+
+          if (error.isSome()) {
             const StatusUpdate& update = protobuf::createStatusUpdate(
                 framework->id(),
-                task_.slave_id(),
-                task_.task_id(),
+                task.slave_id(),
+                task.task_id(),
                 TASK_ERROR,
                 TaskStatus::SOURCE_MASTER,
                 None(),
-                validationError.get().message,
+                error->message,
                 TaskStatus::REASON_TASK_INVALID);
 
             metrics->tasks_error++;
@@ -4620,7 +4638,7 @@ void Master::_accept(
 
           // Add task.
           if (pending) {
-            const Resources consumed = addTask(task_, framework, slave);
+            const Resources consumed = addTask(task, framework, slave);
 
             CHECK(available.contains(consumed))
               << available << " does not contain " << consumed;
@@ -4634,45 +4652,40 @@ void Master::_accept(
             // as 'pid' was made optional in 0.24.0. In 0.25.0, we
             // no longer have to set pid here for http frameworks.
             message.set_pid(framework->pid.getOrElse(UPID()));
-            message.mutable_task()->MergeFrom(task_);
+            message.mutable_task()->MergeFrom(task);
 
             if (HookManager::hooksAvailable()) {
               // Set labels retrieved from label-decorator hooks.
               message.mutable_task()->mutable_labels()->CopyFrom(
                   HookManager::masterLaunchTaskLabelDecorator(
-                      task_,
+                      task,
                       framework->info,
                       slave->info));
             }
 
-            Try<Nothing> sendRunTaskMessage = Nothing();
-
+            // If the agent does not support reservation refinement,
+            // downgrade the task and executor resources to the
+            // "pre-reservation-refinement" format. This cannot fail
+            // since the master rejects attempts to create refined
+            // reservations on non-capable agents.
             if (!slave->capabilities.reservationRefinement) {
-              sendRunTaskMessage =
-                downgradeResources(message.mutable_task()->mutable_resources());
+              CHECK_SOME(downgradeResources(
+                  message.mutable_task()->mutable_resources()));
 
-              if (!sendRunTaskMessage.isError() &&
-                  message.mutable_task()->has_executor()) {
-                sendRunTaskMessage =
-                  downgradeResources(message.mutable_task()
-                                       ->mutable_executor()
-                                       ->mutable_resources());
+              if (message.mutable_task()->has_executor()) {
+                CHECK_SOME(downgradeResources(message.mutable_task()
+                                                ->mutable_executor()
+                                                ->mutable_resources()));
               }
             }
 
-            if (sendRunTaskMessage.isError()) {
-              LOG(WARNING) << "Not launching task containing resources with"
-                           << " refined reservations, since agent " << *slave
-                           << " is not RESERVATION_REFINEMENT-capable";
-            } else {
-              // TODO(bmahler): Consider updating this log message to
-              // indicate when the executor is also being launched.
-              LOG(INFO) << "Launching task " << task_.task_id()
-                        << " of framework " << *framework << " with resources "
-                        << task_.resources() << " on agent " << *slave;
+            // TODO(bmahler): Consider updating this log message to
+            // indicate when the executor is also being launched.
+            LOG(INFO) << "Launching task " << task.task_id() << " of framework "
+                      << *framework << " with resources " << task.resources()
+                      << " on agent " << *slave;
 
-              send(slave->pid, message);
-            }
+            send(slave->pid, message);
           }
 
           _operation.mutable_launch()->add_task_infos()->CopyFrom(task);
@@ -4706,6 +4719,30 @@ void Master::_accept(
           }
         }
 
+        Offer::Operation::LaunchGroup* launchGroup =
+          operation.mutable_launch_group();
+
+        Option<Error> error;
+
+        if (launchGroup->has_executor()) {
+          error = validateAndUpgradeResources(
+              launchGroup->mutable_executor()->mutable_resources());
+        }
+
+        foreach (
+            TaskInfo& task,
+            *launchGroup->mutable_task_group()->mutable_tasks()) {
+          if (error.isSome()) {
+            break;
+          }
+
+          error = validateAndUpgradeResources(task.mutable_resources());
+          if (error.isNone() && task.has_executor()) {
+            error = validateAndUpgradeResources(
+                task.mutable_executor()->mutable_resources());
+          }
+        }
+
         // Note that we do not fill in the `ExecutorInfo.framework_id`
         // since we do not have to support backwards compatibility like
         // in the `Launch` operation case.
@@ -4720,9 +4757,10 @@ void Master::_accept(
         // TODO(anindya_sinha): If task group uses shared resources, this
         // validation needs to be enhanced to accommodate multiple copies
         // of shared resources across tasks within the task group.
-        Option<Error> error =
-          validation::task::group::validate(
+        if (error.isNone()) {
+          error = validation::task::group::validate(
               taskGroup, executor, framework, slave, _offeredResources);
+        }
 
         Option<TaskStatus::Reason> reason = None();
 
@@ -4854,35 +4892,25 @@ void Master::_accept(
           }
         }
 
-        Try<Nothing> sendRunTaskGroupMessage = Nothing();
-
+        // If the agent does not support reservation refinement, downgrade
+        // the task and executor resources to the "pre-reservation-refinement"
+        // format. This cannot fail since the master rejects attempts to
+        // create refined reservations on non-capable agents.
         if (!slave->capabilities.reservationRefinement) {
-          sendRunTaskGroupMessage =
-            downgradeResources(message.mutable_executor()->mutable_resources());
+          CHECK_SOME(downgradeResources(
+              message.mutable_executor()->mutable_resources()));
 
           foreach (
               TaskInfo& task, *message.mutable_task_group()->mutable_tasks()) {
-            if (sendRunTaskGroupMessage.isError()) {
-              break;
-            }
-
-            sendRunTaskGroupMessage =
-              downgradeResources(task.mutable_resources());
+            CHECK_SOME(downgradeResources(task.mutable_resources()));
           }
         }
 
-        if (sendRunTaskGroupMessage.isError()) {
-          LOG(WARNING) << "Not launching task group containing resources with"
-                       << " refined reservations, since agent " << *slave
-                       << " is not RESERVATION_REFINEMENT-capable: "
-                       << sendRunTaskGroupMessage.error();
-        } else {
-          LOG(INFO) << "Launching task group " << stringify(taskIds)
-                    << " of framework " << *framework << " with resources "
-                    << totalResources << " on agent " << *slave;
+        LOG(INFO) << "Launching task group " << stringify(taskIds)
+                  << " of framework " << *framework << " with resources "
+                  << totalResources << " on agent " << *slave;
 
-          send(slave->pid, message);
-        }
+        send(slave->pid, message);
 
         break;
       }

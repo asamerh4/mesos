@@ -130,9 +130,12 @@ void convertResourceFormat(
     ResourceFormat format);
 
 
-// Converts all the `Resource` objects in the given `Operation`
-// to the specified `ResourceFormat`.
-void convertResourceFormat(Offer::Operation* operation, ResourceFormat format);
+// Convert the given resources to the "post-reservation-refinement" format
+// from any format ("pre-", "post-" or "endpoint") if all of the resources
+// are valid. Returns an `Error` if there are any invalid resources present;
+// in this case, the resources are left unchanged.
+Option<Error> validateAndUpgradeResources(
+    google::protobuf::RepeatedPtrField<Resource>* resources);
 
 
 // Convert the given resources to the "pre-reservation-refinement" format
