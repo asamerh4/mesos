@@ -6154,47 +6154,55 @@ void Master::__reregisterSlave(
     }
   };
 
+  // Adjust the agent's task and executor infos to ensure
+  // compatibility with old agents without certain capabilities.
   protobuf::slave::Capabilities slaveCapabilities(agentCapabilities);
-  vector<Task> adjustedTasks;
-  vector<ExecutorInfo> adjustedExecutorInfos;
+  vector<Task> tasks = tasks_;
+  vector<ExecutorInfo> executorInfos = executorInfos_;
 
+  // If the agent is not multi-role capable, inject allocation info.
   if (!slaveCapabilities.multiRole) {
     hashmap<FrameworkID, FrameworkInfo> frameworks_;
     foreach (const FrameworkInfo& framework, frameworks) {
       frameworks_[framework.id()] = framework;
     }
 
-    adjustedTasks = tasks_;
-    adjustedExecutorInfos = executorInfos_;
-
-    foreach (Task& task, adjustedTasks) {
+    foreach (Task& task, tasks) {
       CHECK(frameworks_.contains(task.framework_id()));
 
       injectAllocationInfo(
           task.mutable_resources(),
           frameworks_.at(task.framework_id()));
-
-      convertResourceFormat(
-          task.mutable_resources(), POST_RESERVATION_REFINEMENT);
     }
 
-    foreach (ExecutorInfo& executor, adjustedExecutorInfos) {
+    foreach (ExecutorInfo& executor, executorInfos) {
       CHECK(frameworks_.contains(executor.framework_id()));
 
       injectAllocationInfo(
           executor.mutable_resources(),
           frameworks_.at(executor.framework_id()));
+    }
+  }
 
+  // If the agent is not refinement-capable, convert its resources
+  // from the "pre-refinement" format to the "post-refinement" format.
+  //
+  // TODO(neilc): The agent should be changed to send resources in
+  // pre-refinement format if possible, for compatibility with old
+  // masters. After that change is made, we should change this logic
+  // to convert the agent resources to post-refinement format
+  // unconditionally.
+  if (!slaveCapabilities.reservationRefinement) {
+    foreach (Task& task, tasks) {
+      convertResourceFormat(
+          task.mutable_resources(), POST_RESERVATION_REFINEMENT);
+    }
+
+    foreach (ExecutorInfo& executor, executorInfos) {
       convertResourceFormat(
           executor.mutable_resources(), POST_RESERVATION_REFINEMENT);
     }
   }
-
-  const vector<Task>& tasks =
-    slaveCapabilities.multiRole ? tasks_ : adjustedTasks;
-
-  const vector<ExecutorInfo>& executorInfos =
-    slaveCapabilities.multiRole ? executorInfos_ : adjustedExecutorInfos;
 
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
@@ -6389,6 +6397,14 @@ void Master::___reregisterSlave(
   message.mutable_resources()->CopyFrom(slave->checkpointedResources);
 
   if (!slave->capabilities.reservationRefinement) {
+    // If the agent is not refinement-capable, don't send it
+    // checkpointed resources that contain refined reservations. This
+    // might occur if a reservation refinement is created but never
+    // reaches the agent (e.g., due to network partition), and then
+    // the agent is downgraded before the partition heals.
+    //
+    // TODO(neilc): It would probably be better to prevent the agent
+    // from re-registering in this scenario.
     Try<Nothing> result = downgradeResources(message.mutable_resources());
     if (result.isError()) {
       LOG(WARNING) << "Not sending updated checkpointed resouces "
@@ -8870,6 +8886,14 @@ void Master::_apply(Slave* slave, const Offer::Operation& operation) {
   message.mutable_resources()->CopyFrom(slave->checkpointedResources);
 
   if (!slave->capabilities.reservationRefinement) {
+    // If the agent is not refinement-capable, don't send it
+    // checkpointed resources that contain refined reservations. This
+    // might occur if a reservation refinement is created but never
+    // reaches the agent (e.g., due to network partition), and then
+    // the agent is downgraded before the partition heals.
+    //
+    // TODO(neilc): It would probably be better to prevent the agent
+    // from re-registering in this scenario.
     Try<Nothing> result = downgradeResources(message.mutable_resources());
     if (result.isError()) {
       LOG(WARNING) << "Not sending updated checkpointed resouces "
