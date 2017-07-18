@@ -21,7 +21,6 @@
 
 #include <sys/utime.h>
 
-#include <codecvt>
 #include <list>
 #include <map>
 #include <memory>
@@ -33,6 +32,7 @@
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/path.hpp>
+#include <stout/stringify.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 #include <stout/version.hpp>
@@ -49,20 +49,14 @@
 namespace os {
 namespace internal {
 
-inline Try<OSVERSIONINFOEX> os_version()
+inline Try<OSVERSIONINFOEXW> os_version()
 {
-  OSVERSIONINFOEX os_version;
-  os_version.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-  // Disable compiler warning asking us to use the Unicode version of
-  // `GetVersionEx`, because Mesos currently does not support Unicode. See
-  // MESOS-6817.
-  if (!::GetVersionEx(reinterpret_cast<LPOSVERSIONINFO>(&os_version))) {
+  OSVERSIONINFOEXW os_version;
+  os_version.dwOSVersionInfoSize = sizeof(os_version);
+  if (!::GetVersionExW(reinterpret_cast<LPOSVERSIONINFO>(&os_version))) {
     return WindowsError(
         "os::internal::os_version: Call to `GetVersionEx` failed");
   }
-#pragma warning(pop)
 
   return os_version;
 }
@@ -70,23 +64,29 @@ inline Try<OSVERSIONINFOEX> os_version()
 
 inline Try<std::string> nodename()
 {
-  // Get DNS name of the local computer. First, find the size of the output
-  // buffer.
+  // MSDN documentation states "The names are established at system startup,
+  // when the system reads them from the registry." This is akin to the
+  // Linux `gethostname` which calls `uname`, thus avoiding a DNS lookup.
+  // The `net::getHostname` function can be used for an explicit DNS lookup.
+  //
+  // NOTE: This returns the hostname of the local computer, or the local
+  // node if this computer is part of a cluster.
+  COMPUTER_NAME_FORMAT format = ComputerNamePhysicalDnsHostname;
   DWORD size = 0;
-  if (!::GetComputerNameEx(ComputerNameDnsHostname, nullptr, &size) &&
-      ::GetLastError() != ERROR_MORE_DATA) {
-    return WindowsError(
-        "os::internal::nodename: Call to `GetComputerNameEx` failed");
+  if (::GetComputerNameExW(format, nullptr, &size) == 0) {
+    if (GetLastError() != ERROR_MORE_DATA) {
+      return WindowsError();
+    }
   }
 
-  std::unique_ptr<char[]> name(new char[size + 1]);
+  std::vector<wchar_t> buffer;
+  buffer.reserve(size);
 
-  if (!::GetComputerNameEx(ComputerNameDnsHostname, name.get(), &size)) {
-    return WindowsError(
-        "os::internal::nodename: Call to `GetComputerNameEx` failed");
+  if (::GetComputerNameExW(format, buffer.data(), &size) == 0) {
+    return WindowsError();
   }
 
-  return std::string(name.get());
+  return stringify(std::wstring(buffer.data()));
 }
 
 
@@ -110,7 +110,7 @@ inline std::string machine()
 }
 
 
-inline std::string sysname(OSVERSIONINFOEX os_version)
+inline std::string sysname(OSVERSIONINFOEXW os_version)
 {
   switch (os_version.wProductType) {
     case VER_NT_DOMAIN_CONTROLLER:
@@ -122,20 +122,20 @@ inline std::string sysname(OSVERSIONINFOEX os_version)
 }
 
 
-inline std::string release(OSVERSIONINFOEX os_version)
+inline std::string release(OSVERSIONINFOEXW os_version)
 {
   return stringify(
       Version(os_version.dwMajorVersion, os_version.dwMinorVersion, 0));
 }
 
 
-inline std::string version(OSVERSIONINFOEX os_version)
+inline std::string version(OSVERSIONINFOEXW os_version)
 {
   std::string version = std::to_string(os_version.dwBuildNumber);
 
-  if (os_version.szCSDVersion[0] != '\0') {
+  if (os_version.szCSDVersion[0] != L'\0') {
     version.append(" ");
-    version.append(os_version.szCSDVersion);
+    version.append(stringify(os_version.szCSDVersion));
   }
 
   return version;
@@ -203,13 +203,14 @@ inline void setenv(
   //
   // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/ms683188(v=vs.85).aspx
   if (!overwrite &&
-      ::GetEnvironmentVariable(key.c_str(), nullptr, 0) != 0 &&
+      ::GetEnvironmentVariableW(wide_stringify(key).data(), nullptr, 0) != 0 &&
       ::GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
     return;
   }
 
   // `SetEnvironmentVariable` returns an error code, but we can't act on it.
-  ::SetEnvironmentVariable(key.c_str(), value.c_str());
+  ::SetEnvironmentVariableW(
+      wide_stringify(key).data(), wide_stringify(value).data());
 }
 
 
@@ -219,7 +220,7 @@ inline void unsetenv(const std::string& key)
 {
   // Per MSDN documentation[1], passing `nullptr` as the value will cause
   // `SetEnvironmentVariable` to delete the key from the process's environment.
-  ::SetEnvironmentVariable(key.c_str(), nullptr);
+  ::SetEnvironmentVariableW(wide_stringify(key).data(), nullptr);
 }
 
 
@@ -349,42 +350,7 @@ inline Result<pid_t> waitpid(long pid, int* status, int options)
 }
 
 
-inline std::string hstrerror(int err)
-{
-  char buffer[1024];
-  DWORD format_error = 0;
-
-  // NOTE: Per the Linux documentation[1], `h_errno` can have only one of the
-  // following errors.
-  switch (err) {
-    case WSAHOST_NOT_FOUND:
-    case WSANO_DATA:
-    case WSANO_RECOVERY:
-    case WSATRY_AGAIN: {
-      format_error = ::FormatMessage(
-          FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-          nullptr,
-          err,
-          MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-          buffer,
-          sizeof(buffer),
-          nullptr);
-      break;
-    }
-    default: {
-      return "Unknown resolver error";
-    }
-  }
-
-  if (format_error == 0) {
-    // If call to `FormatMessage` fails, then we choose to output the error
-    // code rather than call `FormatMessage` again.
-    return "os::hstrerror: Call to `FormatMessage` failed with error code" +
-      std::to_string(GetLastError());
-  } else {
-    return buffer;
-  }
-}
+inline std::string hstrerror(int err) = delete;
 
 
 inline Try<Nothing> chown(
@@ -465,17 +431,11 @@ inline Try<Memory> memory()
 
 inline Try<Version> release()
 {
-  OSVERSIONINFOEX os_version;
-  os_version.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-  // Disable compiler warning asking us to use the Unicode version of
-  // `GetVersionEx`, because Mesos currently does not support Unicode. See
-  // MESOS-6817.
-  if (!::GetVersionEx(reinterpret_cast<LPOSVERSIONINFO>(&os_version))) {
+  OSVERSIONINFOEXW os_version;
+  os_version.dwOSVersionInfoSize = sizeof(os_version);
+  if (!::GetVersionExW(reinterpret_cast<LPOSVERSIONINFO>(&os_version))) {
     return WindowsError("os::release: Call to `GetVersionEx` failed");
   }
-#pragma warning(pop)
 
   return Version(os_version.dwMajorVersion, os_version.dwMinorVersion, 0);
 }
@@ -484,7 +444,7 @@ inline Try<Version> release()
 // Return the system information.
 inline Try<UTSInfo> uname()
 {
-  Try<OSVERSIONINFOEX> os_version = internal::os_version();
+  Try<OSVERSIONINFOEXW> os_version = internal::os_version();
   if (os_version.isError()) {
     return Error(os_version.error());
   }
@@ -514,7 +474,7 @@ inline tm* gmtime_r(const time_t* timep, tm* result)
 }
 
 
-inline Result<PROCESSENTRY32> process_entry(pid_t pid)
+inline Result<PROCESSENTRY32W> process_entry(pid_t pid)
 {
   // Get a snapshot of the processes in the system. NOTE: We should not check
   // whether the handle is `nullptr`, because this API will always return
@@ -528,9 +488,9 @@ inline Result<PROCESSENTRY32> process_entry(pid_t pid)
   SharedHandle safe_snapshot_handle(snapshot_handle, ::CloseHandle);
 
   // Initialize process entry.
-  PROCESSENTRY32 process_entry;
-  ZeroMemory(&process_entry, sizeof(PROCESSENTRY32));
-  process_entry.dwSize = sizeof(PROCESSENTRY32);
+  PROCESSENTRY32W process_entry;
+  memset(&process_entry, 0, sizeof(process_entry));
+  process_entry.dwSize = sizeof(process_entry);
 
   // Get first process so that we can loop through process entries until we
   // find the one we care about.
@@ -575,7 +535,7 @@ inline Result<PROCESSENTRY32> process_entry(pid_t pid)
 inline Result<Process> process(pid_t pid)
 {
   // Find process with pid.
-  Result<PROCESSENTRY32> entry = process_entry(pid);
+  Result<PROCESSENTRY32W> entry = process_entry(pid);
 
   if (entry.isError()) {
     return WindowsError(entry.error());
@@ -644,7 +604,7 @@ inline Result<Process> process(pid_t pid)
       Bytes(proc_mem_counters.WorkingSetSize),
       utime.isSome() ? utime.get() : Option<Duration>::none(),
       stime.isSome() ? stime.get() : Option<Duration>::none(),
-      entry.get().szExeFile,                   // Executable filename.
+      stringify(entry.get().szExeFile),        // Executable filename.
       false);                                  // Is not zombie process.
 }
 
@@ -655,17 +615,17 @@ inline int random()
 }
 
 
-// `name_job` maps a `pid` to a `string` name for a job object.
+// `name_job` maps a `pid` to a `wstring` name for a job object.
 // Only named job objects are accessible via `OpenJobObject`.
 // Thus all our job objects must be named. This is essentially a shim
 // to map the Linux concept of a process tree's root `pid` to a
 // named job object so that the process group can be treated similarly.
-inline Try<std::string> name_job(pid_t pid) {
+inline Try<std::wstring> name_job(pid_t pid) {
   Try<std::string> alpha_pid = strings::internal::format("MESOS_JOB_%X", pid);
   if (alpha_pid.isError()) {
     return Error(alpha_pid.error());
   }
-  return alpha_pid;
+  return wide_stringify(alpha_pid.get());
 }
 
 
@@ -677,18 +637,19 @@ inline Try<std::string> name_job(pid_t pid) {
 inline Try<SharedHandle> open_job(
     const DWORD desired_access,
     BOOL inherit_handles,
-    const std::string& name)
+    const std::wstring& name)
 {
   SharedHandle jobHandle(
-      ::OpenJobObject(
+      ::OpenJobObjectW(
           desired_access,
           inherit_handles,
-          name.c_str()),
+          name.data()),
       ::CloseHandle);
 
   if (jobHandle.get() == nullptr) {
     return WindowsError(
-        "os::open_job: Call to `OpenJobObject` failed for job: " + name);
+        "os::open_job: Call to `OpenJobObject` failed for job: " +
+        stringify(name));
   }
 
   return jobHandle;
@@ -701,19 +662,19 @@ inline Try<SharedHandle> open_job(
 // handle is closed and all associated processes have exited,
 // a running process must be assigned to the created job
 // before the returned handle is closed.
-inline Try<SharedHandle> create_job(const std::string& name)
+inline Try<SharedHandle> create_job(const std::wstring& name)
 {
   SharedHandle jobHandle(
-      ::CreateJobObject(
+      ::CreateJobObjectW(
           nullptr,       // Use a default security descriptor, and
                          // the created handle cannot be inherited.
-          name.c_str()), // The name of the job.
+          name.data()),  // The name of the job.
       ::CloseHandle);
-  // TODO(andschwa): Fix the type of `name` when Unicode is turned on.
 
   if (jobHandle.get_handle() == nullptr) {
     return WindowsError(
-        "os::create_job: Call to `CreateJobObject` failed for job: " + name);
+        "os::create_job: Call to `CreateJobObject` failed for job: " +
+        stringify(name));
   }
 
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = { { 0 }, 0 };
@@ -733,7 +694,8 @@ inline Try<SharedHandle> create_job(const std::string& name)
 
   if (setInformationResult == FALSE) {
     return WindowsError(
-        "os::create_job: `SetInformationJobObject` failed for job: " + name);
+        "os::create_job: `SetInformationJobObject` failed for job: " +
+        stringify(name));
   }
 
   return jobHandle;
@@ -799,19 +761,16 @@ inline Try<std::string> var()
     // The expected behavior here is for the function to "fail"
     // and return `false`, and `size` receives necessary buffer size.
     return WindowsError(
-        "os::var: `GetAllUsersProfileDirectory` succeeded unexpectedly");
+        "os::var: `GetAllUsersProfileDirectoryW` succeeded unexpectedly");
   }
 
-  std::vector<wchar_t> var_folder(size);
-  if (!::GetAllUsersProfileDirectoryW(&var_folder[0], &size)) {
-    return WindowsError(
-        "os::var: `GetAllUsersProfileDirectory` failed");
+  std::vector<wchar_t> buffer;
+  buffer.reserve(static_cast<size_t>(size));
+  if (!::GetAllUsersProfileDirectoryW(buffer.data(), &size)) {
+    return WindowsError("os::var: `GetAllUsersProfileDirectoryW` failed");
   }
 
-  // Convert UTF-16 `wchar[]` to UTF-8 `string`.
-  std::wstring wvar_folder(&var_folder[0]);
-  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-  return converter.to_bytes(wvar_folder);
+  return stringify(std::wstring(buffer.data()));
 }
 
 

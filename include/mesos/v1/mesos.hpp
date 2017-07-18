@@ -174,6 +174,36 @@ inline bool operator==(const TaskID& left, const std::string& right)
 }
 
 
+inline bool operator==(
+    const DomainInfo::FaultDomain::RegionInfo& left,
+    const DomainInfo::FaultDomain::RegionInfo& right)
+{
+  return left.name() == right.name();
+}
+
+
+inline bool operator==(
+    const DomainInfo::FaultDomain::ZoneInfo& left,
+    const DomainInfo::FaultDomain::ZoneInfo& right)
+{
+  return left.name() == right.name();
+}
+
+
+inline bool operator==(
+    const DomainInfo::FaultDomain& left,
+    const DomainInfo::FaultDomain& right)
+{
+  return left.region() == right.region() && left.zone() == right.zone();
+}
+
+
+inline bool operator==(const DomainInfo& left, const DomainInfo& right)
+{
+  return left.fault_domain() == right.fault_domain();
+}
+
+
 /**
  * For machines to match, both the `hostname` and `ip` must be equivalent.
  * Hostname is not case sensitive, so it is lowercased before comparison.
@@ -233,6 +263,14 @@ inline bool operator!=(const DurationInfo& left, const DurationInfo& right)
 }
 
 
+inline bool operator!=(
+    const DomainInfo::FaultDomain::RegionInfo& left,
+    const DomainInfo::FaultDomain::RegionInfo& right)
+{
+  return left.name() != right.name();
+}
+
+
 inline bool operator<(const ContainerID& left, const ContainerID& right)
 {
   return left.value() < right.value();
@@ -287,6 +325,9 @@ std::ostream& operator<<(
     const ContainerInfo& containerInfo);
 
 
+std::ostream& operator<<(std::ostream& stream, const DomainInfo& domainInfo);
+
+
 std::ostream& operator<<(std::ostream& stream, const ExecutorID& executorId);
 
 
@@ -313,6 +354,11 @@ std::ostream& operator<<(
     const ResourceProviderID& resourceProviderId);
 
 
+std::ostream& operator<<(
+    std::ostream& stream,
+    const ResourceProviderInfo& resourceProviderInfo);
+
+
 std::ostream& operator<<(std::ostream& stream, const AgentID& agentId);
 
 
@@ -336,11 +382,6 @@ std::ostream& operator<<(
 std::ostream& operator<<(std::ostream& stream, const TaskState& state);
 
 
-std::ostream& operator<<(
-    std::ostream& stream,
-    const std::vector<TaskID>& taskIds);
-
-
 std::ostream& operator<<(std::ostream& stream, const CheckInfo::Type& type);
 
 
@@ -359,6 +400,23 @@ template <typename T>
 inline std::ostream& operator<<(
     std::ostream& stream,
     const google::protobuf::RepeatedPtrField<T>& messages)
+{
+  stream << "[ ";
+  for (auto it = messages.begin(); it != messages.end(); ++it) {
+    if (it != messages.begin()) {
+      stream << ", ";
+    }
+    stream << *it;
+  }
+  stream << " ]";
+  return stream;
+}
+
+
+template <typename T>
+inline std::ostream& operator<<(
+    std::ostream& stream,
+    const std::vector<T>& messages)
 {
   stream << "[ ";
   for (auto it = messages.begin(); it != messages.end(); ++it) {

@@ -185,7 +185,7 @@ struct ExecutorWriter
     writer->field("source", executor_->info.source());
     writer->field("container", executor_->containerId.value());
     writer->field("directory", executor_->directory);
-    writer->field("resources", executor_->resources);
+    writer->field("resources", executor_->allocatedResources());
 
     // Resources may be empty for command executors.
     if (!executor_->info.resources().empty()) {
@@ -809,6 +809,24 @@ Future<Response> Http::executor(
 }
 
 
+string Http::RESOURCE_PROVIDER_HELP() {
+  return HELP(
+    TLDR(
+        "Endpoint for the Local Resource Provider HTTP API."),
+    DESCRIPTION(
+        "This endpoint is used by the local resource providers to interact",
+        "with the agent via Call/Event messages.",
+        "",
+        "Returns 200 OK iff the initial SUBSCRIBE Call is successful. This",
+        "will result in a streaming response via chunked transfer encoding.",
+        "The local resource providers can process the response incrementally.",
+        "",
+        "Returns 202 Accepted for all other Call messages iff the request is",
+        "accepted."),
+    AUTHENTICATION(true));
+}
+
+
 string Http::FLAGS_HELP()
 {
   return HELP(
@@ -1284,6 +1302,10 @@ Future<Response> Http::state(
         writer->field("hostname", slave->info.hostname());
         writer->field("capabilities", AGENT_CAPABILITIES());
 
+        if (slave->info.has_domain()) {
+          writer->field("domain", slave->info.domain());
+        }
+
         const Resources& totalResources = slave->totalResources;
 
         writer->field("resources", totalResources);
@@ -1313,6 +1335,20 @@ Future<Response> Http::state(
                 writer->element(JSON::Protobuf(resource));
               }
             });
+
+        // TODO(abudnik): Consider storing the allocatedResources in the Slave
+        // struct rather than computing it here each time.
+        Resources allocatedResources;
+
+        foreachvalue (const Framework* framework, slave->frameworks) {
+          allocatedResources += framework->allocatedResources();
+        }
+
+        writer->field(
+            "reserved_resources_allocated", allocatedResources.reservations());
+
+        writer->field(
+            "unreserved_resources_allocated", allocatedResources.unreserved());
 
         writer->field("attributes", Attributes(slave->info.attributes()));
 
@@ -2107,9 +2143,7 @@ Future<JSON::Array> Http::__containers(
       Try<bool> authorized = true;
 
       if (approver.isSome()) {
-        ObjectApprover::Object object;
-        object.executor_info = &info;
-        object.framework_info = &(framework->info);
+        ObjectApprover::Object object(info, framework->info);
 
         authorized = approver.get()->approved(object);
 
@@ -2310,13 +2344,12 @@ Future<Response> Http::_launchNestedContainer(
   Framework* framework = slave->getFramework(executor->frameworkId);
   CHECK_NOTNULL(framework);
 
-  ObjectApprover::Object object;
-  object.executor_info = &(executor->info);
-  object.framework_info = &(framework->info);
-  object.command_info = &(commandInfo);
-  object.container_id = &(containerId);
-
-  Try<bool> approved = approver.get()->approved(object);
+  Try<bool> approved = approver.get()->approved(
+      ObjectApprover::Object(
+          executor->info,
+          framework->info,
+          commandInfo,
+          containerId));
 
   if (approved.isError()) {
     return Failure(approved.error());
@@ -2413,12 +2446,11 @@ Future<Response> Http::waitNestedContainer(
       Framework* framework = slave->getFramework(executor->frameworkId);
       CHECK_NOTNULL(framework);
 
-      ObjectApprover::Object object;
-      object.executor_info = &(executor->info);
-      object.framework_info = &(framework->info);
-      object.container_id = &(containerId);
-
-      Try<bool> approved = waitApprover.get()->approved(object);
+      Try<bool> approved = waitApprover.get()->approved(
+          ObjectApprover::Object(
+              executor->info,
+              framework->info,
+              containerId));
 
       if (approved.isError()) {
         return Failure(approved.error());
@@ -2488,12 +2520,11 @@ Future<Response> Http::killNestedContainer(
       Framework* framework = slave->getFramework(executor->frameworkId);
       CHECK_NOTNULL(framework);
 
-      ObjectApprover::Object object;
-      object.executor_info = &(executor->info);
-      object.framework_info = &(framework->info);
-      object.container_id = &(containerId);
-
-      Try<bool> approved = killApprover.get()->approved(object);
+      Try<bool> approved = killApprover.get()->approved(
+          ObjectApprover::Object(
+              executor->info,
+              framework->info,
+              containerId));
 
       if (approved.isError()) {
         return Failure(approved.error());
@@ -2548,12 +2579,11 @@ Future<Response> Http::removeNestedContainer(
       Framework* framework = slave->getFramework(executor->frameworkId);
       CHECK_NOTNULL(framework);
 
-      ObjectApprover::Object object;
-      object.executor_info = &(executor->info);
-      object.framework_info = &(framework->info);
-      object.container_id = &(containerId);
-
-      Try<bool> approved = removeApprover.get()->approved(object);
+      Try<bool> approved = removeApprover.get()->approved(
+          ObjectApprover::Object(
+              executor->info,
+              framework->info,
+              containerId));
 
       if (approved.isError()) {
         return Failure(approved.error());
@@ -2689,11 +2719,8 @@ Future<Response> Http::attachContainerInput(
       Framework* framework = slave->getFramework(executor->frameworkId);
       CHECK_NOTNULL(framework);
 
-      ObjectApprover::Object object;
-      object.executor_info = &(executor->info);
-      object.framework_info = &(framework->info);
-
-      Try<bool> approved = attachInputApprover.get()->approved(object);
+      Try<bool> approved = attachInputApprover.get()->approved(
+          ObjectApprover::Object(executor->info, framework->info));
 
       if (approved.isError()) {
         return Failure(approved.error());
@@ -3004,12 +3031,11 @@ Future<Response> Http::attachContainerOutput(
       Framework* framework = slave->getFramework(executor->frameworkId);
       CHECK_NOTNULL(framework);
 
-      ObjectApprover::Object object;
-      object.executor_info = &(executor->info);
-      object.framework_info = &(framework->info);
-      object.container_id = &(containerId);
-
-      Try<bool> approved = attachOutputApprover.get()->approved(object);
+      Try<bool> approved = attachOutputApprover.get()->approved(
+          ObjectApprover::Object(
+              executor->info,
+              framework->info,
+              containerId));
 
       if (approved.isError()) {
         return Failure(approved.error());

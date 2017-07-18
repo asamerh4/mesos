@@ -102,6 +102,7 @@ using process::Owned;
 using process::PID;
 using process::Promise;
 
+using process::http::Accepted;
 using process::http::OK;
 using process::http::Response;
 using process::http::Unauthorized;
@@ -799,6 +800,144 @@ TEST_F(MasterTest, StatusUpdateAck)
 }
 
 
+// This test checks that domain information is correctly returned by
+// the master's HTTP endpoints.
+TEST_F(MasterTest, DomainEndpoints)
+{
+  const string MASTER_REGION = "region-abc";
+  const string MASTER_ZONE = "zone-123";
+
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.domain = createDomainInfo(MASTER_REGION, MASTER_ZONE);
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  const string AGENT_REGION = "region-xyz";
+  const string AGENT_ZONE = "zone-456";
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.domain = createDomainInfo(AGENT_REGION, AGENT_ZONE);
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+
+  // Query the "/state" master endpoint.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::String> masterRegion = parse->find<JSON::String>(
+        "domain.fault_domain.region.name");
+    Result<JSON::String> masterZone = parse->find<JSON::String>(
+        "domain.fault_domain.zone.name");
+
+    EXPECT_SOME_EQ(JSON::String(MASTER_REGION), masterRegion);
+    EXPECT_SOME_EQ(JSON::String(MASTER_ZONE), masterZone);
+
+    Result<JSON::String> leaderRegion = parse->find<JSON::String>(
+        "leader_info.domain.fault_domain.region.name");
+    Result<JSON::String> leaderZone = parse->find<JSON::String>(
+        "leader_info.domain.fault_domain.zone.name");
+
+    EXPECT_SOME_EQ(JSON::String(MASTER_REGION), leaderRegion);
+    EXPECT_SOME_EQ(JSON::String(MASTER_ZONE), leaderZone);
+
+    Result<JSON::String> agentRegion = parse->find<JSON::String>(
+        "slaves[0].domain.fault_domain.region.name");
+    Result<JSON::String> agentZone = parse->find<JSON::String>(
+        "slaves[0].domain.fault_domain.zone.name");
+
+    EXPECT_SOME_EQ(JSON::String(AGENT_REGION), agentRegion);
+    EXPECT_SOME_EQ(JSON::String(AGENT_ZONE), agentZone);
+  }
+
+  // Query the "/state-summary" master endpoint.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "state-summary",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::String> agentRegion = parse->find<JSON::String>(
+        "slaves[0].domain.fault_domain.region.name");
+    Result<JSON::String> agentZone = parse->find<JSON::String>(
+        "slaves[0].domain.fault_domain.zone.name");
+
+    EXPECT_SOME_EQ(JSON::String(AGENT_REGION), agentRegion);
+    EXPECT_SOME_EQ(JSON::String(AGENT_ZONE), agentZone);
+  }
+
+  // Query the "/slaves" master endpoint.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::String> agentRegion = parse->find<JSON::String>(
+        "slaves[0].domain.fault_domain.region.name");
+    Result<JSON::String> agentZone = parse->find<JSON::String>(
+        "slaves[0].domain.fault_domain.zone.name");
+
+    EXPECT_SOME_EQ(JSON::String(AGENT_REGION), agentRegion);
+    EXPECT_SOME_EQ(JSON::String(AGENT_ZONE), agentZone);
+  }
+
+  // Query the "/state" agent endpoint.
+  {
+    Future<Response> response = process::http::get(
+        slave.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::String> agentRegion = parse->find<JSON::String>(
+        "domain.fault_domain.region.name");
+    Result<JSON::String> agentZone = parse->find<JSON::String>(
+        "domain.fault_domain.zone.name");
+
+    EXPECT_SOME_EQ(JSON::String(AGENT_REGION), agentRegion);
+    EXPECT_SOME_EQ(JSON::String(AGENT_ZONE), agentZone);
+  }
+}
+
+
 TEST_F(MasterTest, RecoverResources)
 {
   master::Flags masterFlags = CreateMasterFlags();
@@ -1109,7 +1248,10 @@ TEST_F(MasterTest, MultipleExecutors)
 
 TEST_F(MasterTest, MasterInfo)
 {
-  Try<Owned<cluster::Master>> master = StartMaster();
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.domain = createDomainInfo("region-abc", "zone-xyz");
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
@@ -1130,6 +1272,7 @@ TEST_F(MasterTest, MasterInfo)
   driver.start();
 
   AWAIT_READY(masterInfo);
+  EXPECT_EQ(masterFlags.domain, masterInfo->domain());
   EXPECT_EQ(master.get()->pid.address.port, masterInfo->port());
   EXPECT_EQ(
       master.get()->pid.address.ip,
@@ -2218,6 +2361,95 @@ TEST_F(MasterTest, SlavesEndpointWithoutSlaves)
 
   ASSERT_SOME(expected);
   EXPECT_SOME_EQ(expected.get(), parse);
+}
+
+
+// Tests that reservations can only be seen by authorized users.
+TEST_F(MasterTest, SlavesEndpointFiltering)
+{
+  // Start up the master.
+  master::Flags flags = CreateMasterFlags();
+
+  {
+    mesos::ACL::ViewRole* acl = flags.acls.get().add_view_roles();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
+    acl->mutable_roles()->set_type(mesos::ACL::Entity::NONE);
+  }
+
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Future<SlaveRegisteredMessage> agentRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+
+  Try<Owned<cluster::Slave>> agent = StartSlave(detector.get());
+  ASSERT_SOME(agent);
+
+  AWAIT_READY(agentRegisteredMessage);
+  const SlaveID& agentId = agentRegisteredMessage->slave_id();
+
+  // Create reservation.
+  {
+    RepeatedPtrField<Resource> reservation =
+      Resources::parse("cpus:1;mem:12")->pushReservation(
+          createDynamicReservationInfo(
+              "superhero",
+              DEFAULT_CREDENTIAL.principal()));
+
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "reserve",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        strings::format(
+            "slaveId=%s&resources=%s",
+            agentId,
+            JSON::protobuf(reservation)).get());
+
+    AWAIT_READY(response);
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Accepted().status, response);
+  }
+
+  // Query master with invalid user.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    const Try<JSON::Object> json = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(json);
+
+    Result<JSON::Object> reservations =
+      json->find<JSON::Object>("slaves[0].reserved_resources");
+    ASSERT_SOME(reservations);
+    EXPECT_TRUE(reservations->values.empty());
+  }
+
+  // Query master with valid user.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    const Try<JSON::Object> json = JSON::parse<JSON::Object>(response->body);
+    ASSERT_SOME(json);
+
+    Result<JSON::Object> reservations =
+      json->find<JSON::Object>("slaves[0].reserved_resources");
+    ASSERT_SOME(reservations);
+    EXPECT_FALSE(reservations->values.empty());
+  }
 }
 
 
@@ -3420,7 +3652,8 @@ TEST_F(MasterTest, UnregisteredFrameworksAfterTearDown)
 // This tests /tasks endpoint to return correct task information.
 TEST_F(MasterTest, TasksEndpoint)
 {
-  Try<Owned<cluster::Master>> master = StartMaster();
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
@@ -3434,67 +3667,158 @@ TEST_F(MasterTest, TasksEndpoint)
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _));
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
 
-  Future<vector<Offer>> offers;
+  process::Queue<Offer> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return()); // Ignore subsequent offers.
+    .WillRepeatedly(EnqueueOffers(&offers));
 
   driver.start();
 
-  AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  Future<Offer> offer = offers.get();
+  AWAIT_READY(offer);
 
-  TaskInfo task;
-  task.set_name("test");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
-  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
-  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+  // Launch two tasks.
+  TaskInfo task1;
+  task1.set_name("test1");
+  task1.mutable_task_id()->set_value("1");
+  task1.mutable_slave_id()->MergeFrom(offer->slave_id());
+  task1.mutable_resources()->MergeFrom(
+      Resources::parse("cpus:0.1;mem:12").get());
+  task1.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  TaskInfo task2;
+  task2.set_name("test2");
+  task2.mutable_task_id()->set_value("2");
+  task2.mutable_slave_id()->MergeFrom(offer->slave_id());
+  task2.mutable_resources()->MergeFrom(
+      Resources::parse("cpus:0.1;mem:12").get());
+  task2.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  vector<TaskInfo> tasks;
+  tasks.push_back(task1);
+  tasks.push_back(task2);
 
   EXPECT_CALL(exec, registered(_, _, _, _));
 
   EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING))
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> status1, status2;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status));
+    .WillOnce(FutureArg<1>(&status1))
+    .WillOnce(FutureArg<1>(&status2));
 
-  driver.launchTasks(offers.get()[0].id(), {task});
+  driver.launchTasks(offer->id(), tasks);
 
-  AWAIT_READY(status);
-  EXPECT_EQ(TASK_RUNNING, status->state());
-  EXPECT_TRUE(status->has_executor_id());
-  EXPECT_EQ(exec.id, status->executor_id());
+  AWAIT_READY(status1);
+  EXPECT_EQ(TASK_RUNNING, status1->state());
+  EXPECT_TRUE(status1->has_executor_id());
+  EXPECT_EQ(exec.id, status1->executor_id());
 
-  Future<Response> response = process::http::get(
-      master.get()->pid,
-      "tasks",
-      None(),
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+  AWAIT_READY(status2);
+  EXPECT_EQ(TASK_RUNNING, status2->state());
+  EXPECT_TRUE(status2->has_executor_id());
+  EXPECT_EQ(exec.id, status2->executor_id());
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
-  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+  // Testing the '/master/tasks' endpoint without parameters,
+  // which returns information about all tasks.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "tasks",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  Try<JSON::Value> value = JSON::parse<JSON::Value>(response->body);
-  ASSERT_SOME(value);
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
-  Try<JSON::Value> expected = JSON::parse(
-      "{"
-        "\"tasks\":"
-          "[{"
-              "\"executor_id\":\"default\","
-              "\"id\":\"1\","
-              "\"name\":\"test\","
-              "\"state\":\"TASK_RUNNING\""
-          "}]"
-      "}");
+    Try<JSON::Value> value = JSON::parse<JSON::Value>(response->body);
+    ASSERT_SOME(value);
 
-  ASSERT_SOME(expected);
+    // Two possible orderings of the result.
+    Try<JSON::Value> expected1 = JSON::parse(
+        "{"
+          "\"tasks\":"
+            "[{"
+                "\"executor_id\":\"default\","
+                "\"framework_id\":\"" + frameworkId->value() + "\","
+                "\"id\":\"1\","
+                "\"name\":\"test1\","
+                "\"state\":\"TASK_RUNNING\""
+              "},{"
+                "\"executor_id\":\"default\","
+                "\"framework_id\":\"" + frameworkId->value() + "\","
+                "\"id\":\"2\","
+                "\"name\":\"test2\","
+                "\"state\":\"TASK_RUNNING\""
+            "}]"
+        "}");
 
-  EXPECT_TRUE(value->contains(expected.get()));
+    Try<JSON::Value> expected2 = JSON::parse(
+        "{"
+          "\"tasks\":"
+            "[{"
+                "\"executor_id\":\"default\","
+                "\"framework_id\":\"" + frameworkId->value() + "\","
+                "\"id\":\"2\","
+                "\"name\":\"test2\","
+                "\"state\":\"TASK_RUNNING\""
+              "},{"
+                "\"executor_id\":\"default\","
+                "\"framework_id\":\"" + frameworkId->value() + "\","
+                "\"id\":\"1\","
+                "\"name\":\"test1\","
+                "\"state\":\"TASK_RUNNING\""
+            "}]"
+        "}");
+
+    ASSERT_SOME(expected1);
+    ASSERT_SOME(expected2);
+
+    EXPECT_TRUE(
+        value->contains(expected1.get()) ||
+        value->contains(expected2.get()));
+  }
+
+  // Testing the query for a specific task.
+  {
+    Future<Response> response = process::http::get(
+        master.get()->pid,
+        "tasks?task_id=1;framework_id=" + frameworkId->value(),
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+    Try<JSON::Value> value = JSON::parse<JSON::Value>(response->body);
+    ASSERT_SOME(value);
+
+    JSON::Object object = value->as<JSON::Object>();
+    Result<JSON::Array> taskArray = object.find<JSON::Array>("tasks");
+    ASSERT_SOME(taskArray);
+
+    EXPECT_TRUE(taskArray->values.size() == 1);
+
+    Try<JSON::Value> expected = JSON::parse(
+        "{"
+          "\"tasks\":"
+            "[{"
+                "\"executor_id\":\"default\","
+                "\"framework_id\":\"" + frameworkId->value() + "\","
+                "\"id\":\"1\","
+                "\"name\":\"test1\","
+                "\"state\":\"TASK_RUNNING\""
+            "}]"
+        "}");
+
+    ASSERT_SOME(expected);
+    EXPECT_TRUE(value->contains(expected.get()));
+  }
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -7038,6 +7362,309 @@ TEST_F(MasterTest, MultiRoleSchedulerUnsubscribeFromRole)
 }
 
 
+// This test checks that if the agent and master are configured with
+// domains that specify the same region (but different zones), the
+// agent is allowed to register and its resources are offered to
+// frameworks as usual.
+TEST_F(MasterTest, AgentDomainSameRegion)
+{
+  Clock::pause();
+
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.domain = createDomainInfo("region-abc", "zone-123");
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.domain = createDomainInfo("region-abc", "zone-456");
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(slaveRegisteredMessage);
+
+  const SlaveID& slaveId = slaveRegisteredMessage->slave_id();
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<MasterInfo> masterInfo;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<2>(&masterInfo));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(masterInfo);
+  EXPECT_EQ(masterFlags.domain, masterInfo->domain());
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+
+  Offer offer = offers->front();
+  EXPECT_EQ(slaveId, offer.slave_id());
+  EXPECT_EQ(slaveFlags.domain.get(), offer.domain());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test checks that if the agent and master are configured with
+// domains that specify different regions, the agent is allowed to
+// register but its resources are only offered to region-aware
+// frameworks. We also check that tasks can be launched in remote
+// regions.
+TEST_F(MasterTest, AgentDomainDifferentRegion)
+{
+  Clock::pause();
+
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.domain = createDomainInfo("region-abc", "zone-123");
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.domain = createDomainInfo("region-xyz", "zone-123");
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(slaveRegisteredMessage);
+
+  const SlaveID& slaveId = slaveRegisteredMessage->slave_id();
+
+  // Launch a non-region-aware scheduler. It should NOT receive any
+  // resource offers for `slave`.
+  {
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    Future<Nothing> registered;
+    EXPECT_CALL(sched, registered(&driver, _, _))
+      .WillOnce(FutureSatisfy(&registered));
+
+    // We do not expect to get offered any resources.
+    Future<vector<Offer>> offers;
+    EXPECT_CALL(sched, resourceOffers(&driver, _))
+      .Times(0);
+
+    driver.start();
+
+    AWAIT_READY(registered);
+
+    // Trigger a batch allocation, for good measure.
+    Clock::advance(masterFlags.allocation_interval);
+    Clock::settle();
+
+    driver.stop();
+    driver.join();
+  }
+
+  // Launch a region-aware scheduler. It should receive an offer for `slave`.
+  {
+    FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::REGION_AWARE);
+
+    MockScheduler sched;
+    MesosSchedulerDriver driver(
+        &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+    EXPECT_CALL(sched, registered(&driver, _, _));
+
+    Future<vector<Offer>> offers;
+    EXPECT_CALL(sched, resourceOffers(&driver, _))
+      .WillOnce(FutureArg<1>(&offers));
+
+    driver.start();
+
+    AWAIT_READY(offers);
+    ASSERT_FALSE(offers->empty());
+
+    Offer offer = offers->front();
+    EXPECT_EQ(slaveId, offer.slave_id());
+    EXPECT_EQ(slaveFlags.domain.get(), offer.domain());
+
+    // Check that we can launch a task in a remote region.
+    TaskInfo task = createTask(offer, "sleep 60");
+
+    Future<TaskStatus> runningStatus;
+    EXPECT_CALL(sched, statusUpdate(&driver, _))
+      .WillOnce(FutureArg<1>(&runningStatus));
+
+    driver.launchTasks(offer.id(), {task});
+
+    AWAIT_READY(runningStatus);
+    EXPECT_EQ(TASK_RUNNING, runningStatus->state());
+    EXPECT_EQ(task.task_id(), runningStatus->task_id());
+
+    driver.stop();
+    driver.join();
+  }
+
+  // Resume the clock so that executor/task cleanup happens correctly.
+  //
+  // TODO(neilc): Replace this with more fine-grained clock advancement.
+  Clock::resume();
+}
+
+
+// This test checks that if the master is configured with a domain but
+// the agent is not, the agent is allowed to register and its
+// resources are offered to frameworks as usual.
+TEST_F(MasterTest, AgentDomainUnset)
+{
+  Clock::pause();
+
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.domain = createDomainInfo("region-abc", "zone-123");
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(slaveRegisteredMessage);
+
+  const SlaveID& slaveId = slaveRegisteredMessage->slave_id();
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+
+  Offer offer = offers->front();
+  EXPECT_EQ(slaveId, offer.slave_id());
+  EXPECT_FALSE(offer.has_domain());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test checks that if the agent is configured with a domain but
+// the master is not, the agent is not allowed to register.
+TEST_F(MasterTest, AgentDomainMismatch)
+{
+  Clock::pause();
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.domain = createDomainInfo("region-abc", "zone-456");
+
+  // Agent should attempt to register.
+  Future<RegisterSlaveMessage> registerSlaveMessage =
+    FUTURE_PROTOBUF(RegisterSlaveMessage(), _, _);
+
+  // If the agent is allowed to register, the master will update the
+  // registry. The agent should not be allowed to register, so we
+  // expect that no registrar operations will be observed.
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .Times(0);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(registerSlaveMessage);
+
+  Clock::settle();
+}
+
+
+// This test checks that if the agent is configured with a domain but
+// the master is not, the agent is not allowed to re-register. This
+// might happen if the leading master is configured with a domain but
+// one of the standby masters is not, and then the leader fails over.
+TEST_F(MasterTest, AgentDomainMismatchOnReregister)
+{
+  Clock::pause();
+
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.domain = createDomainInfo("region-abc", "zone-123");
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  slaveFlags.domain = createDomainInfo("region-abc", "zone-456");
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(slaveRegisteredMessage);
+
+  // Simulate master failover and start a new master with no domain
+  // configured.
+  master->reset();
+
+  masterFlags.domain = None();
+
+  master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<ReregisterSlaveMessage> reregisterSlaveMessage =
+    FUTURE_PROTOBUF(ReregisterSlaveMessage(), _, _);
+
+  // If the agent is allowed to re-register, the master will update
+  // the registry. The agent should not be allowed to register, so we
+  // expect that no registrar operations will be observed.
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .Times(0);
+
+  // Simulate a new master detected event.
+  detector.appoint(master.get()->pid);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(reregisterSlaveMessage);
+
+  Clock::settle();
+}
+
+
 // Check that the master does not allow old Mesos agents to register.
 // We do this by intercepting the agent's `RegisterSlaveMessage` and
 // then re-sending it with a tweaked version number.
@@ -7137,7 +7764,7 @@ public:
       return resources;
     }
 
-    CHECK_NONE(validateAndUpgradeResources(&resources));
+    convertResourceFormat(&resources, POST_RESERVATION_REFINEMENT);
     return resources;
   }
 
@@ -7581,6 +8208,251 @@ TEST_P(MasterTestPrePostReservationRefinement,
 
   driver.stop();
   driver.join();
+}
+
+
+// This test verifies that hitting the `/state` endpoint before '_accept()'
+// is called results in pending tasks being reported correctly.
+TEST_P(MasterTestPrePostReservationRefinement, StateEndpointPendingTasks)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role(DEFAULT_TEST_ROLE);
+
+  // TODO(mpark): Remove this once `RESERVATION_REFINEMENT`
+  // is removed from `DEFAULT_FRAMEWORK_INFO`.
+  frameworkInfo.clear_capabilities();
+
+  if (GetParam()) {
+    frameworkInfo.add_capabilities()->set_type(
+        FrameworkInfo::Capability::RESERVATION_REFINEMENT);
+  }
+
+  MockAuthorizer authorizer;
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  ASSERT_NE(0u, offers->size());
+
+  Offer offer = offers->front();
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  // Return a pending future from authorizer.
+  Future<Nothing> authorize;
+  Promise<bool> promise;
+  EXPECT_CALL(authorizer, authorized(_))
+    .WillOnce(DoAll(FutureSatisfy(&authorize),
+                    Return(promise.future())));
+
+  driver.launchTasks(offer.id(), {task});
+
+  // Wait until authorization is in progress.
+  AWAIT_READY(authorize);
+
+  Future<Response> response = process::http::get(
+      master.get()->pid,
+      "state",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+  ASSERT_SOME(parse);
+
+  JSON::Value result = parse.get();
+
+  JSON::Object expected = {
+    {
+      "frameworks",
+      JSON::Array {
+        JSON::Object {
+          {
+            "tasks",
+            JSON::Array {
+              JSON::Object {
+                { "id", "1" },
+                { "role", frameworkInfo.role() },
+                { "state", "TASK_STAGING" }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  EXPECT_TRUE(result.contains(expected));
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that an operator can reserve and unreserve
+// resources through the master operator API in both
+// "(pre|post)-reservation-refinement" formats.
+TEST_P(MasterTestPrePostReservationRefinement, ReserveAndUnreserveResourcesV1)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  // For capturing the SlaveID.
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
+
+  v1::master::Call v1ReserveResourcesCall;
+  v1ReserveResourcesCall.set_type(v1::master::Call::RESERVE_RESOURCES);
+  v1::master::Call::ReserveResources* reserveResources =
+    v1ReserveResourcesCall.mutable_reserve_resources();
+
+  Resources unreserved = Resources::parse("cpus:1;mem:512").get();
+  Resources dynamicallyReserved =
+    unreserved.pushReservation(createDynamicReservationInfo(
+        DEFAULT_TEST_ROLE, DEFAULT_CREDENTIAL.principal()));
+
+  reserveResources->mutable_agent_id()->CopyFrom(evolve(slaveId));
+  reserveResources->mutable_resources()->CopyFrom(
+      evolve<v1::Resource>(outboundResources(dynamicallyReserved)));
+
+  ContentType contentType = ContentType::PROTOBUF;
+
+  Future<Response> v1ReserveResourcesResponse = process::http::post(
+    master.get()->pid,
+    "api/v1",
+    createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+    serialize(contentType, v1ReserveResourcesCall),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
+      Accepted().status, v1ReserveResourcesResponse);
+
+  v1::master::Call v1UnreserveResourcesCall;
+  v1UnreserveResourcesCall.set_type(v1::master::Call::UNRESERVE_RESOURCES);
+  v1::master::Call::UnreserveResources* unreserveResources =
+    v1UnreserveResourcesCall.mutable_unreserve_resources();
+
+  unreserveResources->mutable_agent_id()->CopyFrom(evolve(slaveId));
+
+  unreserveResources->mutable_resources()->CopyFrom(
+      evolve<v1::Resource>(outboundResources(dynamicallyReserved)));
+
+  Future<Response> v1UnreserveResourcesResponse = process::http::post(
+      master.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, v1UnreserveResourcesCall),
+      stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
+      Accepted().status, v1UnreserveResourcesResponse);
+}
+
+
+// This test verifies that an operator can create and destroy
+// persistent volumes through the master operator API in both
+// "(pre|post)-reservation-refinement" formats.
+TEST_P(MasterTestPrePostReservationRefinement, CreateAndDestroyVolumesV1)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  // For capturing the SlaveID so we can use it in the create/destroy volumes
+  // API call.
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  slave::Flags slaveFlags = CreateSlaveFlags();
+  // Do Static reservation so we can create persistent volumes from it.
+  slaveFlags.resources = "disk(role1):1024";
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
+
+  // Create the persistent volume.
+  v1::master::Call v1CreateVolumesCall;
+  v1CreateVolumesCall.set_type(v1::master::Call::CREATE_VOLUMES);
+  v1::master::Call_CreateVolumes* createVolumes =
+    v1CreateVolumesCall.mutable_create_volumes();
+
+  Resources volume = createPersistentVolume(
+      Megabytes(64),
+      "role1",
+      "id1",
+      "path1",
+      None(),
+      None(),
+      DEFAULT_CREDENTIAL.principal());
+
+  createVolumes->mutable_agent_id()->CopyFrom(evolve(slaveId));
+  createVolumes->mutable_volumes()->CopyFrom(
+      evolve<v1::Resource>(outboundResources(volume)));
+
+  ContentType contentType = ContentType::PROTOBUF;
+
+  Future<Response> v1CreateVolumesResponse = process::http::post(
+      master.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, v1CreateVolumesCall),
+      stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Accepted().status, v1CreateVolumesResponse);
+
+  // Destroy the persistent volume.
+  v1::master::Call v1DestroyVolumesCall;
+  v1DestroyVolumesCall.set_type(v1::master::Call::DESTROY_VOLUMES);
+  v1::master::Call_DestroyVolumes* destroyVolumes =
+    v1DestroyVolumesCall.mutable_destroy_volumes();
+
+  destroyVolumes->mutable_agent_id()->CopyFrom(evolve(slaveId));
+  destroyVolumes->mutable_volumes()->CopyFrom(
+      evolve<v1::Resource>(outboundResources(volume)));
+
+  Future<Response> v1DestroyVolumesResponse = process::http::post(
+      master.get()->pid,
+      "api/v1",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+      serialize(contentType, v1DestroyVolumesCall),
+      stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Accepted().status, v1DestroyVolumesResponse);
 }
 
 } // namespace tests {

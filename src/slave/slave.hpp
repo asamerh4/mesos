@@ -75,6 +75,9 @@
 
 #include "messages/messages.hpp"
 
+#include "resource_provider/daemon.hpp"
+#include "resource_provider/manager.hpp"
+
 #include "slave/constants.hpp"
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/flags.hpp"
@@ -641,6 +644,9 @@ private:
   // (allocated and oversubscribable) resources.
   Option<Resources> oversubscribedResources;
 
+  ResourceProviderManager resourceProviderManager;
+  process::Owned<LocalResourceProviderDaemon> localResourceProviderDaemon;
+
 protected:
   // Made protected for testing purposes.
   mesos::SecretGenerator* secretGenerator;
@@ -743,6 +749,8 @@ public:
   // Returns the task group associated with the task.
   Option<TaskGroupInfo> getQueuedTaskGroup(const TaskID& taskId);
 
+  Resources allocatedResources() const;
+
   enum State
   {
     REGISTERING,  // Executor is launched but not (re-)registered yet.
@@ -786,9 +794,6 @@ public:
   //           *                 *       Some       None            HTTP
   Option<HttpConnection> http;
   Option<process::UPID> pid;
-
-  // Currently consumed resources.
-  Resources resources;
 
   // Tasks can be found in one of the following four data structures:
   //
@@ -865,6 +870,8 @@ public:
   bool removePendingTask(
       const TaskInfo& task,
       const ExecutorInfo& executorInfo);
+
+  Resources allocatedResources() const;
 
   enum State
   {

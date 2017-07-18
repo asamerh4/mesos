@@ -94,6 +94,22 @@ mesos::internal::slave::Flags::Flags()
       "  }\n"
       "]");
 
+  add(&Flags::resource_provider_config_dir,
+      "resource_provider_config_dir",
+      "Path to a directory that contains local resource provider configs.\n"
+      "Each file in the config dir should contain a JSON object representing\n"
+      "a `ResourceProviderInfo` object. Each local resource provider provides\n"
+      "resources that are local to the agent. It is also responsible for\n"
+      "handling operations on the resources it provides. Please note that\n"
+      "`resources` field might not need to be specified if the resource\n"
+      "provider determines the resources automatically.\n"
+      "\n"
+      "Example config file in this directory:\n"
+      "{\n"
+      "  \"type\": \"org.mesos.apache.rp.local.storage\",\n"
+      "  \"name\": \"lvm\"\n"
+      "}");
+
   add(&Flags::isolation,
       "isolation",
       "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem` (or \n"
@@ -1061,6 +1077,25 @@ mesos::internal::slave::Flags::Flags()
       "IP address to listen on. This cannot be used in conjunction\n"
       "with `--ip_discovery_command`.");
 
+  add(&Flags::ip6,
+      "ip6",
+      "IPv6 address to listen on. This cannot be used in conjunction\n"
+      "with '--ip6_discovery_command'.\n"
+      "\n"
+      "NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence\n"
+      "this IPv6 address is only used to advertise IPv6 addresses for\n"
+      "containers running on the host network.\n",
+      [](const Option<string>& ip6) -> Option<Error> {
+        if (ip6.isSome()) {
+          LOG(WARNING) << "Currently Mesos doesn't listen on IPv6 sockets"
+                       << "and hence the IPv6 address " << ip6.get() << " "
+                       << "will only be used to advertise IPv6 addresses"
+                       << "for containers running on the host network";
+        }
+
+        return None();
+      });
+
   add(&Flags::port, "port", "Port to listen on.", SlaveInfo().port());
 
   add(&Flags::advertise_ip,
@@ -1089,4 +1124,51 @@ mesos::internal::slave::Flags::Flags()
       "Optional IP discovery binary: if set, it is expected to emit\n"
       "the IP address which the slave will try to bind to.\n"
       "Cannot be used in conjunction with `--ip`.");
+
+  add(&Flags::ip6_discovery_command,
+      "ip6_discovery_command",
+      "Optional IPv6 discovery binary: if set, it is expected to emit\n"
+      "the IPv6 address on which Mesos will try to bind when IPv6 socket\n"
+      "support is enabled in Mesos.\n"
+      "\n"
+      "NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence\n"
+      "this IPv6 address is only used to advertise IPv6 addresses for\n"
+      "containers running on the host network.\n");
+
+  add(&Flags::domain,
+      "domain",
+      "Domain that the agent belongs to. Mesos currently only supports\n"
+      "fault domains, which identify groups of hosts with similar failure\n"
+      "characteristics. A fault domain consists of a region and a zone.\n"
+      "If this agent is placed in a different region than the master, it\n"
+      "will not appear in resource offers to frameworks that have not\n"
+      "enabled the REGION_AWARE capability. This value can be specified\n"
+      "as either a JSON-formatted string or a file path containing JSON.\n"
+      "\n"
+      "Example:\n"
+      "{\n"
+      "  \"fault_domain\":\n"
+      "    {\n"
+      "      \"region\":\n"
+      "        {\n"
+      "          \"name\": \"aws-us-east-1\"\n"
+      "        },\n"
+      "      \"zone\":\n"
+      "        {\n"
+      "          \"name\": \"aws-us-east-1a\"\n"
+      "        }\n"
+      "    }\n"
+      "}",
+      [](const Option<DomainInfo>& domain) -> Option<Error> {
+        if (domain.isSome()) {
+          // Don't let the user specify a domain without a fault
+          // domain. This is allowed by the protobuf spec (for forward
+          // compatibility with possible future changes), but is not a
+          // useful configuration right now.
+          if (!domain->has_fault_domain()) {
+            return Error("`domain` must define `fault_domain`");
+          }
+        }
+        return None();
+      });
 }

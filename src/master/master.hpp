@@ -424,9 +424,7 @@ public:
       const ExecutorID& executorId,
       int32_t status);
 
-  void updateSlave(
-      const SlaveID& slaveId,
-      const Resources& oversubscribedResources);
+  void updateSlave(const UpdateSlaveMessage& message);
 
   void updateUnavailability(
       const MachineID& machineId,
@@ -1397,13 +1395,13 @@ private:
 
     process::Future<process::http::Response> _reserve(
         const SlaveID& slaveId,
-        const Resources& resources,
+        const google::protobuf::RepeatedPtrField<Resource>& resources,
         const Option<process::http::authentication::Principal>&
             principal) const;
 
     process::Future<process::http::Response> _unreserve(
         const SlaveID& slaveId,
-        const Resources& resources,
+        const google::protobuf::RepeatedPtrField<Resource>& resources,
         const Option<process::http::authentication::Principal>&
             principal) const;
 
@@ -1609,6 +1607,7 @@ private:
   friend struct Framework;
   friend struct Metrics;
   friend struct Slave;
+  friend struct SlavesWriter;
 
   // NOTE: Since 'getOffer', 'getInverseOffer' and 'slaves' are
   // protected, we need to make the following functions friends.
@@ -2884,7 +2883,7 @@ struct Role
     frameworks.erase(framework->id());
   }
 
-  Resources resources() const
+  Resources allocatedResources() const
   {
     Resources resources;
 

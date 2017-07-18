@@ -27,6 +27,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <mesos/type_utils.hpp>
@@ -412,6 +413,17 @@ void Slave::initialize()
       << mkdir.error();
   }
 
+  Try<Owned<LocalResourceProviderDaemon>> _localResourceProviderDaemon =
+    LocalResourceProviderDaemon::create(flags);
+
+  if (_localResourceProviderDaemon.isError()) {
+    EXIT(EXIT_FAILURE)
+      << "Failed to create local resource provider daemon: "
+      << _localResourceProviderDaemon.error();
+  }
+
+  localResourceProviderDaemon = std::move(_localResourceProviderDaemon.get());
+
   Try<Resources> resources = Containerizer::resources(flags);
   if (resources.isError()) {
     EXIT(EXIT_FAILURE)
@@ -563,6 +575,10 @@ void Slave::initialize()
   // Checkpointing of slaves is always enabled.
   info.set_checkpoint(true);
 
+  if (flags.domain.isSome()) {
+    info.mutable_domain()->CopyFrom(flags.domain.get());
+  }
+
   LOG(INFO) << "Agent hostname: " << info.hostname();
 
   statusUpdateManager->initialize(defer(self(), &Slave::forward, lambda::_1)
@@ -694,6 +710,15 @@ void Slave::initialize()
                const Option<Principal>& principal) {
           logRequest(request);
           return http.executor(request, principal);
+        });
+
+  route("/api/v1/resource_provider",
+        READWRITE_HTTP_AUTHENTICATION_REALM,
+        Http::RESOURCE_PROVIDER_HELP(),
+        [this](const process::http::Request& request,
+               const Option<Principal>& principal) {
+          logRequest(request);
+          return resourceProviderManager.api(request, principal);
         });
 
   // TODO(ijimenez): Remove this endpoint at the end of the
@@ -1209,6 +1234,7 @@ void Slave::registered(
 
     UpdateSlaveMessage message;
     message.mutable_slave_id()->CopyFrom(info.id());
+    message.set_type(UpdateSlaveMessage::OVERSUBSCRIBED);
     message.mutable_oversubscribed_resources()->CopyFrom(
         oversubscribedResources.get());
 
@@ -1288,6 +1314,7 @@ void Slave::reregistered(
 
     UpdateSlaveMessage message;
     message.mutable_slave_id()->CopyFrom(info.id());
+    message.set_type(UpdateSlaveMessage::OVERSUBSCRIBED);
     message.mutable_oversubscribed_resources()->CopyFrom(
         oversubscribedResources.get());
 
@@ -2389,17 +2416,9 @@ void Slave::__run(
       LOG(INFO) << "Queued " << taskOrTaskGroup(task, taskGroup)
                 << " for executor " << *executor;
 
-      // Update the resource limits for the container. Note that the
-      // resource limits include the currently queued tasks because we
-      // want the container to have enough resources to hold the
-      // upcoming tasks.
-      Resources resources = executor->resources;
-
-      foreachvalue (const TaskInfo& _task, executor->queuedTasks) {
-        resources += _task.resources();
-      }
-
-      containerizer->update(executor->containerId, resources)
+      containerizer->update(
+          executor->containerId,
+          executor->allocatedResources())
         .onAny(defer(self(),
                      &Self::___run,
                      lambda::_1,
@@ -3763,16 +3782,6 @@ void Slave::subscribe(
             None());
       }
 
-      // Update the resource limits for the container. Note that the
-      // resource limits include the currently queued tasks because we
-      // want the container to have enough resources to hold the
-      // upcoming tasks.
-      Resources resources = executor->resources;
-
-      foreachvalue (const TaskInfo& task, executor->queuedTasks) {
-        resources += task.resources();
-      }
-
       // We maintain a copy of the tasks in `queuedTaskGroups` also in
       // `queuedTasks`. Hence, we need to ensure that we don't send the same
       // tasks to the executor twice.
@@ -3792,7 +3801,9 @@ void Slave::subscribe(
         }
       }
 
-      containerizer->update(executor->containerId, resources)
+      containerizer->update(
+          executor->containerId,
+          executor->allocatedResources())
         .onAny(defer(self(),
                      &Self::___run,
                      lambda::_1,
@@ -3985,16 +3996,6 @@ void Slave::registerExecutor(
       message.mutable_slave_info()->MergeFrom(info);
       executor->send(message);
 
-      // Update the resource limits for the container. Note that the
-      // resource limits include the currently queued tasks because we
-      // want the container to have enough resources to hold the
-      // upcoming tasks.
-      Resources resources = executor->resources;
-
-      foreachvalue (const TaskInfo& task, executor->queuedTasks) {
-        resources += task.resources();
-      }
-
       // We maintain a copy of the tasks in `queuedTaskGroups` also in
       // `queuedTasks`. Hence, we need to ensure that we don't send the same
       // tasks to the executor twice.
@@ -4014,7 +4015,9 @@ void Slave::registerExecutor(
         }
       }
 
-      containerizer->update(executor->containerId, resources)
+      containerizer->update(
+          executor->containerId,
+          executor->allocatedResources())
         .onAny(defer(self(),
                      &Self::___run,
                      lambda::_1,
@@ -4152,7 +4155,9 @@ void Slave::reregisterExecutor(
       }
 
       // Tell the containerizer to update the resources.
-      containerizer->update(executor->containerId, executor->resources)
+      containerizer->update(
+          executor->containerId,
+          executor->allocatedResources())
         .onAny(defer(self(),
                      &Self::_reregisterExecutor,
                      lambda::_1,
@@ -4539,7 +4544,19 @@ void Slave::_statusUpdate(
     if (containerStatus->network_infos().size() == 0) {
       NetworkInfo* networkInfo = containerStatus->add_network_infos();
       NetworkInfo::IPAddress* ipAddress = networkInfo->add_ip_addresses();
+
+      // Set up IPv4 address.
+      //
+      // NOTE: By default the protocol is set to IPv4 and therefore we
+      // don't explicitly set the protocol here.
       ipAddress->set_ip_address(stringify(self().address.ip));
+
+      // Set up IPv6 address.
+      if (self().addresses.v6.isSome()) {
+        ipAddress = networkInfo->add_ip_addresses();
+        ipAddress->set_ip_address(stringify(self().addresses.v6->ip));
+        ipAddress->set_protocol(NetworkInfo::IPv6);
+      }
     }
   }
 
@@ -4584,7 +4601,7 @@ void Slave::_statusUpdate(
     // have been updated before sending the status update. Note that
     // duplicate terminal updates are not possible here because they
     // lead to an error from `Executor::updateTaskState`.
-    containerizer->update(executor->containerId, executor->resources)
+    containerizer->update(executor->containerId, executor->allocatedResources())
       .onAny(defer(self(),
                    &Slave::__statusUpdate,
                    lambda::_1,
@@ -5979,26 +5996,6 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
   }
 
   if (slaveState.isSome() && slaveState->info.isSome()) {
-    // Check for SlaveInfo compatibility.
-    // TODO(vinod): Also check for version compatibility.
-    // NOTE: We set the 'id' field in 'info' from the recovered slave,
-    // as a hack to compare the info created from options/flags with
-    // the recovered info.
-    info.mutable_id()->CopyFrom(slaveState->id);
-    if (flags.recover == "reconnect" &&
-        !(info == slaveState->info.get())) {
-      return Failure(strings::join(
-          "\n",
-          "Incompatible agent info detected.",
-          "------------------------------------------------------------",
-          "Old agent info:\n" + stringify(slaveState->info.get()),
-          "------------------------------------------------------------",
-          "New agent info:\n" + stringify(info),
-          "------------------------------------------------------------"));
-    }
-
-    info = slaveState->info.get(); // Recover the slave info.
-
     if (slaveState->errors > 0) {
       LOG(WARNING) << "Errors encountered during agent recovery: "
                    << slaveState->errors;
@@ -6006,10 +6003,52 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
       metrics.recovery_errors += slaveState->errors;
     }
 
-    // Recover the frameworks.
-    foreachvalue (const FrameworkState& frameworkState,
-                  slaveState->frameworks) {
-      recoverFramework(frameworkState, injectedExecutors, injectedTasks);
+    // Check for SlaveInfo compatibility.
+    // TODO(vinod): Also check for version compatibility.
+
+    SlaveInfo _info(info);
+    _info.mutable_id()->CopyFrom(slaveState->id);
+    if (flags.recover == "reconnect" &&
+        !(_info == slaveState->info.get())) {
+      string message = strings::join(
+          "\n",
+          "Incompatible agent info detected.",
+          "------------------------------------------------------------",
+          "Old agent info:\n" + stringify(slaveState->info.get()),
+          "------------------------------------------------------------",
+          "New agent info:\n" + stringify(info),
+          "------------------------------------------------------------");
+
+      // Fail the recovery unless the agent is recovering for the first
+      // time after host reboot.
+      //
+      // Prior to Mesos 1.4 we directly bypass the state recovery and
+      // start as a new agent upon reboot (introduced in MESOS-844).
+      // This unncessarily discards the existing agent ID (MESOS-6223).
+      // Starting in Mesos 1.4 we'll attempt to recover the slave state
+      // even after reboot but in case of slave info mismatch we'll fall
+      // back to recovering as a new agent (existing behavior). This
+      // prevents the agent from flapping if the slave info (resources,
+      // attributes, etc.) change is due to host maintenance associated
+      // with the reboot.
+      if (!state->rebooted) {
+        return Failure(message);
+      }
+
+      LOG(WARNING) << "Falling back to recover as a new agent due to error: "
+                   << message;
+
+      // Cleaning up the slave state to avoid any state recovery for the
+      // old agent.
+      slaveState = None();
+    } else {
+      info = slaveState->info.get(); // Recover the slave info.
+
+      // Recover the frameworks.
+      foreachvalue (const FrameworkState& frameworkState,
+                    slaveState->frameworks) {
+        recoverFramework(frameworkState, injectedExecutors, injectedTasks);
+      }
     }
   }
 
@@ -6384,9 +6423,8 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
     // calculating the available oversubscribed resources to offer.
     Resources oversubscribed;
     foreachvalue (Framework* framework, frameworks) {
-      foreachvalue (Executor* executor, framework->executors) {
-        oversubscribed += unallocated(executor->resources.revocable());
-      }
+      oversubscribed += unallocated(
+          framework->allocatedResources().revocable());
     }
 
     // Add oversubscribable resources to the total.
@@ -6401,6 +6439,7 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
 
       UpdateSlaveMessage message;
       message.mutable_slave_id()->CopyFrom(info.id());
+      message.set_type(UpdateSlaveMessage::OVERSUBSCRIBED);
       message.mutable_oversubscribed_resources()->CopyFrom(oversubscribed);
 
       CHECK_SOME(master);
@@ -6585,7 +6624,7 @@ Future<ResourceUsage> Slave::usage()
 
       ResourceUsage::Executor* entry = usage->add_executors();
       entry->mutable_executor_info()->CopyFrom(executor->info);
-      entry->mutable_allocated()->CopyFrom(executor->resources);
+      entry->mutable_allocated()->CopyFrom(executor->allocatedResources());
       entry->mutable_container_id()->CopyFrom(executor->containerId);
 
       // We include non-terminal tasks in ResourceUsage.
@@ -6950,9 +6989,7 @@ double Slave::_resources_used(const string& name)
   Resources used;
 
   foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      used += executor->resources.nonRevocable();
-    }
+    used += framework->allocatedResources().nonRevocable();
   }
 
   return used.get<Value::Scalar>(name).getOrElse(Value::Scalar()).value();
@@ -6994,9 +7031,7 @@ double Slave::_resources_revocable_used(const string& name)
   Resources used;
 
   foreachvalue (Framework* framework, frameworks) {
-    foreachvalue (Executor* executor, framework->executors) {
-      used += executor->resources.revocable();
-    }
+    used += framework->allocatedResources().revocable();
   }
 
   return used.get<Value::Scalar>(name).getOrElse(Value::Scalar()).value();
@@ -7417,6 +7452,36 @@ bool Framework::removePendingTask(
 }
 
 
+Resources Framework::allocatedResources() const
+{
+  Resources allocated;
+
+  foreachvalue (const Executor* executor, executors) {
+    allocated += executor->allocatedResources();
+  }
+
+  hashset<ExecutorID> pendingExecutors;
+
+  typedef hashmap<TaskID, TaskInfo> TaskMap;
+  foreachvalue (const TaskMap& pendingTasks, pending) {
+    foreachvalue (const TaskInfo& task, pendingTasks) {
+      allocated += task.resources();
+
+      ExecutorInfo executorInfo = slave->getExecutorInfo(info, task);
+      const ExecutorID& executorId = executorInfo.executor_id();
+
+      if (!executors.contains(executorId) &&
+          !pendingExecutors.contains(executorId)) {
+        allocated += executorInfo.resources();
+        pendingExecutors.insert(executorId);
+      }
+    }
+  }
+
+  return allocated;
+}
+
+
 Executor::Executor(
     Slave* _slave,
     const FrameworkID& _frameworkId,
@@ -7436,7 +7501,6 @@ Executor::Executor(
     checkpoint(_checkpoint),
     http(None()),
     pid(None()),
-    resources(_info.resources()),
     completedTasks(MAX_COMPLETED_TASKS_PER_EXECUTOR)
 {
   CHECK_NOTNULL(slave);
@@ -7484,8 +7548,6 @@ Task* Executor::addTask(const TaskInfo& task)
   Task* t = new Task(protobuf::createTask(task, TASK_STAGING, frameworkId));
 
   launchedTasks[task.task_id()] = t;
-
-  resources += task.resources();
 
   return t;
 }
@@ -7565,12 +7627,6 @@ void Executor::recoverTask(const TaskState& state, bool recheckpointTask)
   }
 
   launchedTasks[state.id] = task;
-
-  // NOTE: Since some tasks might have been terminated when the
-  // slave was down, the executor resources we capture here is an
-  // upper-bound. The actual resources needed (for live tasks) by
-  // the isolator will be calculated when the executor re-registers.
-  resources += state.info->resources();
 
   // Read updates to get the latest state of the task.
   foreach (const StatusUpdate& update, state.updates) {
@@ -7660,7 +7716,6 @@ Try<Nothing> Executor::updateTaskState(const TaskStatus& status)
     task = launchedTasks.at(status.task_id());
 
     if (terminal) {
-      resources -= task->resources(); // Release the resources.
       launchedTasks.erase(taskId);
     }
   } else if (terminatedTasks.contains(taskId)) {
@@ -7739,6 +7794,22 @@ Option<TaskGroupInfo> Executor::getQueuedTaskGroup(const TaskID& taskId)
   }
 
   return None();
+}
+
+
+Resources Executor::allocatedResources() const
+{
+  Resources allocatedResources = info.resources();
+
+  foreachvalue (const TaskInfo& task, queuedTasks) {
+    allocatedResources += task.resources();
+  }
+
+  foreachvalue (const Task* task, launchedTasks) {
+    allocatedResources += task->resources();
+  }
+
+  return allocatedResources;
 }
 
 

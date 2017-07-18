@@ -45,6 +45,7 @@ public:
   Option<std::string> hostname;
   bool hostname_lookup;
   Option<std::string> resources;
+  Option<std::string> resource_provider_config_dir;
   std::string isolation;
   std::string launcher;
 
@@ -167,6 +168,7 @@ public:
   std::string xfs_project_range;
 #endif
   bool http_command_executor;
+  Option<DomainInfo> domain;
 
   // The following flags are executable specific (e.g., since we only
   // have one instance of libprocess per execution, we only want to
@@ -181,6 +183,20 @@ public:
   // Optional IP discover script that will set the slave's IP.
   // If set, its output is expected to be a valid parseable IP string.
   Option<std::string> ip_discovery_command;
+
+  // IPv6 flags.
+  //
+  // NOTE: These IPv6 flags are currently input mechanisms
+  // for the operator to specify v6 addresses on which containers
+  // running on host network can listen. Mesos itself doesn't listen
+  // or communicate over v6 addresses at this point.
+  Option<std::string> ip6;
+
+  // Similar to the `ip_discovery_command` this optional discover
+  // script is expected to output a valid IPv6 string. Only one of the
+  // two options `ip6` or `ip6_discovery_command` can be set at any
+  // given point of time.
+  Option<std::string> ip6_discovery_command;
 };
 
 } // namespace slave {

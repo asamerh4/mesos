@@ -57,6 +57,8 @@ using std::set;
 using std::string;
 using std::vector;
 
+using process::Future;
+using process::Owned;
 using process::Failure;
 using process::Owned;
 
@@ -715,6 +717,39 @@ void json(JSON::ObjectWriter* writer, const TaskStatus& status)
 }
 
 
+static void json(
+    JSON::ObjectWriter* writer,
+    const DomainInfo::FaultDomain::RegionInfo& regionInfo)
+{
+  writer->field("name", regionInfo.name());
+}
+
+
+static void json(
+    JSON::ObjectWriter* writer,
+    const DomainInfo::FaultDomain::ZoneInfo& zoneInfo)
+{
+  writer->field("name", zoneInfo.name());
+}
+
+
+static void json(
+    JSON::ObjectWriter* writer,
+    const DomainInfo::FaultDomain& faultDomain)
+{
+    writer->field("region", faultDomain.region());
+    writer->field("zone", faultDomain.zone());
+}
+
+
+void json(JSON::ObjectWriter* writer, const DomainInfo& domainInfo)
+{
+  if (domainInfo.has_fault_domain()) {
+    writer->field("fault_domain", domainInfo.fault_domain());
+  }
+}
+
+
 static void json(JSON::NumberWriter* writer, const Value::Scalar& scalar)
 {
   writer->set(scalar.value());
@@ -812,10 +847,8 @@ bool approveViewFrameworkInfo(
     const Owned<ObjectApprover>& frameworksApprover,
     const FrameworkInfo& frameworkInfo)
 {
-  ObjectApprover::Object object;
-  object.framework_info = &frameworkInfo;
-
-  Try<bool> approved = frameworksApprover->approved(object);
+  Try<bool> approved =
+    frameworksApprover->approved(ObjectApprover::Object(frameworkInfo));
   if (approved.isError()) {
     LOG(WARNING) << "Error during FrameworkInfo authorization: "
                  << approved.error();
@@ -831,11 +864,8 @@ bool approveViewExecutorInfo(
     const ExecutorInfo& executorInfo,
     const FrameworkInfo& frameworkInfo)
 {
-  ObjectApprover::Object object;
-  object.executor_info = &executorInfo;
-  object.framework_info = &frameworkInfo;
-
-  Try<bool> approved = executorsApprover->approved(object);
+  Try<bool> approved = executorsApprover->approved(
+      ObjectApprover::Object(executorInfo, frameworkInfo));
   if (approved.isError()) {
     LOG(WARNING) << "Error during ExecutorInfo authorization: "
                  << approved.error();
@@ -851,11 +881,8 @@ bool approveViewTaskInfo(
     const TaskInfo& taskInfo,
     const FrameworkInfo& frameworkInfo)
 {
-  ObjectApprover::Object object;
-  object.task_info = &taskInfo;
-  object.framework_info = &frameworkInfo;
-
-  Try<bool> approved = tasksApprover->approved(object);
+  Try<bool> approved =
+    tasksApprover->approved(ObjectApprover::Object(taskInfo, frameworkInfo));
   if (approved.isError()) {
     LOG(WARNING) << "Error during TaskInfo authorization: " << approved.error();
     // TODO(joerg84): Consider exposing these errors to the caller.
@@ -870,11 +897,8 @@ bool approveViewTask(
     const Task& task,
     const FrameworkInfo& frameworkInfo)
 {
-  ObjectApprover::Object object;
-  object.task = &task;
-  object.framework_info = &frameworkInfo;
-
-  Try<bool> approved = tasksApprover->approved(object);
+  Try<bool> approved =
+    tasksApprover->approved(ObjectApprover::Object(task, frameworkInfo));
   if (approved.isError()) {
     LOG(WARNING) << "Error during Task authorization: " << approved.error();
     // TODO(joerg84): Consider exposing these errors to the caller.
@@ -887,9 +911,7 @@ bool approveViewTask(
 bool approveViewFlags(
     const Owned<ObjectApprover>& flagsApprover)
 {
-  ObjectApprover::Object object;
-
-  Try<bool> approved = flagsApprover->approved(object);
+  Try<bool> approved = flagsApprover->approved(ObjectApprover::Object());
   if (approved.isError()) {
     LOG(WARNING) << "Error during Flags authorization: " << approved.error();
     // TODO(joerg84): Consider exposing these errors to the caller.
@@ -945,10 +967,7 @@ bool approveViewRole(
     const Owned<ObjectApprover>& rolesApprover,
     const string& role)
 {
-  ObjectApprover::Object object;
-  object.value = &role;
-
-  Try<bool> approved = rolesApprover->approved(object);
+  Try<bool> approved = rolesApprover->approved(ObjectApprover::Object(role));
   if (approved.isError()) {
     LOG(WARNING) << "Error during Roles authorization: " << approved.error();
     // TODO(joerg84): Consider exposing these errors to the caller.
@@ -1122,5 +1141,69 @@ void logRequest(const process::http::Request& request)
                 ? " with X-Forwarded-For='" + forwardedFor.get() + "'"
                 : "");
 }
+
+
+Future<Owned<AuthorizationAcceptor>> AuthorizationAcceptor::create(
+    const Option<Principal>& principal,
+    const Option<Authorizer*>& authorizer,
+    const authorization::Action& action)
+{
+  if (authorizer.isNone()) {
+    return Owned<AuthorizationAcceptor>(
+        new AuthorizationAcceptor(Owned<ObjectApprover>(
+            new AcceptingObjectApprover())));
+  }
+
+  const Option<authorization::Subject> subject =
+    authorization::createSubject(principal);
+
+  return authorizer.get()->getObjectApprover(subject, action)
+    .then([=](const Owned<ObjectApprover>& approver) {
+      return Owned<AuthorizationAcceptor>(
+          new AuthorizationAcceptor(approver));
+    });
+}
+
+
+FrameworkIDAcceptor::FrameworkIDAcceptor(
+    const Option<std::string>& _frameworkId)
+{
+  if (_frameworkId.isSome()) {
+    FrameworkID frameworkId_;
+    frameworkId_.set_value(_frameworkId.get());
+    frameworkId = frameworkId_;
+  }
+}
+
+
+TaskIDAcceptor::TaskIDAcceptor(const Option<std::string>& _taskId)
+{
+  if (_taskId.isSome()) {
+    TaskID taskId_;
+    taskId_.set_value(_taskId.get());
+    taskId = taskId_;
+  }
+}
+
+
+bool FrameworkIDAcceptor::accept(const FrameworkID& _frameworkId)
+{
+  if (frameworkId.isSome()) {
+    return frameworkId.get() == _frameworkId;
+  }
+
+  return true;
+}
+
+
+bool TaskIDAcceptor::accept(const TaskID& _taskId)
+{
+  if (taskId.isSome()) {
+    return taskId.get() == _taskId;
+  }
+
+  return true;
+}
+
 
 }  // namespace mesos {

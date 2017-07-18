@@ -24,6 +24,27 @@
 #include <stout/os/mkdir.hpp>
 #include <stout/os/realpath.hpp>
 
+#include <stout/internal/windows/attributes.hpp>
+#include <stout/internal/windows/longpath.hpp>
+
+
+namespace os {
+namespace stat {
+
+// Specify whether symlink path arguments should be followed or
+// not. APIs in the os::stat family that take a FollowSymlink
+// argument all provide FollowSymlink::FOLLOW_SYMLINK as the default value,
+// so they will follow symlinks unless otherwise specified.
+enum class FollowSymlink
+{
+  DO_NOT_FOLLOW_SYMLINK,
+  FOLLOW_SYMLINK
+};
+
+} // namespace stat {
+} // namespace os {
+
+
 // We pass this struct to `DeviceIoControl` to get information about a reparse
 // point (including things like whether it's a symlink). It is normally part of
 // the Device Driver Kit (DDK), specifically `nitfs.h`, but rather than taking
@@ -112,15 +133,14 @@ struct SymbolicLink
 // Checks file/folder attributes for a path to see if the reparse point
 // attribute is set; this indicates whether the path points at a reparse point,
 // rather than a "normal" file or folder.
-inline Try<bool> reparse_point_attribute_set(const std::string& absolute_path)
+inline Try<bool> reparse_point_attribute_set(const std::wstring& absolute_path)
 {
-  const DWORD attributes = ::GetFileAttributes(absolute_path.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES) {
-    return WindowsError(
-        "Failed to get attributes for file '" + absolute_path + "'");
+  const Try<DWORD> attributes = get_file_attributes(absolute_path.data());
+  if (attributes.isError()) {
+    return Error(attributes.error());
   }
 
-  return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+  return (attributes.get() & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 
 
@@ -159,13 +179,14 @@ inline Try<SymbolicLink> build_symbolic_link(const REPARSE_DATA_BUFFER& data)
 // refer to the symlink rather than the file or folder the symlink points at.
 inline Try<SharedHandle> get_handle_no_follow(const std::string& absolute_path)
 {
-  struct _stat absolute_path_stat;
-  bool resolved_path_is_directory = false;
-  if (::_stat(absolute_path.c_str(), &absolute_path_stat) == 0) {
-    resolved_path_is_directory = S_ISDIR(absolute_path_stat.st_mode);
-  } else {
-    return ErrnoError("'_stat' failed on path '" + absolute_path + "'");
+  const Try<DWORD> attributes = ::internal::windows::get_file_attributes(
+      ::internal::windows::longpath(absolute_path));
+
+  if (attributes.isError()) {
+    return Error(attributes.error());
   }
+
+  bool resolved_path_is_directory = attributes.get() & FILE_ATTRIBUTE_DIRECTORY;
 
   // NOTE: According to the `CreateFile` documentation[1], the `OPEN_EXISTING`
   // and `FILE_FLAG_OPEN_REPARSE_POINT` flags need to be used when getting a
@@ -192,8 +213,8 @@ inline Try<SharedHandle> get_handle_no_follow(const std::string& absolute_path)
     ? (FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
     : FILE_FLAG_OPEN_REPARSE_POINT;
 
-  const HANDLE handle = ::CreateFile(
-      absolute_path.c_str(),
+  const HANDLE handle = ::CreateFileW(
+      longpath(absolute_path).data(),
       GENERIC_READ,     // Open the file for reading only.
       FILE_SHARE_READ,  // Just reading this file, allow others to do the same.
       nullptr,          // Ignored.
@@ -299,15 +320,19 @@ inline Try<Nothing> create_symbolic_link(
 
   // Determine if target is a folder or a file. This makes a difference
   // in the way we call `create_symbolic_link`.
-  struct _stat absolute_target_path_stat;
-  if (::_stat(absolute_target_path.c_str(), &absolute_target_path_stat) != 0) {
-    return ErrnoError("'_stat' failed on path '" + absolute_target_path + "'");
+  const Try<DWORD> attributes = ::internal::windows::get_file_attributes(
+      ::internal::windows::longpath(absolute_target_path));
+
+  if (attributes.isError()) {
+    return Error(attributes.error());
   }
 
-  const bool target_is_folder = S_ISDIR(absolute_target_path_stat.st_mode);
+  const bool target_is_folder = attributes.get() & FILE_ATTRIBUTE_DIRECTORY;
 
   // Bail out if target is already a reparse point.
-  Try<bool> attribute_set = reparse_point_attribute_set(absolute_target_path);
+  Try<bool> attribute_set = reparse_point_attribute_set(
+      longpath(absolute_target_path));
+
   if (!attribute_set.isSome()) {
     return Error(
         "Could not get reparse point attribute for '" + absolute_target_path +
@@ -327,10 +352,12 @@ inline Try<Nothing> create_symbolic_link(
   // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363866(v=vs.85).aspx
   static std::mutex adjust_privileges_mutex;
   synchronized(adjust_privileges_mutex) {
-    if (!::CreateSymbolicLink(
-        reparse_point.c_str(),  // path to the symbolic link
-        target.c_str(),        // symlink target
-        target_is_folder ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0)) {
+    if (!::CreateSymbolicLinkW(
+            // Path to link.
+            longpath(real_reparse_point_path.get()).data(),
+            // Path to target.
+            longpath(real_target_path.get()).data(),
+            target_is_folder ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0)) {
       return WindowsError(
           "'internal::windows::create_symbolic_link': 'CreateSymbolicLink' "
           "call failed");

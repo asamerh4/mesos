@@ -58,7 +58,8 @@ public:
         inverseOfferCallback,
       const Option<std::set<std::string>>&
         fairnessExcludeResourceNames = None(),
-      bool filterGpuResources = true);
+      bool filterGpuResources = true,
+      const Option<DomainInfo>& domain = None());
 
   void recover(
       const int expectedAgentCount,
@@ -98,7 +99,7 @@ public:
 
   void updateSlave(
       const SlaveID& slave,
-      const Option<Resources>& oversubscribed = None(),
+      const Option<Resources>& total = None(),
       const Option<std::vector<SlaveInfo::Capability>>& capabilities = None());
 
   void activateSlave(
@@ -197,7 +198,8 @@ public:
         inverseOfferCallback,
       const Option<std::set<std::string>>&
         fairnessExcludeResourceNames = None(),
-      bool filterGpuResources = true) = 0;
+      bool filterGpuResources = true,
+      const Option<DomainInfo>& domain = None()) = 0;
 
   virtual void recover(
       const int expectedAgentCount,
@@ -237,7 +239,7 @@ public:
 
   virtual void updateSlave(
       const SlaveID& slave,
-      const Option<Resources>& oversubscribed = None(),
+      const Option<Resources>& total = None(),
       const Option<std::vector<SlaveInfo::Capability>>&
           capabilities = None()) = 0;
 
@@ -345,7 +347,8 @@ inline void MesosAllocator<AllocatorProcess>::initialize(
               const hashmap<SlaveID, UnavailableResources>&)>&
       inverseOfferCallback,
     const Option<std::set<std::string>>& fairnessExcludeResourceNames,
-    bool filterGpuResources)
+    bool filterGpuResources,
+    const Option<DomainInfo>& domain)
 {
   process::dispatch(
       process,
@@ -354,7 +357,8 @@ inline void MesosAllocator<AllocatorProcess>::initialize(
       offerCallback,
       inverseOfferCallback,
       fairnessExcludeResourceNames,
-      filterGpuResources);
+      filterGpuResources,
+      domain);
 }
 
 
@@ -473,14 +477,14 @@ inline void MesosAllocator<AllocatorProcess>::removeSlave(
 template <typename AllocatorProcess>
 inline void MesosAllocator<AllocatorProcess>::updateSlave(
     const SlaveID& slaveId,
-    const Option<Resources>& oversubscribed,
+    const Option<Resources>& total,
     const Option<std::vector<SlaveInfo::Capability>>& capabilities)
 {
   process::dispatch(
       process,
       &MesosAllocatorProcess::updateSlave,
       slaveId,
-      oversubscribed,
+      total,
       capabilities);
 }
 

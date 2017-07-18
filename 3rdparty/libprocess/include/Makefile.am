@@ -48,7 +48,6 @@ nobase_include_HEADERS =		\
   process/metrics/metric.hpp		\
   process/metrics/metrics.hpp		\
   process/metrics/timer.hpp		\
-  process/posix/subprocess.hpp		\
   process/network.hpp			\
   process/once.hpp			\
   process/owned.hpp			\
@@ -65,12 +64,10 @@ nobase_include_HEADERS =		\
   process/statistics.hpp		\
   process/system.hpp			\
   process/subprocess.hpp		\
-  process/subprocess_base.hpp		\
   process/ssl/flags.hpp			\
   process/ssl/gtest.hpp			\
   process/ssl/utilities.hpp		\
   process/time.hpp			\
   process/timeout.hpp			\
   process/timer.hpp			\
-  process/timeseries.hpp		\
-  process/windows/subprocess.hpp
+  process/timeseries.hpp

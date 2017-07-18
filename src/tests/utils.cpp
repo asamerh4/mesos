@@ -34,6 +34,7 @@
 
 namespace http = process::http;
 namespace inet = process::network::inet;
+namespace inet4 = process::network::inet4;
 
 using std::set;
 using std::string;
@@ -79,7 +80,7 @@ Try<uint16_t> getFreePort()
     return Error(socket.error());
   }
 
-  Try<inet::Address> address = socket->bind(inet::Address::ANY_ANY());
+  Try<inet::Address> address = socket->bind(inet4::Address::ANY_ANY());
 
   if (address.isError()) {
     return Error(address.error());
@@ -192,7 +193,7 @@ string getWebUIDir()
 }
 
 
-Try<net::IPNetwork> getNonLoopbackIP()
+Try<net::IP::Network> getNonLoopbackIP()
 {
   Try<set<string>> links = net::links();
   if (links.isError()) {
@@ -202,18 +203,18 @@ Try<net::IPNetwork> getNonLoopbackIP()
   }
 
   foreach (const string& link, links.get()) {
-    Result<net::IPNetwork> hostIPNetwork =
-      net::IPNetwork::fromLinkDevice(link, AF_INET);
+    Result<net::IP::Network> hostNetwork =
+      net::IP::Network::fromLinkDevice(link, AF_INET);
 
-    if (hostIPNetwork.isError()) {
+    if (hostNetwork.isError()) {
       return Error(
           "Unable to find a non-loopback address: " +
-          hostIPNetwork.error());
+          hostNetwork.error());
     }
 
-    if (hostIPNetwork.isSome() &&
-        (hostIPNetwork.get() != net::IPNetwork::LOOPBACK_V4())) {
-      return hostIPNetwork.get();
+    if (hostNetwork.isSome() &&
+        (hostNetwork.get() != net::IP::Network::LOOPBACK_V4())) {
+      return hostNetwork.get();
     }
   }
 

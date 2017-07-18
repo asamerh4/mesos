@@ -150,13 +150,15 @@ void HierarchicalAllocatorProcess::initialize(
              const hashmap<SlaveID, UnavailableResources>&)>&
       _inverseOfferCallback,
     const Option<set<string>>& _fairnessExcludeResourceNames,
-    bool _filterGpuResources)
+    bool _filterGpuResources,
+    const Option<DomainInfo>& _domain)
 {
   allocationInterval = _allocationInterval;
   offerCallback = _offerCallback;
   inverseOfferCallback = _inverseOfferCallback;
   fairnessExcludeResourceNames = _fairnessExcludeResourceNames;
   filterGpuResources = _filterGpuResources;
+  domain = _domain;
   initialized = true;
   paused = false;
 
@@ -560,6 +562,10 @@ void HierarchicalAllocatorProcess::addSlave(
   slave.hostname = slaveInfo.hostname();
   slave.capabilities = protobuf::slave::Capabilities(capabilities);
 
+  if (slaveInfo.has_domain()) {
+    slave.domain = slaveInfo.domain();
+  }
+
   // NOTE: We currently implement maintenance in the allocator to be able to
   // leverage state and features such as the FrameworkSorter and OfferFilter.
   if (unavailability.isSome()) {
@@ -623,7 +629,7 @@ void HierarchicalAllocatorProcess::removeSlave(
 
 void HierarchicalAllocatorProcess::updateSlave(
     const SlaveID& slaveId,
-    const Option<Resources>& oversubscribed,
+    const Option<Resources>& total,
     const Option<vector<SlaveInfo::Capability>>& capabilities)
 {
   CHECK(initialized);
@@ -648,42 +654,11 @@ void HierarchicalAllocatorProcess::updateSlave(
     }
   }
 
-  if (oversubscribed.isSome()) {
-    // Check that all the oversubscribed resources are revocable.
-    CHECK_EQ(oversubscribed.get(), oversubscribed->revocable());
+  if (total.isSome()) {
+    updated = updateSlaveTotal(slaveId, total.get());
 
-    const Resources oldRevocable = slave.total.revocable();
-
-    if (oldRevocable != oversubscribed.get()) {
-      // Update the total resources.
-      //
-      // Reset the total resources to include the non-revocable resources,
-      // plus the new estimate of oversubscribed resources.
-      //
-      // NOTE: All modifications to revocable resources in the allocator for
-      // `slaveId` are lost.
-      //
-      // TODO(alexr): Update this math once the source of revocable resources
-      // is extended beyond oversubscription.
-      slave.total = slave.total.nonRevocable() + oversubscribed.get();
-
-      // Update the total resources in the `roleSorter` by removing the
-      // previous oversubscribed resources and adding the new
-      // oversubscription estimate.
-      roleSorter->remove(slaveId, oldRevocable);
-      roleSorter->add(slaveId, oversubscribed.get());
-
-      updated = true;
-
-      // NOTE: We do not need to update `quotaRoleSorter` because this
-      // function only changes the revocable resources on the slave, but
-      // the quota role sorter only manages non-revocable resources.
-
-      LOG(INFO) << "Agent " << slaveId << " (" << slave.hostname << ")"
-                << " updated with oversubscribed resources "
-                << oversubscribed.get() << " (total: " << slave.total
-                << ", allocated: " << slave.allocated << ")";
-    }
+    LOG(INFO) << "Agent " << slaveId << " (" << slave.hostname << ")"
+              << " updated with total resources " << total.get();
   }
 
   if (updated) {
@@ -1630,6 +1605,12 @@ void HierarchicalAllocatorProcess::__allocate()
           continue;
         }
 
+        // If this framework is not region-aware, don't offer it
+        // resources on agents in remote regions.
+        if (!framework.capabilities.regionAware && isRemoteSlave(slave)) {
+          continue;
+        }
+
         // Calculate the currently available resources on the slave, which
         // is the difference in non-shared resources between total and
         // allocated, plus all shared resources on the agent (if applicable).
@@ -1806,6 +1787,12 @@ void HierarchicalAllocatorProcess::__allocate()
         if (filterGpuResources &&
             !framework.capabilities.gpuResources &&
             slave.total.gpus().getOrElse(0) > 0) {
+          continue;
+        }
+
+        // If this framework is not region-aware, don't offer it
+        // resources on agents in remote regions.
+        if (!framework.capabilities.regionAware && isRemoteSlave(slave)) {
           continue;
         }
 
@@ -2365,7 +2352,7 @@ void HierarchicalAllocatorProcess::untrackFrameworkUnderRole(
 }
 
 
-void HierarchicalAllocatorProcess::updateSlaveTotal(
+bool HierarchicalAllocatorProcess::updateSlaveTotal(
     const SlaveID& slaveId,
     const Resources& total)
 {
@@ -2374,6 +2361,11 @@ void HierarchicalAllocatorProcess::updateSlaveTotal(
   Slave& slave = slaves.at(slaveId);
 
   const Resources oldTotal = slave.total;
+
+  if (oldTotal == total) {
+    return false;
+  }
+
   slave.total = total;
 
   // Currently `roleSorter` and `quotaRoleSorter`, being the root-level
@@ -2387,6 +2379,42 @@ void HierarchicalAllocatorProcess::updateSlaveTotal(
   // See comment at `quotaRoleSorter` declaration regarding non-revocable.
   quotaRoleSorter->remove(slaveId, oldTotal.nonRevocable());
   quotaRoleSorter->add(slaveId, total.nonRevocable());
+
+  return true;
+}
+
+
+bool HierarchicalAllocatorProcess::isRemoteSlave(const Slave& slave) const
+{
+  // If the slave does not have a configured domain, assume it is not remote.
+  if (slave.domain.isNone()) {
+    return false;
+  }
+
+  // The current version of the Mesos agent refuses to startup if a
+  // domain is specified without also including a fault domain. That
+  // might change in the future, if more types of domains are added.
+  // For forward compatibility, we treat agents with a configured
+  // domain but no fault domain as having no configured domain.
+  if (!slave.domain->has_fault_domain()) {
+    return false;
+  }
+
+  // If the slave has a configured domain (and it has been allowed to
+  // register with the master), the master must also have a configured
+  // domain.
+  CHECK(domain.isSome());
+
+  // The master will not startup if configured with a domain but no
+  // fault domain.
+  CHECK(domain->has_fault_domain());
+
+  const DomainInfo::FaultDomain::RegionInfo& masterRegion =
+    domain->fault_domain().region();
+  const DomainInfo::FaultDomain::RegionInfo& slaveRegion =
+    slave.domain->fault_domain().region();
+
+  return masterRegion != slaveRegion;
 }
 
 } // namespace internal {

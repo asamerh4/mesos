@@ -774,6 +774,7 @@ v1_HEADERS =								\
   $(top_srcdir)/include/mesos/v1/mesos.hpp				\
   $(top_srcdir)/include/mesos/v1/mesos.proto				\
   $(top_srcdir)/include/mesos/v1/resources.hpp				\
+  $(top_srcdir)/include/mesos/v1/resource_provider.hpp			\
   $(top_srcdir)/include/mesos/v1/scheduler.hpp				\
   $(top_srcdir)/include/mesos/v1/values.hpp
 
@@ -943,6 +944,11 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   module/manager.cpp							\
   oci/spec.cpp								\
   posix/rlimits.cpp							\
+  resource_provider/daemon.cpp						\
+  resource_provider/driver.cpp						\
+  resource_provider/local.cpp						\
+  resource_provider/manager.cpp						\
+  resource_provider/storage/provider.cpp				\
   sched/sched.cpp							\
   scheduler/scheduler.cpp						\
   secret/resolver.cpp							\
@@ -1076,6 +1082,11 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   messages/messages.hpp							\
   module/manager.hpp							\
   posix/rlimits.hpp							\
+  resource_provider/daemon.hpp						\
+  resource_provider/local.hpp						\
+  resource_provider/manager.hpp						\
+  resource_provider/message.hpp						\
+  resource_provider/storage/provider.hpp				\
   sched/constants.hpp							\
   sched/flags.hpp							\
   scheduler/constants.hpp						\
@@ -1097,6 +1108,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/containerizer.hpp					\
   slave/containerizer/docker.hpp					\
   slave/containerizer/fetcher.hpp					\
+  slave/containerizer/fetcher_process.hpp				\
   slave/containerizer/mesos/constants.hpp				\
   slave/containerizer/mesos/containerizer.hpp				\
   slave/containerizer/mesos/isolator.hpp				\
@@ -1150,6 +1162,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   tests/limiter.hpp							\
   tests/mesos.hpp							\
   tests/mock_docker.hpp							\
+  tests/mock_fetcher.hpp						\
   tests/mock_slave.hpp							\
   tests/mock_registrar.hpp						\
   tests/module.hpp							\
@@ -2322,6 +2335,7 @@ mesos_tests_SOURCES =						\
   tests/mesos.cpp						\
   tests/metrics_tests.cpp					\
   tests/mock_docker.cpp						\
+  tests/mock_fetcher.cpp					\
   tests/mock_slave.cpp						\
   tests/mock_registrar.cpp					\
   tests/module.cpp						\
@@ -2339,6 +2353,7 @@ mesos_tests_SOURCES =						\
   tests/reservation_endpoints_tests.cpp				\
   tests/reservation_tests.cpp					\
   tests/resource_offers_tests.cpp				\
+  tests/resource_provider_http_api_tests.cpp			\
   tests/resources_tests.cpp					\
   tests/resources_utils.cpp					\
   tests/role_tests.cpp						\
@@ -2576,6 +2591,11 @@ uninstall-hook:
 # http://lists.gnu.org/archive/html/automake/2013-01/msg00051.html
 check-local: tests
 	$(TEST_DRIVER) ./mesos-tests
+
+# We use distclean-local to remove core file left by sefgaulting perf. This can
+# be removed once (MESOS-7160) has been fixed.
+distclean-local:
+	-rm -f core
 
 if INSTALL_TESTS
 # If we enabled test installation, we can run the tests from the

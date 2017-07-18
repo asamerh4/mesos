@@ -398,6 +398,14 @@ set(POSIX_SRC
   posix/rlimits.cpp
   )
 
+set(RESOURCE_PROVIDER_SRC
+  resource_provider/daemon.cpp
+  resource_provider/driver.cpp
+  resource_provider/local.cpp
+  resource_provider/manager.cpp
+  resource_provider/storage/provider.cpp
+  )
+
 set(SCHEDULER_SRC
   sched/sched.cpp
   scheduler/scheduler.cpp
@@ -487,6 +495,7 @@ set(MESOS_SRC
   ${MESSAGES_SRC}
   ${MODULE_SRC}
   ${OCI_SRC}
+  ${RESOURCE_PROVIDER_SRC}
   ${SCHEDULER_SRC}
   ${SECRET_SRC}
   ${STATE_SRC}

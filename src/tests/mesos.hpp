@@ -74,7 +74,6 @@
 #include "slave/slave.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
-#include "slave/containerizer/fetcher.hpp"
 
 #include "slave/containerizer/mesos/containerizer.hpp"
 
@@ -1018,6 +1017,21 @@ inline hashmap<std::string, double> convertToHashmap(
 }
 
 
+// Helper to create DomainInfo.
+template <typename TDomainInfo>
+inline TDomainInfo createDomainInfo(
+    const std::string& regionName,
+    const std::string& zoneName)
+{
+  TDomainInfo domain;
+
+  domain.mutable_fault_domain()->mutable_region()->set_name(regionName);
+  domain.mutable_fault_domain()->mutable_zone()->set_name(zoneName);
+
+  return domain;
+}
+
+
 // Helpers for creating offer operations.
 template <typename TResources, typename TOffer>
 inline typename TOffer::Operation RESERVE(const TResources& resources)
@@ -1325,6 +1339,13 @@ template <typename... Args>
 inline hashmap<std::string, double> convertToHashmap(Args&&... args)
 {
   return common::convertToHashmap<WeightInfo>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline DomainInfo createDomainInfo(Args&&... args)
+{
+  return common::createDomainInfo<DomainInfo>(std::forward<Args>(args)...);
 }
 
 
@@ -2225,47 +2246,6 @@ using MockHTTPExecutor = tests::executor::MockHTTPExecutor<
     mesos::v1::executor::Event>;
 
 } // namespace v1 {
-
-
-// Definition of a mock FetcherProcess to be used in tests with gmock.
-class MockFetcherProcess : public slave::FetcherProcess
-{
-public:
-  MockFetcherProcess(const slave::Flags& flags);
-  virtual ~MockFetcherProcess();
-
-  MOCK_METHOD5(_fetch, process::Future<Nothing>(
-      const hashmap<
-          CommandInfo::URI,
-          Option<process::Future<std::shared_ptr<Cache::Entry>>>>&
-        entries,
-      const ContainerID& containerId,
-      const std::string& sandboxDirectory,
-      const std::string& cacheDirectory,
-      const Option<std::string>& user));
-
-  process::Future<Nothing> unmocked__fetch(
-      const hashmap<
-          CommandInfo::URI,
-          Option<process::Future<std::shared_ptr<Cache::Entry>>>>&
-        entries,
-      const ContainerID& containerId,
-      const std::string& sandboxDirectory,
-      const std::string& cacheDirectory,
-      const Option<std::string>& user);
-
-  MOCK_METHOD4(run, process::Future<Nothing>(
-      const ContainerID& containerId,
-      const std::string& sandboxDirectory,
-      const Option<std::string>& user,
-      const mesos::fetcher::FetcherInfo& info));
-
-  process::Future<Nothing> unmocked_run(
-      const ContainerID& containerId,
-      const std::string& sandboxDirectory,
-      const Option<std::string>& user,
-      const mesos::fetcher::FetcherInfo& info);
-};
 
 
 // Definition of a MockAuthorizer that can be used in tests with gmock.

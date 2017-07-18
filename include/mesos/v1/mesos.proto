@@ -65,8 +65,8 @@ message AgentID {
  * A framework-generated ID to distinguish a task. The ID must remain
  * unique while the task is active. A framework can reuse an ID _only_
  * if the previous task with the same ID has reached a terminal state
- * (e.g., TASK_FINISHED, TASK_LOST, TASK_KILLED, etc.). However,
- * reusing task IDs is strongly discouraged (MESOS-2198).
+ * (e.g., TASK_FINISHED, TASK_KILLED, etc.). However, reusing task IDs
+ * is strongly discouraged (MESOS-2198).
  */
 message TaskID {
   required string value = 1;
@@ -369,6 +369,18 @@ message FrameworkInfo {
       // reservations if it uses the `Resource.reservations` field, and
       // `Resource.reservations_size() > 1`.
       RESERVATION_REFINEMENT = 7; // EXPERIMENTAL.
+
+      // Indicates that the framework is prepared to receive offers
+      // for agents whose region is different from the master's
+      // region. Network links between hosts in different regions
+      // typically have higher latency and lower bandwidth than
+      // network links within a region, so frameworks should be
+      // careful to only place suitable workloads in remote regions.
+      // Frameworks that are not region-aware will never receive
+      // offers for remote agents; region-aware frameworks are assumed
+      // to implement their own logic to decide which workloads (if
+      // any) are suitable for placement on remote agents.
+      REGION_AWARE = 8;
     }
 
     // Enum fields should be optional, see: MESOS-4997.
@@ -764,6 +776,60 @@ message ExecutorInfo {
 
 
 /**
+ * Describes a domain. A domain is a collection of hosts that have
+ * similar characteristics. Mesos currently only supports "fault
+ * domains", which identify groups of hosts with similar failure
+ * characteristics.
+ *
+ * Frameworks can generally assume that network links between hosts in
+ * the same fault domain have lower latency, higher bandwidth, and better
+ * availability than network links between hosts in different domains.
+ * Schedulers may prefer to place network-intensive workloads in the
+ * same domain, as this may improve performance. Conversely, a single
+ * failure that affects a host in a domain may be more likely to
+ * affect other hosts in the same domain; hence, schedulers may prefer
+ * to place workloads that require high availability in multiple
+ * domains. (For example, all the hosts in a single rack might lose
+ * power or network connectivity simultaneously.)
+ *
+ * There are two kinds of fault domains: regions and zones. Regions
+ * offer the highest degree of fault isolation, but network latency
+ * between regions is typically high (typically >50 ms). Zones offer a
+ * modest degree of fault isolation along with reasonably low network
+ * latency (typically <10 ms).
+ *
+ * The mapping from fault domains to physical infrastructure is up to
+ * the operator to configure. In cloud environments, regions and zones
+ * can be mapped to the "region" and "availability zone" concepts
+ * exposed by most cloud providers, respectively. In on-premise
+ * deployments, regions and zones can be mapped to data centers and
+ * racks, respectively.
+ *
+ * Both masters and agents can be configured with domains. Frameworks
+ * can compare the domains of two hosts to determine if the hosts are
+ * in the same zone, in different zones in the same region, or in
+ * different regions. Note that all masters in a given Mesos cluster
+ * must be in the same region.
+ */
+message DomainInfo {
+  message FaultDomain {
+    message RegionInfo {
+      required string name = 1;
+    }
+
+    message ZoneInfo {
+      required string name = 1;
+    }
+
+    required RegionInfo region = 1;
+    required ZoneInfo zone = 2;
+  }
+
+  optional FaultDomain fault_domain = 1;
+}
+
+
+/**
  * Describes a master. This will probably have more fields in the
  * future which might be used, for example, to link a framework webui
  * to a master webui.
@@ -799,6 +865,10 @@ message MasterInfo {
   // and supersedes the use of `ip`, `port` and `hostname`.
   // Since Mesos 0.24.
   optional Address address = 7;
+
+  // The domain that this master belongs to. All masters in a Mesos
+  // cluster should belong to the same region.
+  optional DomainInfo domain = 8;
 }
 
 
@@ -818,6 +888,12 @@ message AgentInfo {
 
   repeated Attribute attributes = 5;
   optional AgentID id = 6;
+
+  // The domain that this agent belongs to. If the agent's region
+  // differs from the master's region, it will not appear in resource
+  // offers to frameworks that have not enabled the REGION_AWARE
+  // capability.
+  optional DomainInfo domain = 10;
 
   message Capability {
     enum Type {
@@ -889,6 +965,20 @@ message ResourceProviderInfo {
   optional ResourceProviderID id = 1;
   repeated Attribute attributes = 2;
   repeated Resource resources = 3;
+
+  // The type of the resource provider. This uniquely identifies a
+  // resource provider implementation. For instance:
+  //     org.apache.mesos.rp.local.storage
+  //
+  // Please follow to Java package naming convention
+  // (https://en.wikipedia.org/wiki/Java_package#Package_naming_conventions)
+  // to avoid conflicts on type names.
+  required string type = 4;
+
+  // The name of the resource provider. There could be multiple
+  // instances of a type of resource provider. The name field is used
+  // to distinguish these instances.
+  required string name = 5;
 }
 
 
@@ -1648,6 +1738,9 @@ message Offer {
   // URL for reaching the agent running on the host.
   optional URL url = 8;
 
+  // The domain of the agent.
+  optional DomainInfo domain = 11;
+
   repeated Resource resources = 5;
   repeated Attribute attributes = 7;
   repeated ExecutorID executor_ids = 6;
@@ -1923,9 +2016,13 @@ enum TaskState {
 
   // In Mesos 1.3, this will only be sent when the framework does NOT
   // opt-in to the PARTITION_AWARE capability.
-  TASK_LOST = 5;     // TERMINAL: The task failed but can be rescheduled.
+  //
+  // NOTE: This state is not always terminal. For example, tasks might
+  // transition from TASK_LOST to TASK_RUNNING or other states when a
+  // partitioned agent re-registers.
+  TASK_LOST = 5;     // The task failed but can be rescheduled.
 
-  // The following task statuses are only sent when the framework
+  // The following task states are only sent when the framework
   // opts-in to the PARTITION_AWARE capability.
 
   // The task failed to launch because of a transient error. The
@@ -2502,7 +2599,7 @@ message NetworkInfo {
     // request the network isolator on the Agent to assign an IP address to the
     // container being launched. If a specific IP address is specified in
     // ip_address, this field should not be set.
-    optional Protocol protocol = 1;
+    optional Protocol protocol = 1 [default = IPv4];
 
     // Statically assigned IP provided by the Framework. This IP will be
     // assigned to the container by the network isolator module on the Agent.
@@ -2611,8 +2708,16 @@ message CapabilityInfo {
  * E.g, capabilities, limits etc.
  */
 message LinuxInfo {
-  // Represents the capability whitelist.
-  optional CapabilityInfo capability_info = 1;
+  // Since 1.4.0, deprecated in favor of `effective_capabilities`.
+  optional CapabilityInfo capability_info = 1 [deprecated = true];
+
+  // The set of capabilities that are allowed but not initially
+  // granted to tasks.
+  optional CapabilityInfo bounding_capabilities = 2;
+
+  // Represents the set of capabilities that the task will
+  // be executed with.
+  optional CapabilityInfo effective_capabilities = 3;
 }
 
 

@@ -58,6 +58,7 @@ set(MESOS_TESTS_UTILS_SRC
   main.cpp
   mesos.cpp
   mock_docker.cpp
+  mock_fetcher.cpp
   mock_registrar.cpp
   mock_slave.cpp
   module.cpp
@@ -114,6 +115,7 @@ set(MESOS_TESTS_SRC
   protobuf_io_tests.cpp
   rate_limiting_tests.cpp
   resource_offers_tests.cpp
+  resource_provider_http_api_tests.cpp
   resources_tests.cpp
   role_tests.cpp
   scheduler_driver_tests.cpp
