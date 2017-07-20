@@ -69,6 +69,11 @@ AC_CONFIG_FILES([3rdparty/gmock_sources.cc])
 # Optional features.
 ###############################################################################
 
+AC_ARG_ENABLE([lock_free_run_queue],
+              AS_HELP_STRING([--enable-lock-free-run-queue],
+                             [enables the lock free run queue]),
+                             [], [enable_lock_free_run_queue=no])
+
 AC_ARG_ENABLE([hardening],
               AS_HELP_STRING([--disable-hardening],
                              [disables security measures such as stack
@@ -142,6 +147,13 @@ AC_ARG_WITH([boost],
                            package in lieu of an installed version at a
                            location prefixed by the given path]),
             [without_bundled_boost=yes], [])
+
+AC_ARG_WITH([concurrentqueue],
+            AS_HELP_STRING([--with-concurrentqueue@<:@=DIR@:>@],
+                           [excludes building and using the bundled concurrentqueue
+                           package in lieu of an installed version at a
+                           location prefixed by the given path]),
+            [without_bundled_concurrentqueue=yes], [])
 
 AC_ARG_WITH([curl],
             AS_HELP_STRING([--with-curl=@<:@=DIR@:>@],
@@ -223,10 +235,13 @@ AC_ARG_WITH([svn],
 ###############################################################################
 AC_ARG_VAR([TEST_DRIVER], [executable and arguments of a test driver])
 
-
 ###############################################################################
 # Compiler checks.
 ###############################################################################
+
+# Check if we should use the lock free run queue.
+AS_IF([test "x$enable_lock_free_run_queue" = "xyes"],
+      [AC_DEFINE([LOCK_FREE_RUN_QUEUE])])
 
 # Check to see if we should harden or not.
 AM_CONDITIONAL([ENABLE_HARDENING], [test x"$enable_hardening" = "xyes"])
@@ -503,6 +518,43 @@ else
 fi
 
 AM_CONDITIONAL([WITH_BUNDLED_BOOST], [test "x$with_bundled_boost" = "xyes"])
+
+
+# We use "-isystem" instead of "-I" to add concurrentqueue to the include
+# search path. This disables compiler warnings inside concurrentqueue
+# headers since we don't own the library.
+if test -n "`echo $with_concurrentqueue`"; then
+  CPPFLAGS="$CPPFLAGS -isystem ${with_concurrentqueue}"
+fi
+
+# Check if user has asked us to use a preinstalled concurrentqueue,
+# or if they asked us to ignore all bundled libraries while compiling
+# and linking.
+if test "x$without_bundled_concurrentqueue" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  # Check if headers and library were located.
+  AC_CHECK_HEADERS([concurrentqueue.h], [found_concurrentqueue=yes])
+
+  if test "x$found_concurrentqueue" = "xyes"; then
+    with_bundled_concurrentqueue=no
+  else
+    AC_MSG_ERROR([cannot find concurrentqueue
+-------------------------------------------------------------------
+You have requested the use of a non-bundled concurrentqueue but no
+suitable concurrentqueue could be found.
+
+You may want specify the location of concurrentqueue by providing a
+prefix path via --with-concurrentqueue=DIR, or check that the path
+you provided is correct if you're already doing this.
+-------------------------------------------------------------------
+])
+  fi
+else
+  with_bundled_boost=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_CONCURRENTQUEUE],
+               [test "x$with_bundled_concurrentqueue" = "xyes"])
 
 
 # Include directories used by package managers (e.g., MacPorts).

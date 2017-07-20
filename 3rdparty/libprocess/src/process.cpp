@@ -115,6 +115,7 @@
 #include "event_loop.hpp"
 #include "gate.hpp"
 #include "process_reference.hpp"
+#include "run_queue.hpp"
 
 namespace inet = process::network::inet;
 namespace inet4 = process::network::inet4;
@@ -425,7 +426,7 @@ public:
   void send(const Response& response,
             const Request& request,
             const Socket& socket);
-  void send(Message* message,
+  void send(Message&& message,
             const SocketImpl::Kind& kind = SocketImpl::DEFAULT_KIND());
 
   Encoder* next(int_fd s);
@@ -466,7 +467,7 @@ private:
   void send_connect(
       const Future<Nothing>& future,
       Socket socket,
-      Message* message);
+      Message&& message);
 
   // Collection of all active sockets (both inbound and outbound).
   hashmap<int_fd, Socket> sockets;
@@ -560,20 +561,34 @@ public:
   // The /__processes__ route.
   Future<Response> __processes__(const Request&);
 
+  void install(Filter* f)
+  {
+    // NOTE: even though `filter` is atomic we still need to
+    // synchronize updating it because once we return from this
+    // function the old filter might get deleted which could be bad if
+    // a thread is currently using the old filter in
+    // `ProcessManager::resume`.
+    synchronized (filter_mutex) {
+      filter.store(f);
+    }
+  }
+
 private:
   // Delegate process name to receive root HTTP requests.
   const Option<string> delegate;
 
   // Map of all local spawned and running processes.
-  map<string, ProcessBase*> processes;
+  hashmap<string, ProcessBase*> processes;
   std::recursive_mutex processes_mutex;
 
   // Gates for waiting threads (protected by processes_mutex).
   map<ProcessBase*, Gate*> gates;
 
-  // Queue of runnable processes (implemented using list).
-  list<ProcessBase*> runq;
-  std::recursive_mutex runq_mutex;
+  // Queue of runnable processes.
+  //
+  // See run_queue.hpp for more information about the RUN_QUEUE
+  // preprocessor definition.
+  RUN_QUEUE runq;
 
   // Number of running processes, to support Clock::settle operation.
   std::atomic_long running;
@@ -591,7 +606,15 @@ private:
   // Whether the process manager is finalizing or not.
   // If true, no further processes will be spawned.
   std::atomic_bool finalizing;
+
+  // Filter. Synchronized support for using the filter needs to be
+  // recursive in case a filter wants to do anything fancy (which is
+  // possible and likely given that filters will get used for
+  // testing).
+  std::atomic<Filter*> filter = ATOMIC_VAR_INIT(nullptr);
+  std::recursive_mutex filter_mutex;
 };
+
 
 static internal::Flags* libprocess_flags = new internal::Flags();
 
@@ -627,9 +650,6 @@ static SocketManager* socket_manager = nullptr;
 // Active ProcessManager (eventually will probably be thread-local).
 static ProcessManager* process_manager = nullptr;
 
-// Scheduling gate that threads wait at when there is nothing to run.
-static Gate* gate = new Gate();
-
 // Used for authenticating HTTP requests.
 static AuthenticatorManager* authenticator_manager = nullptr;
 
@@ -638,12 +658,6 @@ static AuthorizationCallbacks* authorization_callbacks = nullptr;
 
 // Global route that returns process information.
 static Route* processes_route = nullptr;
-
-// Filter. Synchronized support for using the filterer needs to be
-// recursive in case a filterer wants to do anything fancy (which is
-// possible and likely given that filters will get used for testing).
-static Filter* filterer = nullptr;
-static std::recursive_mutex* filterer_mutex = new std::recursive_mutex();
 
 // Global garbage collector.
 GarbageCollector* gc = nullptr;
@@ -739,28 +753,27 @@ void Clock::settle()
 }
 
 
-static Message* encode(const UPID& from,
-                       const UPID& to,
-                       const string& name,
-                       const string& data = "")
+static Message encode(
+    const UPID& from,
+    const UPID& to,
+    const string& name,
+    const char* data,
+    size_t length)
 {
-  Message* message = new Message();
-  message->from = from;
-  message->to = to;
-  message->name = name;
-  message->body = data;
+  Message message{name, from, to, string(data, length)};
   return message;
 }
 
 
-static void transport(Message* message, ProcessBase* sender = nullptr)
+static void transport(Message&& message, ProcessBase* sender = nullptr)
 {
-  if (message->to.address == __address__) {
+  if (message.to.address == __address__) {
     // Local message.
-    process_manager->deliver(message->to, new MessageEvent(message), sender);
+    MessageEvent* event = new MessageEvent(std::move(message));
+    process_manager->deliver(event->message.to, event, sender);
   } else {
     // Remote message.
-    socket_manager->send(message);
+    socket_manager->send(std::move(message));
   }
 }
 
@@ -801,7 +814,7 @@ static Future<Owned<Request>> convert(Owned<Request>&& pipeRequest)
 }
 
 
-static Future<Message*> parse(const Request& request)
+static Future<MessageEvent*> parse(const Request& request)
 {
   // TODO(benh): Do better error handling (to deal with a malformed
   // libprocess message, malicious or otherwise).
@@ -855,13 +868,13 @@ static Future<Message*> parse(const Request& request)
 
   return reader.readAll()
     .then([from, name, to](const string& body) {
-      Message* message = new Message();
-      message->name = name;
-      message->from = from.get();
-      message->to = to;
-      message->body = body;
+      Message message;
+      message.name = name;
+      message.from = from.get();
+      message.to = to;
+      message.body = body;
 
-      return message;
+      return new MessageEvent(std::move(message));
     });
 }
 
@@ -2191,12 +2204,12 @@ void SocketManager::send(
 void SocketManager::send_connect(
     const Future<Nothing>& future,
     Socket socket,
-    Message* message)
+    Message&& message)
 {
   if (future.isDiscarded() || future.isFailed()) {
     if (future.isFailed()) {
-      VLOG(1) << "Failed to send '" << message->name << "' to '"
-              << message->to.address << "', connect: " << future.failure();
+      VLOG(1) << "Failed to send '" << message.name << "' to '"
+              << message.to.address << "', connect: " << future.failure();
     }
 
     // Check if SSL is enabled, and whether we allow a downgrade to
@@ -2218,7 +2231,6 @@ void SocketManager::send_connect(
         if (create.isError()) {
           VLOG(1) << "Failed to link, create socket: " << create.error();
           socket_manager->close(socket);
-          delete message;
           return;
         }
 
@@ -2233,13 +2245,13 @@ void SocketManager::send_connect(
       }
 
       CHECK_SOME(poll_socket);
-      poll_socket.get().connect(message->to.address)
+      poll_socket.get().connect(message.to.address)
         .onAny(lambda::bind(
-            &SocketManager::send_connect,
-            this,
-            lambda::_1,
-            poll_socket.get(),
-            message));
+            // TODO(benh): with C++14 we can use lambda instead of
+            // `std::bind` and capture `message` with a `std::move`.
+            [this, poll_socket](Message& message, const Future<Nothing>& f) {
+              send_connect(f, poll_socket.get(), std::move(message));
+            }, std::move(message), lambda::_1));
 
       // We don't need to 'shutdown()' the socket as it was never
       // connected.
@@ -2249,7 +2261,6 @@ void SocketManager::send_connect(
 
     socket_manager->close(socket);
 
-    delete message;
     return;
   }
 
@@ -2273,11 +2284,9 @@ void SocketManager::send_connect(
 }
 
 
-void SocketManager::send(Message* message, const SocketImpl::Kind& kind)
+void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
 {
-  CHECK(message != nullptr);
-
-  const Address& address = message->to.address;
+  const Address& address = message.to.address;
 
   Option<Socket> socket = None();
   bool connect = false;
@@ -2314,7 +2323,6 @@ void SocketManager::send(Message* message, const SocketImpl::Kind& kind)
       Try<Socket> create = Socket::create(kind);
       if (create.isError()) {
         VLOG(1) << "Failed to send, create socket: " << create.error();
-        delete message;
         return;
       }
       socket = create.get();
@@ -2339,11 +2347,11 @@ void SocketManager::send(Message* message, const SocketImpl::Kind& kind)
     CHECK_SOME(socket);
     socket->connect(address)
       .onAny(lambda::bind(
-          &SocketManager::send_connect,
-          this,
-          lambda::_1,
-          socket.get(),
-          message));
+            // TODO(benh): with C++14 we can use lambda instead of
+            // `std::bind` and capture `message` with a `std::move`.
+            [this, socket](Message& message, const Future<Nothing>& f) {
+              send_connect(f, socket.get(), std::move(message));
+            }, std::move(message), lambda::_1));
   } else {
     // If we're not connecting and we haven't added the encoder to
     // the 'outgoing' queue then schedule it to be sent.
@@ -2756,7 +2764,7 @@ void ProcessManager::finalize()
 
   // Send signal to all processing threads to stop running.
   joining_threads.store(true);
-  gate->open();
+  runq.decomission();
   EventLoop::stop();
 
   // Join all threads.
@@ -2811,43 +2819,29 @@ long ProcessManager::init_threads()
 
   threads.reserve(num_worker_threads + 1);
 
-  struct
-  {
-    void operator()() const
-    {
-      do {
-        ProcessBase* process = process_manager->dequeue();
-        if (process == nullptr) {
-          Gate::state_t old = gate->approach();
-          process = process_manager->dequeue();
-          if (process == nullptr) {
-            if (joining_threads.load()) {
-              break;
-            }
-            gate->arrive(old); // Wait at gate if idle.
-            continue;
-          } else {
-            gate->leave();
-          }
-        }
-        process_manager->resume(process);
-      } while (true);
-
-      // Threads are joining. Delete the thread local `_executor_`
-      // pointer to prevent a memory leak.
-      delete _executor_;
-      _executor_ = nullptr;
-    }
-
-    // We hold a constant reference to `joining_threads` to make it clear that
-    // this value is only being tested (read), and not manipulated.
-    const std::atomic_bool& joining_threads;
-  } worker{joining_threads};
-
   // Create processing threads.
   for (long i = 0; i < num_worker_threads; i++) {
     // Retain the thread handles so that we can join when shutting down.
-    threads.emplace_back(new std::thread(worker));
+    threads.emplace_back(new std::thread(
+        [this]() {
+          running.fetch_add(1);
+          do {
+            ProcessBase* process = dequeue();
+            if (process == nullptr) {
+              if (joining_threads.load()) {
+                break;
+              }
+            } else {
+              resume(process);
+            }
+          } while (true);
+          running.fetch_sub(1);
+
+          // Threads are joining. Delete the thread local `_executor_`
+          // pointer to prevent a memory leak.
+          delete _executor_;
+          _executor_ = nullptr;
+        }));
   }
 
   // Create a thread for the event loop.
@@ -2861,11 +2855,12 @@ ProcessReference ProcessManager::use(const UPID& pid)
 {
   if (pid.address == __address__) {
     synchronized (processes_mutex) {
-      if (processes.count(pid.id) > 0) {
+      Option<ProcessBase*> process = processes.get(pid.id);
+      if (process.isSome()) {
         // Note that the ProcessReference constructor _must_ get
         // called while holding the lock on processes so that waiting
         // for references is atomic (i.e., race free).
-        return ProcessReference(processes[pid.id]);
+        return ProcessReference(process.get());
       }
     }
   }
@@ -2909,7 +2904,7 @@ void ProcessManager::handle(
     // from `SocketManager::finalize()` due to it closing all active sockets
     // during libprocess finalization.
     parse(*request)
-      .onAny([this, socket, request](const Future<Message*>& future) {
+      .onAny([this, socket, request](const Future<MessageEvent*>& future) {
         // Get the HttpProxy pid for this socket.
         PID<HttpProxy> proxy = socket_manager->proxy(socket);
 
@@ -2926,7 +2921,7 @@ void ProcessManager::handle(
           return;
         }
 
-        Message* message = CHECK_NOTNULL(future.get());
+        MessageEvent* event = CHECK_NOTNULL(future.get());
 
         // Verify that the UPID this peer is claiming is on the same IP
         // address the peer is sending from.
@@ -2939,10 +2934,10 @@ void ProcessManager::handle(
             network::convert<Address>(request->client.get());
 
           if (client_ip_address.isError() ||
-              message->from.address.ip != client_ip_address->ip) {
+              event->message.from.address.ip != client_ip_address->ip) {
             Response response = BadRequest(
                 "UPID IP address validation failed: Message from " +
-                stringify(message->from) + " was sent from IP " +
+                stringify(event->message.from) + " was sent from IP " +
                 stringify(request->client.get()));
 
             dispatch(proxy, &HttpProxy::enqueue, response, *request);
@@ -2952,14 +2947,14 @@ void ProcessManager::handle(
                     << ": " << response.body;
 
             delete request;
-            delete message;
+            delete event;
             return;
           }
         }
 
         // TODO(benh): Use the sender PID when delivering in order to
         // capture happens-before timing relationships for testing.
-        bool accepted = deliver(message->to, new MessageEvent(message));
+        bool accepted = deliver(event->message.to, event);
 
         // Only send back an HTTP response if this isn't from libprocess
         // (which we determine by looking at the User-Agent). This is
@@ -3216,39 +3211,23 @@ void ProcessManager::resume(ProcessBase* process)
       CHECK(event != nullptr);
 
       // Determine if we should filter this event.
-      synchronized (filterer_mutex) {
-        if (filterer != nullptr) {
-          bool filter = false;
-          struct FilterVisitor : EventVisitor
-          {
-            explicit FilterVisitor(bool* _filter) : filter(_filter) {}
-
-            virtual void visit(const MessageEvent& event)
-            {
-              *filter = filterer->filter(event);
-            }
-
-            virtual void visit(const DispatchEvent& event)
-            {
-              *filter = filterer->filter(event);
-            }
-
-            virtual void visit(const HttpEvent& event)
-            {
-              *filter = filterer->filter(event);
-            }
-
-            virtual void visit(const ExitedEvent& event)
-            {
-              *filter = filterer->filter(event);
-            }
-
-            bool* filter;
-          } visitor(&filter);
-
-          event->visit(&visitor);
-
-          if (filter) {
+      //
+      // NOTE: we use double-checked locking here to avoid
+      // head-of-line blocking that occurs when the first thread
+      // attempts to filter an event.
+      //
+      // TODO(benh): While not critical for production systems because
+      // the filter should not be set in production systems, we could
+      // use a reader/writer lock here in addition to double-checked
+      // locking.
+      //
+      // TODO(benh): Consider optimizing this further to not be
+      // sequentially consistent. For more details see:
+      // http://preshing.com/20130930/double-checked-locking-is-fixed-in-cpp11.
+      if (filter.load() != nullptr) {
+        synchronized (filter_mutex) {
+          Filter* f = filter.load();
+          if (f != nullptr && f->filter(event)) {
             delete event;
             continue; // Try and execute the next event.
           }
@@ -3281,9 +3260,6 @@ void ProcessManager::resume(ProcessBase* process)
   }
 
   __process__ = nullptr;
-
-  CHECK_GE(running.load(), 1);
-  running.fetch_sub(1);
 }
 
 
@@ -3463,23 +3439,22 @@ bool ProcessManager::wait(const UPID& pid)
       // Check if it is runnable in order to donate this thread.
       if (process->state == ProcessBase::BOTTOM ||
           process->state == ProcessBase::READY) {
-        synchronized (runq_mutex) {
-          list<ProcessBase*>::iterator it =
-            find(runq.begin(), runq.end(), process);
-          if (it != runq.end()) {
-            // Found it! Remove it from the run queue since we'll be
-            // donating our thread and also increment 'running' before
-            // leaving this 'runq' protected critical section so that
-            // everyone that is waiting for the processes to settle
-            // continue to wait (otherwise they could see nothing in
-            // 'runq' and 'running' equal to 0 between when we exit
-            // this critical section and increment 'running').
-            runq.erase(it);
-            running.fetch_add(1);
-          } else {
-            // Another thread has resumed the process ...
-            process = nullptr;
-          }
+        // Assume that we'll be able to successfully extract the
+        // process from the run queue and optimistically increment
+        // `running` so that `Clock::settle` properly waits. In the
+        // event that we aren't able to extract the process from the
+        // run queue then we'll decrement `running`. Note that we
+        // can't assume that `running` is already non-zero because any
+        // thread may call `wait`, and thus we can't assume that we're
+        // calling it from a process that is already running.
+        running.fetch_add(1);
+
+        // Try and extract the process from the run queue. This may
+        // fail because another thread might resume the process first
+        // or the run queue might not support arbitrary extraction.
+        if (!runq.extract(process)) {
+          running.fetch_sub(1);
+          process = nullptr;
         }
       } else {
         // Process is not runnable, so no need to donate ...
@@ -3491,12 +3466,21 @@ bool ProcessManager::wait(const UPID& pid)
   if (process != nullptr) {
     VLOG(2) << "Donating thread to " << process->pid << " while waiting";
     ProcessBase* donator = __process__;
-    process_manager->resume(process);
+    resume(process);
+    running.fetch_sub(1);
     __process__ = donator;
   }
 
+  // NOTE: `process` is possibly deleted at this point and we must not
+  // use it!
+
   // TODO(benh): Donating only once may not be sufficient, so we might
   // still deadlock here ... perhaps warn if that's the case?
+  //
+  // In fact, we might want to support the ability to donate a thread
+  // to any process for a limited number of messages while we wait
+  // (i.e., donate for a message, check and see if our gate is open,
+  // if not, keep donating).
 
   // Now arrive at the gate and wait until it opens.
   if (gate != nullptr) {
@@ -3571,13 +3555,7 @@ void ProcessManager::enqueue(ProcessBase* process)
   // it's not running. Otherwise, check and see which thread this
   // process was last running on, and put it on that threads runq.
 
-  synchronized (runq_mutex) {
-    CHECK(find(runq.begin(), runq.end(), process) == runq.end());
-    runq.push_back(process);
-  }
-
-  // Wake up the processing thread if necessary.
-  gate->open();
+  runq.enqueue(process);
 }
 
 
@@ -3587,44 +3565,83 @@ ProcessBase* ProcessManager::dequeue()
   // are no processes to run, and this is not a dedicated thread, then
   // steal one from another threads runq.
 
-  ProcessBase* process = nullptr;
+  running.fetch_sub(1);
 
-  synchronized (runq_mutex) {
-    if (!runq.empty()) {
-      process = runq.front();
-      runq.pop_front();
-      // Increment the running count of processes in order to support
-      // the Clock::settle() operation (this must be done atomically
-      // with removing the process from the runq).
-      running.fetch_add(1);
-    }
-  }
+  runq.wait();
 
-  return process;
+  // Need to increment `running` before we dequeue from `runq` so that
+  // `Clock::settle` properly waits.
+  running.fetch_add(1);
+
+  ////////////////////////////////////////////////////////////
+  // NOTE: contract with the run queue is that we'll always //
+  // call `wait` _BEFORE_ we call `dequeue`.                //
+  ////////////////////////////////////////////////////////////
+  return runq.dequeue();
 }
 
 
+// NOTE: it's possible that a thread not controlled by libprocess is
+// trying to enqueue a process (e.g., due to `spawn` or because it's
+// doing a `dispatch` or `send`) and thus we'll settle when in fact we
+// should not have. There is nothing easy we can do to prevent this
+// and it hasn't been a problem historically in the usage we've seen
+// in the Mesos project.
 void ProcessManager::settle()
 {
   bool done = true;
   do {
     done = true; // Assume to start that we are settled.
 
-    synchronized (runq_mutex) {
-      if (!runq.empty()) {
-        done = false;
-        continue;
-      }
+    // See comments below as to how `epoch` helps us mitigate races
+    // with `running` and `runq`.
+    long old = runq.epoch.load();
 
-      if (running.load() > 0) {
-        done = false;
-        continue;
-      }
+    if (running.load() > 0) {
+      done = false;
+      continue;
+    }
 
-      if (!Clock::settled()) {
-        done = false;
-        continue;
-      }
+    // Race #1: it's possible that a thread starts running here
+    // because the semaphore had been signaled but nobody has woken
+    // up yet.
+
+    if (!runq.empty()) {
+      done = false;
+      continue;
+    }
+
+    // Race #2: it's possible that `runq` will get added to at this
+    // point given some threads might be running due to 'Race #1'.
+
+    if (running.load() > 0) {
+      done = false;
+      continue;
+    }
+
+    // If at this point _no_ threads are running then it must be the
+    // case that either nothing has been added to `runq` (and thus
+    // nothing really is running or will be about to run) OR
+    // `runq.epoch` must have been incremented (because the thread
+    // that enqueued something into `runq.epoch` now isn't running so
+    // it must have incremented `runq.epoch` before it decremented
+    // `running`).
+    //
+    // Note that we check `runq.epoch` _after_ we check the clock
+    // because it's possible that the clock will also add to the
+    // `runq` but in so doing it will also increment `runq.epoch`
+    // which we'll guarantee that we don't settle (and
+    // `Clock::settled()` takes care to atomically ensure that
+    // `runq.epoch` is incremented before it returns).
+
+    if (!Clock::settled()) {
+      done = false;
+      continue;
+    }
+
+    if (old != runq.epoch.load()) {
+      done = false;
+      continue;
     }
   } while (!done);
 }
@@ -3650,7 +3667,7 @@ Future<Response> ProcessManager::__processes__(const Request&)
           JSON::Object object;
           object.values["type"] = "MESSAGE";
 
-          const Message& message = *event.message;
+          const Message& message = event.message;
 
           object.values["name"] = message.name;
           object.values["from"] = string(message.from);
@@ -3772,9 +3789,9 @@ void ProcessBase::inject(
   if (!from)
     return;
 
-  Message* message = encode(from, pid, name, string(data, length));
+  Message message = encode(from, pid, name, data, length);
 
-  enqueue(new MessageEvent(message), true);
+  enqueue(new MessageEvent(std::move(message)), true);
 }
 
 
@@ -3789,22 +3806,22 @@ void ProcessBase::send(
   }
 
   // Encode and transport outgoing message.
-  transport(encode(pid, to, name, string(data, length)), this);
+  transport(encode(pid, to, name, data, length), this);
 }
 
 
 void ProcessBase::visit(const MessageEvent& event)
 {
-  if (handlers.message.count(event.message->name) > 0) {
-    handlers.message[event.message->name](
-        event.message->from,
-        event.message->body);
-  } else if (delegates.count(event.message->name) > 0) {
-    VLOG(1) << "Delegating message '" << event.message->name
-            << "' to " << delegates[event.message->name];
-    Message* message = new Message(*event.message);
-    message->to = delegates[event.message->name];
-    transport(message, this);
+  if (handlers.message.count(event.message.name) > 0) {
+    handlers.message[event.message.name](
+        event.message.from,
+        event.message.body);
+  } else if (delegates.count(event.message.name) > 0) {
+    VLOG(1) << "Delegating message '" << event.message.name
+            << "' to " << delegates[event.message.name];
+    Message message(event.message);
+    message.to = delegates[event.message.name];
+    transport(std::move(message), this);
   }
 }
 
@@ -4160,13 +4177,11 @@ bool wait(const UPID& pid, const Duration& duration)
 }
 
 
-void filter(Filter *filter)
+void filter(Filter* filter)
 {
   process::initialize();
 
-  synchronized (filterer_mutex) {
-    filterer = filter;
-  }
+  process_manager->install(filter);
 }
 
 
@@ -4179,7 +4194,7 @@ void post(const UPID& to, const string& name, const char* data, size_t length)
   }
 
   // Encode and transport outgoing message.
-  transport(encode(UPID(), to, name, string(data, length)));
+  transport(encode(UPID(), to, name, data, length));
 }
 
 
@@ -4196,7 +4211,7 @@ void post(const UPID& from,
   }
 
   // Encode and transport outgoing message.
-  transport(encode(from, to, name, string(data, length)));
+  transport(encode(from, to, name, data, length));
 }
 
 

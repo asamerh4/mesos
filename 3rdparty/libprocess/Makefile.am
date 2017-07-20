@@ -52,6 +52,7 @@ include ../versions.am
 STOUT = ../stout
 
 BOOST = $(BUNDLED_DIR)/boost-$(BOOST_VERSION)
+CONCURRENTQUEUE = $(BUNDLED_DIR)/concurrentqueue-$(CONCURRENTQUEUE_VERSION)
 ELFIO = $(BUNDLED_DIR)/elfio-$(ELFIO_VERSION)
 GLOG = $(BUNDLED_DIR)/glog-$(GLOG_VERSION)
 GOOGLETEST = $(BUNDLED_DIR)/googletest-release-$(GOOGLETEST_VERSION)
@@ -74,6 +75,11 @@ BUNDLED_DEPS = # Initialize BUNDLED_DEPENDENCIES so we can add to it.
 if WITH_BUNDLED_BOOST
 BOOST_INCLUDE_FLAGS = -isystem $(BOOST)
 BUNDLED_DEPS += $(BOOST)-stamp
+endif
+
+if WITH_BUNDLED_CONCURRENTQUEUE
+CONCURRENTQUEUE_INCLUDE_FLAGS = -isystem $(CONCURRENTQUEUE)
+BUNDLED_DEPS += $(CONCURRENTQUEUE)-stamp
 endif
 
 if WITH_BUNDLED_ELFIO
@@ -174,6 +180,8 @@ libprocess_la_SOURCES =		\
   src/process.cpp		\
   src/process_reference.hpp	\
   src/reap.cpp			\
+  src/run_queue.hpp		\
+  src/semaphore.hpp		\
   src/socket.cpp		\
   src/subprocess.cpp		\
   src/subprocess_posix.cpp	\
@@ -200,6 +208,7 @@ libprocess_la_CPPFLAGS =			\
   -DBUILD_DIR=\"$(LIBPROCESS_BUILD_DIR)\"	\
   -I$(srcdir)/include				\
   $(BOOST_INCLUDE_FLAGS)			\
+  $(CONCURRENTQUEUE_INCLUDE_FLAGS)		\
   $(ELFIO_INCLUDE_FLAGS)			\
   $(GLOG_INCLUDE_FLAGS)				\
   $(GPERFTOOLS_INCLUDE_FLAGS)			\

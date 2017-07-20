@@ -55,6 +55,8 @@ set(PROCESS_SRC
   process.cpp
   process_reference.hpp
   reap.cpp
+  run_queue.hpp
+  semaphore.hpp
   socket.cpp
   subprocess.cpp
   time.cpp
@@ -138,3 +140,7 @@ add_dependencies(${PROCESS_TARGET} ${PROCESS_DEPENDENCIES})
 # ADD LINKER FLAGS (generates, e.g., -lglog on Linux).
 ######################################################
 target_link_libraries(${PROCESS_TARGET} ${PROCESS_LIBS})
+
+if (ENABLE_LOCK_FREE_RUN_QUEUE)
+  target_compile_definitions(${PROCESS_TARGET} PRIVATE LOCK_FREE_RUN_QUEUE)
+endif ()
