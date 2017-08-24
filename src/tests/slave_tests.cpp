@@ -31,8 +31,8 @@
 
 #include <mesos/authentication/http/basic_authenticator_factory.hpp>
 
-
 #include <process/clock.hpp>
+#include <process/collect.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/http.hpp>
@@ -66,6 +66,7 @@
 
 #include "slave/constants.hpp"
 #include "slave/gc.hpp"
+#include "slave/gc_process.hpp"
 #include "slave/flags.hpp"
 #include "slave/slave.hpp"
 
@@ -121,6 +122,7 @@ using process::http::Unauthorized;
 
 using process::http::authentication::Principal;
 
+using std::list;
 using std::map;
 using std::shared_ptr;
 using std::string;
@@ -133,6 +135,7 @@ using testing::Eq;
 using testing::Invoke;
 using testing::Return;
 using testing::SaveArg;
+using testing::WithParamInterface;
 
 namespace mesos {
 namespace internal {
@@ -243,7 +246,7 @@ TEST_F(SlaveTest, DuplicateTerminalUpdateBeforeAck)
   Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   ExecutorDriver* execDriver;
   EXPECT_CALL(exec, registered(_, _, _, _))
@@ -357,7 +360,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, ShutdownUnregisteredExecutor)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   TaskInfo task;
@@ -473,7 +476,7 @@ TEST_F(SlaveTest, ExecutorTimeoutCausedBySlowFetch)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   // The task uses a URI that needs to be fetched by the HDFS client
@@ -572,7 +575,7 @@ TEST_F(SlaveTest, RemoveUnregisteredTerminatedExecutor)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -658,7 +661,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, CommandTaskWithArguments)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   TaskInfo task;
@@ -724,7 +727,7 @@ TEST_F(SlaveTest, CommandTaskWithKillPolicy)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   TaskInfo task;
@@ -1022,7 +1025,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   TaskInfo task;
@@ -1126,7 +1129,7 @@ TEST_F(SlaveTest, DISABLED_ROOT_RunTaskWithCommandInfoWithUser)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // HACK: Launch a prepare task as root to prepare the binaries.
   // This task creates the lt-mesos-executor binary in the build dir.
@@ -1178,7 +1181,7 @@ TEST_F(SlaveTest, DISABLED_ROOT_RunTaskWithCommandInfoWithUser)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   TaskInfo task;
@@ -1254,7 +1257,7 @@ TEST_F(SlaveTest, IgnoreNonLeaderStatusUpdateAcknowledgement)
   const UPID schedulerPid = frameworkRegisteredMessage->to;
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
 
@@ -1343,10 +1346,12 @@ TEST_F(SlaveTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_staging"));
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_starting"));
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_running"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/tasks_killing"));
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_finished"));
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_failed"));
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_killed"));
   EXPECT_EQ(1u, snapshot.values.count("slave/tasks_lost"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/tasks_gone"));
 
   EXPECT_EQ(1u, snapshot.values.count("slave/executors_registering"));
   EXPECT_EQ(1u, snapshot.values.count("slave/executors_running"));
@@ -1360,9 +1365,8 @@ TEST_F(SlaveTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("slave/valid_framework_messages"));
   EXPECT_EQ(1u, snapshot.values.count("slave/invalid_framework_messages"));
 
-  EXPECT_EQ(
-      1u,
-      snapshot.values.count("slave/executor_directory_max_allowed_age_secs"));
+  EXPECT_EQ(1u, snapshot.values.count(
+      "slave/executor_directory_max_allowed_age_secs"));
 
   EXPECT_EQ(1u, snapshot.values.count("slave/container_launch_errors"));
 
@@ -1370,17 +1374,33 @@ TEST_F(SlaveTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("slave/cpus_used"));
   EXPECT_EQ(1u, snapshot.values.count("slave/cpus_percent"));
 
+  EXPECT_EQ(1u, snapshot.values.count("slave/cpus_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/cpus_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/cpus_revocable_percent"));
+
   EXPECT_EQ(1u, snapshot.values.count("slave/gpus_total"));
   EXPECT_EQ(1u, snapshot.values.count("slave/gpus_used"));
   EXPECT_EQ(1u, snapshot.values.count("slave/gpus_percent"));
+
+  EXPECT_EQ(1u, snapshot.values.count("slave/gpus_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/gpus_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/gpus_revocable_percent"));
 
   EXPECT_EQ(1u, snapshot.values.count("slave/mem_total"));
   EXPECT_EQ(1u, snapshot.values.count("slave/mem_used"));
   EXPECT_EQ(1u, snapshot.values.count("slave/mem_percent"));
 
+  EXPECT_EQ(1u, snapshot.values.count("slave/mem_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/mem_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/mem_revocable_percent"));
+
   EXPECT_EQ(1u, snapshot.values.count("slave/disk_total"));
   EXPECT_EQ(1u, snapshot.values.count("slave/disk_used"));
   EXPECT_EQ(1u, snapshot.values.count("slave/disk_percent"));
+
+  EXPECT_EQ(1u, snapshot.values.count("slave/disk_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/disk_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("slave/disk_revocable_percent"));
 }
 
 
@@ -1414,7 +1434,7 @@ TEST_F(SlaveTest, MetricsSlaveLaunchErrors)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   const Offer offer = offers.get()[0];
 
   // Verify that we start with no launch failures.
@@ -1594,7 +1614,7 @@ TEST_F(SlaveTest, StateEndpoint)
   Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   Resources executorResources = Resources::parse("cpus:0.1;mem:32").get();
   executorResources.allocate("*");
@@ -1682,6 +1702,134 @@ TEST_F(SlaveTest, StateEndpoint)
 
   driver.stop();
   driver.join();
+}
+
+
+// Verifies that requests to the agent's '/state' endpoint are successful when
+// there are pending tasks from a task group. This test was used to confirm the
+// fix for MESOS-7871.
+TEST_F(SlaveTest, GetStateTaskGroupPending)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
+
+  Resources resources = Resources::parse("cpus:0.1;mem:32;disk:32").get();
+
+  ExecutorInfo executorInfo;
+  executorInfo.set_type(ExecutorInfo::DEFAULT);
+
+  executorInfo.mutable_executor_id()->CopyFrom(DEFAULT_EXECUTOR_ID);
+  executorInfo.mutable_resources()->CopyFrom(resources);
+
+  const ExecutorID& executorId = executorInfo.executor_id();
+  TestContainerizer containerizer(executorId, executor);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  MockSlave slave(CreateSlaveFlags(), detector.get(), &containerizer);
+  process::PID<Slave> slavePid = spawn(slave);
+
+  Future<Nothing> connected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected));
+
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
+
+  AWAIT_READY(connected);
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<v1::scheduler::Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  {
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(subscribed);
+
+  v1::FrameworkID frameworkId(subscribed->framework_id());
+
+  // Update `executorInfo` with the subscribed `frameworkId`.
+  executorInfo.mutable_framework_id()->CopyFrom(devolve(frameworkId));
+
+  AWAIT_READY(offers);
+  EXPECT_FALSE(offers->offers().empty());
+
+  const v1::Offer& offer = offers->offers(0);
+  const SlaveID slaveId = devolve(offer.agent_id());
+
+  // Override the default expectation, which forwards calls to the agent's
+  // unmocked `_run()` method. Instead, we want to do nothing so that tasks
+  // remain in the framework's 'pending' list.
+  Future<Nothing> _run;
+  EXPECT_CALL(slave, _run(_, _, _, _, _))
+    .WillOnce(FutureSatisfy(&_run));
+
+  // The executor should not be launched.
+  EXPECT_CALL(*executor, connected(_))
+    .Times(0);
+
+  v1::TaskInfo task1 = evolve(createTask(slaveId, resources, ""));
+
+  v1::TaskInfo task2 = evolve(createTask(slaveId, resources, ""));
+
+  v1::TaskGroupInfo taskGroup;
+  taskGroup.add_tasks()->CopyFrom(task1);
+  taskGroup.add_tasks()->CopyFrom(task2);
+
+  {
+    Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(Call::ACCEPT);
+
+    Call::Accept* accept = call.mutable_accept();
+    accept->add_offer_ids()->CopyFrom(offer.id());
+
+    v1::Offer::Operation* operation = accept->add_operations();
+    operation->set_type(v1::Offer::Operation::LAUNCH_GROUP);
+
+    v1::Offer::Operation::LaunchGroup* launchGroup =
+      operation->mutable_launch_group();
+
+    launchGroup->mutable_executor()->CopyFrom(evolve(executorInfo));
+    launchGroup->mutable_task_group()->CopyFrom(taskGroup);
+
+    mesos.send(call);
+  }
+
+  // Wait for the tasks to be placed in 'pending'.
+  AWAIT_READY(_run);
+
+  Future<Response> response = process::http::get(
+      slavePid,
+      "state",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  // To confirm the fix for MESOS-7871, we simply verify that the
+  // agent doesn't crash when this request is made.
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+  terminate(slave);
+  wait(slave);
 }
 
 
@@ -1944,7 +2092,7 @@ TEST_F(SlaveTest, HTTPExecutorBadAuthentication)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   Future<v1::executor::Mesos*> executorLib;
   EXPECT_CALL(*executor, connected(_))
@@ -2116,7 +2264,7 @@ TEST_F(SlaveTest, StatisticsEndpointMissingStatistics)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -2398,7 +2546,7 @@ TEST_F(SlaveTest, ContainersEndpoint)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   // Launch two tasks, each under a different executor.
   vector<TaskInfo> tasks;
@@ -2785,7 +2933,7 @@ TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFailsWithLost)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   // Start two tasks.
@@ -2898,7 +3046,7 @@ TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFailsWithGone)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   // Start two tasks.
@@ -3453,6 +3601,154 @@ TEST_F(SlaveTest, HealthCheckUnregisterRace)
 #endif // __WINDOWS__
 
 
+// This test verifies that when an unreachable agent reregisters after
+// master failover, the master consults and updates the registrar for
+// re-admitting the agent.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    SlaveTest, UnreachableAgentReregisterAfterFailover)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry = "replicated_log";
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+
+  // Reuse slaveFlags so both StartSlave() use the same work_dir.
+  slave::Flags slaveFlags = CreateSlaveFlags();
+
+  // Drop all the PONGs to simulate slave partition.
+  DROP_PROTOBUFS(PongSlaveMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+
+  slave.get()->terminate();
+  slave->reset();
+
+  Clock::pause();
+
+  // Induce agent ping timeouts.
+  size_t pings = 0;
+  while (true) {
+    pings++;
+    if (pings == masterFlags.max_agent_ping_timeouts) {
+      break;
+    }
+    Clock::advance(masterFlags.agent_ping_timeout);
+    Clock::settle();
+  }
+
+  // Now set the expectation when the agent is one ping timeout away
+  // from being deemed unreachable.
+  Future<Owned<master::Operation>> markUnreachable;
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .WillOnce(DoAll(FutureArg<0>(&markUnreachable),
+                    Invoke(master.get()->registrar.get(),
+                           &MockRegistrar::unmocked_apply)));
+
+  Clock::advance(masterFlags.agent_ping_timeout);
+
+  AWAIT_READY(markUnreachable);
+  EXPECT_NE(
+      nullptr,
+      dynamic_cast<master::MarkSlaveUnreachable*>(markUnreachable->get()));
+
+  // Make sure the registrar operation completes so the agent will be updated
+  // as an unreachable agent in the registry before the master terminates.
+  Clock::settle();
+
+  master->reset();
+
+  master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Start the agent, which will cause it to reregister. Intercept the
+  // next registry operation, which we expect to be slave reregistration.
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  Future<Owned<master::Operation>> markReachable;
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .WillOnce(DoAll(FutureArg<0>(&markReachable),
+                    Invoke(master.get()->registrar.get(),
+                           &MockRegistrar::unmocked_apply)));
+
+  detector = master.get()->createDetector();
+  slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+
+  // Verify that the reregistration involves registry update.
+  AWAIT_READY(markReachable);
+  EXPECT_NE(
+      nullptr,
+      dynamic_cast<master::MarkSlaveReachable*>(markReachable->get()));
+
+  AWAIT_READY(slaveReregisteredMessage);
+}
+
+
+// This test verifies that when a registered agent restarts and reregisters
+// after master failover, the master does not consult the registrar in
+// deciding to re-admit the agent.
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    SlaveTest, RegisteredAgentReregisterAfterFailover)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry = "replicated_log";
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+
+  // Reuse slaveFlags so both StartSlave() use the same work_dir.
+  slave::Flags slaveFlags = CreateSlaveFlags();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+
+  // Pause the clock so the terminated agent is not deemed unreachable.
+  Clock::pause();
+
+  // There should be no registrar operation across both agent termination
+  // and reregistration.
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .Times(0);
+
+  slave.get()->terminate();
+  slave->reset();
+
+  master->reset();
+
+  master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  detector = master.get()->createDetector();
+  slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+
+  // No registrar operation occurs by the time the agent is fully registered.
+  AWAIT_READY(slaveReregisteredMessage);
+}
+
+
 #ifndef __WINDOWS__
 // This test checks that the master behaves correctly when a slave
 // fails health checks and is in the process of being marked
@@ -3719,7 +4015,7 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -3745,7 +4041,7 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
     .WillOnce(Invoke(&slave, &MockSlave::unmocked_runTask));
 
   // Saved arguments from Slave::_run().
-  Future<bool> future;
+  Future<list<bool>> unschedules;
   FrameworkInfo frameworkInfo;
   ExecutorInfo executorInfo;
   Option<TaskGroupInfo> taskGroup;
@@ -3756,7 +4052,7 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
   Future<Nothing> _run;
   EXPECT_CALL(slave, _run(_, _, _, _, _))
     .WillOnce(DoAll(FutureSatisfy(&_run),
-                    SaveArg<0>(&future),
+                    SaveArg<0>(&unschedules),
                     SaveArg<1>(&frameworkInfo),
                     SaveArg<2>(&executorInfo),
                     SaveArg<3>(&task_),
@@ -3771,22 +4067,21 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
     .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_killTask),
                     FutureSatisfy(&killTask)));
 
-  driver.killTask(task.task_id());
-
-  AWAIT_READY(killTask);
-
-  // Since this is the only task ever for this framework, the
-  // framework should get removed in Slave::_run().
-  // Thus we can observe that this happens before Shutdown().
   Future<Nothing> removeFramework;
   EXPECT_CALL(slave, removeFramework(_))
     .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_removeFramework),
                     FutureSatisfy(&removeFramework)));
 
-  slave.unmocked__run(
-      future, frameworkInfo, executorInfo, task_, taskGroup);
+  driver.killTask(task.task_id());
 
+  AWAIT_READY(killTask);
+
+  // The agent will remove the framework when killing this task
+  // since there remain no more tasks.
   AWAIT_READY(removeFramework);
+
+  slave.unmocked__run(
+      unschedules, frameworkInfo, executorInfo, task_, taskGroup);
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_KILLED, status->state());
@@ -3799,9 +4094,140 @@ TEST_F(SlaveTest, KillTaskBetweenRunTaskParts)
 }
 
 
-// This test ensures that if a `killTask()` for an executor is received by the
-// agent before the executor registers, the executor is properly cleaned up.
-TEST_F(SlaveTest, KillTaskUnregisteredExecutor)
+// This test ensures was added due to MESOS-7863, where the
+// agent previously dropped TASK_KILLED in the cases outlined
+// in the issue.
+TEST_F(SlaveTest, KillMultiplePendingTasks)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+
+  MockSlave slave(CreateSlaveFlags(), &detector, &containerizer);
+  spawn(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers->size());
+
+  // We only pause the clock after receiving the offer since the
+  // agent uses a delay to re-register.
+  //
+  // TODO(bmahler): Remove the initial agent delay within the tests.
+  Clock::pause();
+
+  Resources taskResources = Resources::parse("cpus:0.1;mem:32;disk:32").get();
+
+  TaskInfo task1 = createTask(
+      offers->at(0).slave_id(), taskResources, "echo hi");
+
+  TaskInfo task2 = createTask(
+      offers->at(0).slave_id(), taskResources, "echo hi");
+
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
+    .Times(0);
+
+  Future<TaskStatus> status1, status2;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status1))
+    .WillOnce(FutureArg<1>(&status2));
+
+  EXPECT_CALL(slave, runTask(_, _, _, _, _))
+    .WillOnce(Invoke(&slave, &MockSlave::unmocked_runTask))
+    .WillOnce(Invoke(&slave, &MockSlave::unmocked_runTask));
+
+  // Skip what Slave::_run() normally does, save its arguments for
+  // later, tie reaching the critical moment when to kill the task to
+  // a future.
+  Future<list<bool>> unschedules1, unschedules2;
+  FrameworkInfo frameworkInfo1, frameworkInfo2;
+  ExecutorInfo executorInfo1, executorInfo2;
+  Option<TaskGroupInfo> taskGroup1, taskGroup2;
+  Option<TaskInfo> task_1, task_2;
+
+  Future<Nothing> _run1, _run2;
+  EXPECT_CALL(slave, _run(_, _, _, _, _))
+    .WillOnce(DoAll(FutureSatisfy(&_run1),
+                    SaveArg<0>(&unschedules1),
+                    SaveArg<1>(&frameworkInfo1),
+                    SaveArg<2>(&executorInfo1),
+                    SaveArg<3>(&task_1),
+                    SaveArg<4>(&taskGroup1)))
+    .WillOnce(DoAll(FutureSatisfy(&_run2),
+                    SaveArg<0>(&unschedules2),
+                    SaveArg<1>(&frameworkInfo2),
+                    SaveArg<2>(&executorInfo2),
+                    SaveArg<3>(&task_2),
+                    SaveArg<4>(&taskGroup2)));
+
+  driver.launchTasks(offers.get()[0].id(), {task1, task2});
+
+  AWAIT_READY(process::await(_run1, _run2));
+
+  Future<Nothing> killTask1, killTask2;
+  EXPECT_CALL(slave, killTask(_, _))
+    .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_killTask),
+                    FutureSatisfy(&killTask1)))
+    .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_killTask),
+                    FutureSatisfy(&killTask2)));
+
+  Future<Nothing> removeFramework;
+  EXPECT_CALL(slave, removeFramework(_))
+    .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_removeFramework),
+                    FutureSatisfy(&removeFramework)));
+
+  driver.killTask(task1.task_id());
+  driver.killTask(task2.task_id());
+
+  AWAIT_READY(process::await(killTask1, killTask2));
+
+  // We expect the tasks to be killed and framework removed.
+  AWAIT_READY(status1);
+  EXPECT_EQ(TASK_KILLED, status1->state());
+
+  AWAIT_READY(status2);
+  EXPECT_EQ(TASK_KILLED, status2->state());
+
+  AWAIT_READY(removeFramework);
+
+  // The `__run` continuations should have no effect.
+  slave.unmocked__run(
+      unschedules1, frameworkInfo1, executorInfo1, task_1, taskGroup1);
+
+  slave.unmocked__run(
+      unschedules2, frameworkInfo2, executorInfo2, task_2, taskGroup2);
+
+  Clock::settle();
+
+  driver.stop();
+  driver.join();
+
+  terminate(slave);
+  wait(slave);
+}
+
+
+// This test verifies that when the agent gets a `killTask`
+// message for a queued task on a registering executor, a
+// the agent will generate a TASK_KILLED and will shut down
+// the executor.
+TEST_F(SlaveTest, KillQueuedTaskDuringExecutorRegistration)
 {
   // Start a master.
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -3830,7 +4256,7 @@ TEST_F(SlaveTest, KillTaskUnregisteredExecutor)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -3869,7 +4295,7 @@ TEST_F(SlaveTest, KillTaskUnregisteredExecutor)
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_KILLED, status->state());
-  EXPECT_EQ(TaskStatus::REASON_EXECUTOR_UNREGISTERED, status->reason());
+  EXPECT_EQ(TaskStatus::REASON_TASK_KILLED_DURING_LAUNCH, status->reason());
 
   // Now let the executor register by spoofing the message.
   RegisterExecutorMessage registerExecutor;
@@ -3953,7 +4379,7 @@ TEST_F(SlaveTest, KillTaskUnregisteredHTTPExecutor)
   executorInfo.mutable_framework_id()->CopyFrom(devolve(frameworkId));
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
   const SlaveID slaveId = devolve(offer.agent_id());
@@ -4181,7 +4607,7 @@ TEST_F(SlaveTest, ContainerizerUsageFailure)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -4259,7 +4685,7 @@ TEST_F(SlaveTest, DiscoveryInfoAndPorts)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(
       offers.get()[0],
@@ -4368,7 +4794,7 @@ TEST_F(SlaveTest, ExecutorLabels)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -4460,7 +4886,7 @@ TEST_F(SlaveTest, TaskLabels)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -4564,7 +4990,7 @@ TEST_F(SlaveTest, TaskStatusLabels)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(
       offers.get()[0],
@@ -4669,7 +5095,7 @@ TEST_F(SlaveTest, TaskStatusContainerStatus)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(
       offers.get()[0],
@@ -4767,7 +5193,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, ExecutorEnvironmentVariables)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   TaskInfo task;
@@ -5104,7 +5530,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, HTTPSchedulerSlaveRestart)
     FUTURE_MESSAGE(Eq(RegisterExecutorMessage().GetTypeName()), _, _);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   SlaveID slaveId = offers.get()[0].slave_id();
 
@@ -5250,7 +5676,7 @@ TEST_F(SlaveTest, ExecutorShutdownGracePeriod)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   // Customize executor shutdown grace period to be larger than the
@@ -5416,7 +5842,7 @@ TEST_F(SlaveTest, RunTaskGroup)
   executorInfo.mutable_framework_id()->CopyFrom(devolve(frameworkId));
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   EXPECT_CALL(*executor, connected(_))
     .WillOnce(v1::executor::SendSubscribe(frameworkId, evolve(executorId)));
@@ -5555,7 +5981,7 @@ TEST_F(SlaveTest, RunTaskGroupFailedSecretGeneration)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
@@ -5756,7 +6182,7 @@ TEST_F(SlaveTest, RunTaskGroupInvalidExecutorSecret)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
@@ -5966,7 +6392,7 @@ TEST_F(SlaveTest, RunTaskGroupReferenceTypeSecret)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
@@ -6176,7 +6602,7 @@ TEST_F(SlaveTest, RunTaskGroupGenerateSecretAfterShutdown)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
@@ -6398,7 +6824,7 @@ TEST_F(SlaveTest, RestartSlaveRequireExecutorAuthentication)
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  ASSERT_NE(0, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   Future<v1::scheduler::Event::Update> update;
 
@@ -6582,7 +7008,7 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   executorInfo.mutable_framework_id()->CopyFrom(devolve(frameworkId));
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   EXPECT_CALL(*executor, connected(_))
     .Times(0);
@@ -6611,7 +7037,7 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
     .WillOnce(Invoke(&slave, &MockSlave::unmocked_runTaskGroup));
 
   // Saved arguments from `Slave::_run()`.
-  Future<bool> future;
+  Future<list<bool>> unschedules;
   FrameworkInfo frameworkInfo;
   ExecutorInfo executorInfo_;
   Option<TaskGroupInfo> taskGroup_;
@@ -6623,7 +7049,7 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   Future<Nothing> _run;
   EXPECT_CALL(slave, _run(_, _, _, _, _))
     .WillOnce(DoAll(FutureSatisfy(&_run),
-                    SaveArg<0>(&future),
+                    SaveArg<0>(&unschedules),
                     SaveArg<1>(&frameworkInfo),
                     SaveArg<2>(&executorInfo_),
                     SaveArg<3>(&task_),
@@ -6671,6 +7097,13 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
     .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_killTask),
                     FutureSatisfy(&killTask)));
 
+  // Since this is the only task group for this framework, the
+  // framework should get removed when the task is killed.
+  Future<Nothing> removeFramework;
+  EXPECT_CALL(slave, removeFramework(_))
+    .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_removeFramework),
+                    FutureSatisfy(&removeFramework)));
+
   {
     Call call;
     call.mutable_framework_id()->CopyFrom(frameworkId);
@@ -6685,17 +7118,10 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
 
   AWAIT_READY(killTask);
 
-  // Since this is the only task group for this framework, the
-  // framework should get removed in `Slave::_run()`.
-  Future<Nothing> removeFramework;
-  EXPECT_CALL(slave, removeFramework(_))
-    .WillOnce(DoAll(Invoke(&slave, &MockSlave::unmocked_removeFramework),
-                    FutureSatisfy(&removeFramework)));
+  AWAIT_READY(removeFramework);
 
   slave.unmocked__run(
-      future, frameworkInfo, executorInfo_, task_, taskGroup_);
-
-  AWAIT_READY(removeFramework);
+      unschedules, frameworkInfo, executorInfo_, task_, taskGroup_);
 
   AWAIT_READY(update1);
   AWAIT_READY(update2);
@@ -6780,7 +7206,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(SlaveTest, DefaultExecutorCommandInfo)
   executorInfo.mutable_framework_id()->CopyFrom(devolve(frameworkId));
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   Future<ContainerConfig> containerConfig;
   EXPECT_CALL(containerizer, launch(_, _, _, _))
@@ -6895,7 +7321,7 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
   executorInfo.mutable_framework_id()->CopyFrom(devolve(frameworkId));
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   Future<v1::executor::Mesos*> executorLibrary;
   EXPECT_CALL(*executor, connected(_))
@@ -7213,7 +7639,7 @@ TEST_F(SlaveTest, ShutdownV0ExecutorIfItReregistersWithoutReconnect)
   Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   EXPECT_CALL(exec, registered(_, _, _, _));
 
@@ -7316,7 +7742,7 @@ TEST_F(SlaveTest, IgnoreV0ExecutorIfItReregistersWithoutReconnect)
   Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   EXPECT_CALL(exec, registered(_, _, _, _));
 
@@ -7711,6 +8137,168 @@ TEST_F(SlaveTest, ChangeDomain)
 
     EXPECT_SOME_EQ(JSON::String(AGENT_REGION), agentRegion);
     EXPECT_SOME_EQ(JSON::String(AGENT_ZONE), agentZone);
+  }
+}
+
+
+class DefaultContainerDNSFlagTest
+  : public MesosTest,
+    public WithParamInterface<string> {};
+
+
+INSTANTIATE_TEST_CASE_P(
+    ContainerizerType,
+    DefaultContainerDNSFlagTest,
+    ::testing::Values("mesos", "docker"));
+
+
+// This test verifies the validation for the
+// agent flag `--default_container_dns`.
+TEST_P(DefaultContainerDNSFlagTest, ValidateFlag)
+{
+  const int argc = 4;
+  const char* argv[argc] = {
+    "/path/to/program",
+    "--master=127.0.0.1:5050",
+    "--work_dir=/tmp"
+  };
+
+  string containerizer = GetParam();
+
+  // Verifies the unknown network mode is not supported.
+  //
+  // TODO(qianzhang): Change the value of the `network_mode`
+  // to an non-existent enum value once MESOS-7828 is resolved.
+  string defaultContainerDNSInfo =
+    "--default_container_dns={"
+    "  \"" + containerizer + "\": [\n"
+    "    {\n"
+    "      \"network_mode\": \"UNKNOWN\",\n"
+    "      \"dns\": {\n"
+    "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+    "      }\n"
+    "    }\n"
+    "  ]\n"
+    "}";
+
+  argv[3] = defaultContainerDNSInfo.c_str();
+
+  {
+    slave::Flags flags;
+    Try<flags::Warnings> load = flags.load(None(), argc, argv);
+    EXPECT_ERROR(load);
+  }
+
+  // Verifies the host network mode is not supported.
+  defaultContainerDNSInfo =
+    "--default_container_dns={"
+    "  \"" + containerizer + "\": [\n"
+    "    {\n"
+    "      \"network_mode\": \"HOST\",\n"
+    "      \"dns\": {\n"
+    "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+    "      }\n"
+    "    }\n"
+    "  ]\n"
+    "}";
+
+  argv[3] = defaultContainerDNSInfo.c_str();
+
+  {
+    slave::Flags flags;
+    Try<flags::Warnings> load = flags.load(None(), argc, argv);
+    EXPECT_ERROR(load);
+  }
+
+  string network_mode = (containerizer == "mesos" ? "CNI"  : "USER");
+
+  // Verifies multiple DNS configuration without network name for
+  // user-defined CNM network or CNI network is not supported.
+  defaultContainerDNSInfo =
+    "--default_container_dns={"
+    "  \"" + containerizer + "\": [\n"
+    "    {\n"
+    "      \"network_mode\": \"" + network_mode + "\",\n"
+    "      \"dns\": {\n"
+    "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+    "      }\n"
+    "    },\n"
+    "    {\n"
+    "      \"network_mode\": \"" + network_mode + "\",\n"
+    "      \"dns\": {\n"
+    "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+    "      }\n"
+    "    }\n"
+    "  ]\n"
+    "}";
+
+  argv[3] = defaultContainerDNSInfo.c_str();
+
+  {
+    slave::Flags flags;
+    Try<flags::Warnings> load = flags.load(None(), argc, argv);
+    EXPECT_ERROR(load);
+  }
+
+  // Verifies multiple DNS configuration with the same network name for CNI
+  // network or user-defined CNM network or CNI network is not supported.
+  defaultContainerDNSInfo =
+    "--default_container_dns={"
+    "  \"" + containerizer + "\": [\n"
+    "    {\n"
+    "      \"network_mode\": \"" + network_mode + "\",\n"
+    "      \"network_name\": \"net1\",\n"
+    "      \"dns\": {\n"
+    "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+    "      }\n"
+    "    },\n"
+    "    {\n"
+    "      \"network_mode\": \"" + network_mode + "\",\n"
+    "      \"network_name\": \"net1\",\n"
+    "      \"dns\": {\n"
+    "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+    "      }\n"
+    "    }\n"
+    "  ]\n"
+    "}";
+
+  argv[3] = defaultContainerDNSInfo.c_str();
+
+  {
+    slave::Flags flags;
+    Try<flags::Warnings> load = flags.load(None(), argc, argv);
+    EXPECT_ERROR(load);
+  }
+
+  // Verifies multiple DNS configuration for Docker
+  // default bridge network is not supported.
+  if (containerizer == "docker") {
+    // Verifies the host network mode is not supported.
+    defaultContainerDNSInfo =
+      "--default_container_dns={"
+      "  \"" + containerizer + "\": [\n"
+      "    {\n"
+      "      \"network_mode\": \"BRIDGE\",\n"
+      "      \"dns\": {\n"
+      "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+      "      }\n"
+      "    },\n"
+      "    {\n"
+      "      \"network_mode\": \"BRIDGE\",\n"
+      "      \"dns\": {\n"
+      "        \"nameservers\": [ \"8.8.8.8\" ]\n"
+      "      }\n"
+      "    }\n"
+      "  ]\n"
+      "}";
+
+    argv[3] = defaultContainerDNSInfo.c_str();
+
+    {
+      slave::Flags flags;
+      Try<flags::Warnings> load = flags.load(None(), argc, argv);
+      EXPECT_ERROR(load);
+    }
   }
 }
 

@@ -40,7 +40,6 @@
 #include <stout/os.hpp>
 #include <stout/try.hpp>
 
-
 using namespace mesos;
 
 using std::string;
@@ -51,10 +50,12 @@ using process::defer;
 using process::metrics::Gauge;
 using process::metrics::Counter;
 
-
 const double CPUS_PER_TASK = 0.1;
 const int MEMORY_PER_TASK = 16;
 const Bytes DISK_PER_TASK = Megabytes(5);
+
+constexpr char FRAMEWORK_PRINCIPAL[] = "disk-full-framework-cpp";
+constexpr char FRAMEWORK_METRICS_PREFIX[] = "disk_full_framework";
 
 
 class Flags : public virtual flags::FlagsBase
@@ -62,6 +63,11 @@ class Flags : public virtual flags::FlagsBase
 public:
   Flags()
   {
+    add(&Flags::name,
+        "name",
+        "Name to be used by the framework.",
+        "Disk Full Framework");
+
     add(&Flags::master,
         "master",
         "Master to connect to.");
@@ -98,6 +104,7 @@ public:
         "and the task will terminated.\n");
   }
 
+  string name;
   string master;
   bool run_once;
   Duration pre_sleep_duration;
@@ -178,7 +185,7 @@ public:
           " && sleep " + stringify(flags.post_sleep_duration.secs());
 
       TaskInfo task;
-      task.set_name("Disk full framework task");
+      task.set_name(flags.name + " Task");
       task.mutable_task_id()->set_value(stringify(taskId));
       task.mutable_slave_id()->MergeFrom(offer.slave_id());
       task.mutable_resources()->CopyFrom(taskResources);
@@ -282,14 +289,15 @@ private:
   {
     Metrics(const DiskFullSchedulerProcess& _scheduler)
       : uptime_secs(
-            "disk_full_framework/uptime_secs",
+            string(FRAMEWORK_METRICS_PREFIX) + "/uptime_secs",
             defer(_scheduler, &DiskFullSchedulerProcess::_uptime_secs)),
         registered(
-            "disk_full_framework/registered",
+            string(FRAMEWORK_METRICS_PREFIX) + "/registered",
             defer(_scheduler, &DiskFullSchedulerProcess::_registered)),
-        tasks_finished("disk_full_framework/tasks_finished"),
-        tasks_disk_full("disk_full_framework/tasks_disk_full"),
-        abnormal_terminations("disk_full_framework/abnormal_terminations")
+        tasks_finished(string(FRAMEWORK_METRICS_PREFIX) + "/tasks_finished"),
+        tasks_disk_full(string(FRAMEWORK_METRICS_PREFIX) + "/tasks_disk_full"),
+        abnormal_terminations(
+            string(FRAMEWORK_METRICS_PREFIX) + "/abnormal_terminations")
     {
       process::metrics::add(uptime_secs);
       process::metrics::add(registered);
@@ -438,7 +446,7 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill the current user.
-  framework.set_name("Disk Full Framework (C++)");
+  framework.set_name(flags.name);
   framework.set_checkpoint(true);
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::RESERVATION_REFINEMENT);
@@ -474,10 +482,9 @@ int main(int argc, char** argv)
     driver = new MesosSchedulerDriver(
         &scheduler, framework, flags.master, credential);
   } else {
-    framework.set_principal("disk-full-framework-cpp");
+    framework.set_principal(FRAMEWORK_PRINCIPAL);
 
-    driver = new MesosSchedulerDriver(
-        &scheduler, framework, flags.master);
+    driver = new MesosSchedulerDriver(&scheduler, framework, flags.master);
   }
 
   int status = driver->run() == DRIVER_STOPPED ? 0 : 1;

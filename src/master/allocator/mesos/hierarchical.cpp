@@ -206,8 +206,8 @@ void HierarchicalAllocatorProcess::recover(
   // exacerbate the issue.
 
   if (quotas.empty()) {
-    VLOG(1) << "Skipping recovery of hierarchical allocator: "
-            << "nothing to recover";
+    VLOG(1) << "Skipping recovery of hierarchical allocator:"
+            << " nothing to recover";
 
     return;
   }
@@ -230,8 +230,8 @@ void HierarchicalAllocatorProcess::recover(
   // to expected behavior by the user: the allocator is not paused until
   // a new agent is added.
   if (expectedAgentCount.get() == 0) {
-    VLOG(1) << "Skipping recovery of hierarchical allocator: "
-            << "no reconnecting agents to wait for";
+    VLOG(1) << "Skipping recovery of hierarchical allocator:"
+            << " no reconnecting agents to wait for";
 
     return;
   }
@@ -1015,33 +1015,42 @@ void HierarchicalAllocatorProcess::updateInverseOffer(
     return;
   }
 
-  // Create a refused resource filter.
-  Try<Duration> seconds = Duration::create(filters.get().refuse_seconds());
+  // Create a refused inverse offer filter.
+  Try<Duration> timeout = Duration::create(Filters().refuse_seconds());
 
-  if (seconds.isError()) {
-    LOG(WARNING) << "Using the default value of 'refuse_seconds' to create "
-                 << "the refused inverse offer filter because the input value "
-                 << "is invalid: " << seconds.error();
+  if (filters->refuse_seconds() > Days(365).secs()) {
+    LOG(WARNING) << "Using 365 days to create the refused inverse offer"
+                 << " filter because the input value is too big";
 
-    seconds = Duration::create(Filters().refuse_seconds());
-  } else if (seconds.get() < Duration::zero()) {
-    LOG(WARNING) << "Using the default value of 'refuse_seconds' to create "
-                 << "the refused inverse offer filter because the input value "
-                 << "is negative";
+    timeout = Days(365);
+  } else if (filters->refuse_seconds() < 0) {
+    LOG(WARNING) << "Using the default value of 'refuse_seconds' to create"
+                 << " the refused inverse offer filter because the input"
+                 << " value is negative";
 
-    seconds = Duration::create(Filters().refuse_seconds());
+    timeout = Duration::create(Filters().refuse_seconds());
+  } else {
+    timeout = Duration::create(filters->refuse_seconds());
+
+    if (timeout.isError()) {
+      LOG(WARNING) << "Using the default value of 'refuse_seconds' to create"
+                   << " the refused inverse offer filter because the input"
+                   << " value is invalid: " + timeout.error();
+
+      timeout = Duration::create(Filters().refuse_seconds());
+    }
   }
 
-  CHECK_SOME(seconds);
+  CHECK_SOME(timeout);
 
-  if (seconds.get() != Duration::zero()) {
+  if (timeout.get() != Duration::zero()) {
     VLOG(1) << "Framework " << frameworkId
             << " filtered inverse offers from agent " << slaveId
-            << " for " << seconds.get();
+            << " for " << timeout.get();
 
     // Create a new inverse offer filter and delay its expiration.
     InverseOfferFilter* inverseOfferFilter =
-      new RefusedInverseOfferFilter(Timeout::in(seconds.get()));
+      new RefusedInverseOfferFilter(Timeout::in(timeout.get()));
 
     framework.inverseOfferFilters[slaveId].insert(inverseOfferFilter);
 
@@ -1053,7 +1062,7 @@ void HierarchicalAllocatorProcess::updateInverseOffer(
              InverseOfferFilter*) = &Self::expire;
 
     delay(
-        seconds.get(),
+        timeout.get(),
         self(),
         expireInverseOffer,
         frameworkId,
@@ -1167,20 +1176,29 @@ void HierarchicalAllocatorProcess::recoverResources(
   }
 
   // Create a refused resources filter.
-  Try<Duration> timeout = Duration::create(filters.get().refuse_seconds());
+  Try<Duration> timeout = Duration::create(Filters().refuse_seconds());
 
-  if (timeout.isError()) {
-    LOG(WARNING) << "Using the default value of 'refuse_seconds' to create "
-                 << "the refused resources filter because the input value "
-                 << "is invalid: " << timeout.error();
+  if (filters->refuse_seconds() > Days(365).secs()) {
+    LOG(WARNING) << "Using 365 days to create the refused resources offer"
+                 << " filter because the input value is too big";
+
+    timeout = Days(365);
+  } else if (filters->refuse_seconds() < 0) {
+    LOG(WARNING) << "Using the default value of 'refuse_seconds' to create"
+                 << " the refused resources offer filter because the input"
+                 << " value is negative";
 
     timeout = Duration::create(Filters().refuse_seconds());
-  } else if (timeout.get() < Duration::zero()) {
-    LOG(WARNING) << "Using the default value of 'refuse_seconds' to create "
-                 << "the refused resources filter because the input value "
-                 << "is negative";
+  } else {
+    timeout = Duration::create(filters->refuse_seconds());
 
-    timeout = Duration::create(Filters().refuse_seconds());
+    if (timeout.isError()) {
+      LOG(WARNING) << "Using the default value of 'refuse_seconds' to create"
+                   << " the refused resources offer filter because the input"
+                   << " value is invalid: " + timeout.error();
+
+      timeout = Duration::create(Filters().refuse_seconds());
+    }
   }
 
   CHECK_SOME(timeout);
@@ -2149,9 +2167,10 @@ bool HierarchicalAllocatorProcess::isFiltered(
   // Prevent offers from non-HIERARCHICAL_ROLE agents to be allocated
   // to hierarchical roles.
   if (!slave.capabilities.hierarchicalRole && strings::contains(role, "/")) {
-    LOG(WARNING) << "Implicitly filtering agent " << slaveId << " from role "
-                 << role << " because the role is hierarchical but the agent"
-                 << " is not HIERARCHICAL_ROLE capable";
+    LOG(WARNING) << "Implicitly filtering agent " << slaveId
+                 << " from role " << role
+                 << " because the role is hierarchical but the agent is not"
+                 << " HIERARCHICAL_ROLE capable";
 
     return true;
   }

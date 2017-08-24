@@ -306,6 +306,63 @@ struct HttpConnection
 };
 
 
+// This process periodically sends heartbeats to a given HTTP connection.
+// The `Message` template parameter is the type of the heartbeat event passed
+// into the heartbeater during construction, while the `Event` template
+// parameter is the versioned event type which is sent to the client.
+// The optional delay parameter is used to specify the delay period before it
+// sends the first heartbeat.
+template <typename Message, typename Event>
+class Heartbeater : public process::Process<Heartbeater<Message, Event>>
+{
+public:
+  Heartbeater(const std::string& _logMessage,
+              const Message& _heartbeatMessage,
+              const HttpConnection& _http,
+              const Duration& _interval,
+              const Option<Duration>& _delay = None())
+    : process::ProcessBase(process::ID::generate("heartbeater")),
+      logMessage(_logMessage),
+      heartbeatMessage(_heartbeatMessage),
+      http(_http),
+      interval(_interval),
+      delay(_delay) {}
+
+protected:
+  virtual void initialize() override
+  {
+    if (delay.isSome()) {
+      process::delay(
+          delay.get(),
+          this,
+          &Heartbeater<Message, Event>::heartbeat);
+    } else {
+      heartbeat();
+    }
+  }
+
+private:
+  void heartbeat()
+  {
+    // Only send a heartbeat if the connection is not closed.
+    if (http.closed().isPending()) {
+      VLOG(1) << "Sending heartbeat to " << logMessage;
+
+      Message message(heartbeatMessage);
+      http.send<Message, Event>(message);
+    }
+
+    process::delay(interval, this, &Heartbeater<Message, Event>::heartbeat);
+  }
+
+  const std::string logMessage;
+  const Message heartbeatMessage;
+  HttpConnection http;
+  const Duration interval;
+  const Option<Duration> delay;
+};
+
+
 class Master : public ProtobufProcess<Master>
 {
 public:
@@ -1364,6 +1421,11 @@ private:
             principal) const;
 
     process::Future<process::http::Response> _teardown(
+        const FrameworkID& id,
+        const Option<process::http::authentication::Principal>&
+            principal) const;
+
+    process::Future<process::http::Response> __teardown(
         const FrameworkID& id) const;
 
     process::Future<process::http::Response> _updateMaintenanceSchedule(
@@ -1452,7 +1514,8 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
-    mesos::master::Response::GetAgents _getAgents() const;
+    mesos::master::Response::GetAgents _getAgents(
+        const process::Owned<AuthorizationAcceptor>& rolesAcceptor) const;
 
     process::Future<process::http::Response> getFlags(
         const mesos::master::Call& call,
@@ -1578,7 +1641,8 @@ private:
     mesos::master::Response::GetState _getState(
         const process::Owned<ObjectApprover>& frameworksApprover,
         const process::Owned<ObjectApprover>& taskApprover,
-        const process::Owned<ObjectApprover>& executorsApprover) const;
+        const process::Owned<ObjectApprover>& executorsApprover,
+        const process::Owned<AuthorizationAcceptor>& rolesAcceptor) const;
 
     process::Future<process::http::Response> subscribe(
         const mesos::master::Call& call,
@@ -1586,6 +1650,11 @@ private:
         ContentType contentType) const;
 
     process::Future<process::http::Response> readFile(
+        const mesos::master::Call& call,
+        const Option<process::http::authentication::Principal>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> teardown(
         const mesos::master::Call& call,
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
@@ -1827,8 +1896,22 @@ private:
     // might only be interested in a subset of events.
     struct Subscriber
     {
-      Subscriber(const HttpConnection& _http)
-        : http(_http) {}
+      Subscriber(const HttpConnection& _http) : http(_http)
+      {
+        mesos::master::Event event;
+        event.set_type(mesos::master::Event::HEARTBEAT);
+
+        heartbeater =
+          process::Owned<Heartbeater<mesos::master::Event, v1::master::Event>>(
+              new Heartbeater<mesos::master::Event, v1::master::Event>(
+                  "subscriber " + stringify(http.streamId),
+                  event,
+                  http,
+                  DEFAULT_HEARTBEAT_INTERVAL,
+                  DEFAULT_HEARTBEAT_INTERVAL));
+
+        process::spawn(heartbeater.get());
+      }
 
       // Not copyable, not assignable.
       Subscriber(const Subscriber&) = delete;
@@ -1841,9 +1924,14 @@ private:
         // after passing ownership to the `Subscriber` object. See MESOS-5843
         // for more details.
         http.close();
+
+        terminate(heartbeater.get());
+        wait(heartbeater.get());
       }
 
       HttpConnection http;
+      process::Owned<Heartbeater<mesos::master::Event, v1::master::Event>>
+        heartbeater;
     };
 
     // Sends the event to all subscribers connected to the 'api/vX' endpoint.
@@ -2186,47 +2274,6 @@ private:
 inline std::ostream& operator<<(
     std::ostream& stream,
     const Framework& framework);
-
-
-// This process periodically sends heartbeats to a scheduler on the
-// given HTTP connection.
-class Heartbeater : public process::Process<Heartbeater>
-{
-public:
-  Heartbeater(const FrameworkID& _frameworkId,
-              const HttpConnection& _http,
-              const Duration& _interval)
-    : process::ProcessBase(process::ID::generate("heartbeater")),
-      frameworkId(_frameworkId),
-      http(_http),
-      interval(_interval) {}
-
-protected:
-  virtual void initialize() override
-  {
-    heartbeat();
-  }
-
-private:
-  void heartbeat()
-  {
-    // Only send a heartbeat if the connection is not closed.
-    if (http.closed().isPending()) {
-      VLOG(1) << "Sending heartbeat to " << frameworkId;
-
-      scheduler::Event event;
-      event.set_type(scheduler::Event::HEARTBEAT);
-
-      http.send(event);
-    }
-
-    process::delay(interval, self(), &Self::heartbeat);
-  }
-
-  const FrameworkID frameworkId;
-  HttpConnection http;
-  const Duration interval;
-};
 
 
 // TODO(bmahler): Keeping the task and executor information in sync
@@ -2715,8 +2762,15 @@ struct Framework
 
     // TODO(vinod): Make heartbeat interval configurable and include
     // this information in the SUBSCRIBED response.
+    scheduler::Event event;
+    event.set_type(scheduler::Event::HEARTBEAT);
+
     heartbeater =
-      new Heartbeater(info.id(), http.get(), DEFAULT_HEARTBEAT_INTERVAL);
+      new Heartbeater<scheduler::Event, v1::scheduler::Event>(
+          "framework " + stringify(info.id()),
+          event,
+          http.get(),
+          DEFAULT_HEARTBEAT_INTERVAL);
 
     process::spawn(heartbeater.get().get());
   }
@@ -2817,7 +2871,8 @@ struct Framework
   hashmap<SlaveID, Resources> offeredResources;
 
   // This is only set for HTTP frameworks.
-  Option<process::Owned<Heartbeater>> heartbeater;
+  Option<process::Owned<Heartbeater<scheduler::Event, v1::scheduler::Event>>>
+    heartbeater;
 
 private:
   Framework(Master* const _master,

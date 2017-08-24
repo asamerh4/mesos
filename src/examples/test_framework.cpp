@@ -51,6 +51,12 @@ using mesos::Resources;
 const int32_t CPUS_PER_TASK = 1;
 const int32_t MEM_PER_TASK = 128;
 
+constexpr char EXECUTOR_BINARY[] = "test-executor";
+constexpr char EXECUTOR_NAME[] = "Test Executor (C++)";
+constexpr char FRAMEWORK_NAME[] = "Test Framework (C++)";
+constexpr char FRAMEWORK_PRINCIPAL[] = "test-framework-cpp";
+
+
 class TestScheduler : public Scheduler
 {
 public:
@@ -130,8 +136,8 @@ public:
     }
   }
 
-  virtual void offerRescinded(SchedulerDriver* driver,
-                              const OfferID& offerId) {}
+  virtual void offerRescinded(SchedulerDriver* driver, const OfferID& offerId)
+  {}
 
   virtual void statusUpdate(SchedulerDriver* driver, const TaskStatus& status)
   {
@@ -150,8 +156,7 @@ public:
            << " is in unexpected state " << status.state()
            << " with reason " << status.reason()
            << " from source " << status.source()
-           << " with message '" << status.message() << "'"
-           << endl;
+           << " with message '" << status.message() << "'" << endl;
       driver->abort();
     }
 
@@ -164,17 +169,21 @@ public:
     }
   }
 
-  virtual void frameworkMessage(SchedulerDriver* driver,
-                                const ExecutorID& executorId,
-                                const SlaveID& slaveId,
-                                const string& data) {}
+  virtual void frameworkMessage(
+      SchedulerDriver* driver,
+      const ExecutorID& executorId,
+      const SlaveID& slaveId,
+      const string& data)
+  {}
 
   virtual void slaveLost(SchedulerDriver* driver, const SlaveID& sid) {}
 
-  virtual void executorLost(SchedulerDriver* driver,
-                            const ExecutorID& executorID,
-                            const SlaveID& slaveID,
-                            int status) {}
+  virtual void executorLost(
+      SchedulerDriver* driver,
+      const ExecutorID& executorID,
+      const SlaveID& slaveID,
+      int status)
+  {}
 
   virtual void error(SchedulerDriver* driver, const string& message)
   {
@@ -220,11 +229,10 @@ int main(int argc, char** argv)
   string uri;
   Option<string> value = os::getenv("MESOS_HELPER_DIR");
   if (value.isSome()) {
-    uri = path::join(value.get(), "test-executor");
+    uri = path::join(value.get(), EXECUTOR_BINARY);
   } else {
-    uri = path::join(
-        os::realpath(Path(argv[0]).dirname()).get(),
-        "test-executor");
+    uri =
+      path::join(os::realpath(Path(argv[0]).dirname()).get(), EXECUTOR_BINARY);
   }
 
   Flags flags;
@@ -251,20 +259,18 @@ int main(int argc, char** argv)
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
   executor.mutable_command()->set_value(uri);
-  executor.set_name("Test Executor (C++)");
-  executor.set_source("cpp_test");
+  executor.set_name(EXECUTOR_NAME);
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill in the current user.
-  framework.set_name("Test Framework (C++)");
+  framework.set_name(FRAMEWORK_NAME);
   framework.set_role(flags.role);
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   value = os::getenv("MESOS_CHECKPOINT");
   if (value.isSome()) {
-    framework.set_checkpoint(
-        numify<bool>(value.get()).get());
+    framework.set_checkpoint(numify<bool>(value.get()).get());
   }
 
   bool implicitAcknowledgements = true;
@@ -306,7 +312,7 @@ int main(int argc, char** argv)
         implicitAcknowledgements,
         credential);
   } else {
-    framework.set_principal("test-framework-cpp");
+    framework.set_principal(FRAMEWORK_PRINCIPAL);
 
     driver = new MesosSchedulerDriver(
         &scheduler,

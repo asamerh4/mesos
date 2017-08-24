@@ -37,6 +37,7 @@
 
 #include "mesos/resources.hpp"
 
+#include "messages/flags.hpp"
 
 // OS-specific default prefix to be used for the DOCKER_HOST environment
 // variable. Note that on Linux, the default prefix is the only prefix
@@ -47,7 +48,6 @@ constexpr char DEFAULT_DOCKER_HOST_PREFIX[] = "npipe://";
 #else
 constexpr char DEFAULT_DOCKER_HOST_PREFIX[] = "unix://";
 #endif // __WINDOWS__
-
 
 // Abstraction for working with Docker (modeled on CLI).
 //
@@ -115,6 +115,15 @@ public:
 
     const std::vector<Device> devices;
 
+    // Returns the DNS nameservers set by "--dns" option.
+    const std::vector<std::string> dns;
+
+    // Returns the DNS options set by "--dns-option" option.
+    const std::vector<std::string> dnsOptions;
+
+    // Returns the DNS search domains set by "--dns-search" option.
+    const std::vector<std::string> dnsSearch;
+
   private:
     Container(
         const std::string& output,
@@ -123,14 +132,20 @@ public:
         const Option<pid_t>& pid,
         bool started,
         const Option<std::string>& ipAddress,
-        const std::vector<Device>& devices)
+        const std::vector<Device>& devices,
+        const std::vector<std::string>& dns,
+        const std::vector<std::string>& dnsOptions,
+        const std::vector<std::string>& dnsSearch)
       : output(output),
         id(id),
         name(name),
         pid(pid),
         started(started),
         ipAddress(ipAddress),
-        devices(devices) {}
+        devices(devices),
+        dns(dns),
+        dnsOptions(dnsOptions),
+        dnsSearch(dnsSearch) {}
   };
 
   class Image
@@ -163,7 +178,8 @@ public:
         const Option<mesos::Resources>& resources = None(),
         bool enableCfsQuota = false,
         const Option<std::map<std::string, std::string>>& env = None(),
-        const Option<std::vector<Device>>& devices = None());
+        const Option<std::vector<Device>>& devices = None(),
+        const Option<mesos::internal::ContainerDNSInfo>& defaultContainerDNS = None()); // NOLINT(whitespace/line_length)
 
     // "--privileged" option.
     bool privileged;
@@ -192,6 +208,15 @@ public:
 
     // "--hostname" option.
     Option<std::string> hostname;
+
+    // "--dns" option.
+    std::vector<std::string> dns;
+
+    // "--dns-search" option.
+    std::vector<std::string> dnsSearch;
+
+    // "--dns-opt" option.
+    std::vector<std::string> dnsOpt;
 
     // Port mappings for "-p" option.
     std::vector<PortMapping> portMappings;

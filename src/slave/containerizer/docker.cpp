@@ -39,6 +39,7 @@
 #include <stout/jsonify.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/protobuf.hpp>
 #include <stout/uuid.hpp>
 
 #include <stout/os/killtree.hpp>
@@ -256,6 +257,11 @@ DockerContainerizer::~DockerContainerizer()
 
   if (taskEnvironment.isSome()) {
     dockerFlags.task_environment = string(jsonify(taskEnvironment.get()));
+  }
+
+  if (flags.default_container_dns.isSome()) {
+    dockerFlags.default_container_dns =
+      string(jsonify(JSON::Protobuf(flags.default_container_dns.get())));
   }
 
 #ifdef __linux__
@@ -1324,6 +1330,13 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
         self(),
         [=](const ContainerIO& containerIO)
           -> Future<Docker::Container> {
+    // We need to pass `flags.default_container_dns` only when the agent is not
+    // running in a Docker container. This is to handle the case of launching a
+    // custom executor in a Docker container. If the agent is running in a
+    // Docker container (i.e., flags.docker_mesos_image.isSome() == true), that
+    // is the case of launching `mesos-docker-executor` in a Docker container
+    // with the Docker image `flags.docker_mesos_image`. In that case we already
+    // set `flags.default_container_dns` in the method `dockerFlags()`.
     Try<Docker::RunOptions> runOptions = Docker::RunOptions::create(
         container->container,
         container->command,
@@ -1337,7 +1350,8 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
         false,
 #endif
         container->environment,
-        None() // No extra devices.
+        None(), // No extra devices.
+        flags.docker_mesos_image.isNone() ? flags.default_container_dns : None()
     );
 
     if (runOptions.isError()) {
@@ -1408,7 +1422,18 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
   foreach (const Environment::Variable& variable,
            container->containerConfig.executor_info()
              .command().environment().variables()) {
-    environment[variable.name()] = variable.value();
+    const string& name = variable.name();
+    const string& value = variable.value();
+
+    if (environment.count(name)) {
+      VLOG(1) << "Overwriting environment variable '"
+              << name << "', original: '"
+              << environment[name] << "', new: '"
+              << value << "', for container "
+              << container->id;
+    }
+
+    environment[name] = value;
   }
 
   // Pass GLOG flag to the executor.

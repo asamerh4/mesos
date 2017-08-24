@@ -135,7 +135,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Create an authorized task.
   TaskInfo task;
@@ -207,7 +207,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   // Create an unauthorized task.
   TaskInfo task;
@@ -281,7 +281,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTaskGroup)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -382,7 +382,7 @@ TEST_F(MasterAuthorizationTest, KillTask)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
 
@@ -408,6 +408,7 @@ TEST_F(MasterAuthorizationTest, KillTask)
   // Framework should get a TASK_KILLED right away.
   AWAIT_READY(status);
   EXPECT_EQ(TASK_KILLED, status->state());
+  EXPECT_EQ(TaskStatus::REASON_TASK_KILLED_DURING_LAUNCH, status->reason());
 
   Future<Nothing> recoverResources =
     FUTURE_DISPATCH(_, &MesosAllocatorProcess::recoverResources);
@@ -465,7 +466,7 @@ TEST_F(MasterAuthorizationTest, KillPendingTaskInTaskGroup)
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -530,7 +531,9 @@ TEST_F(MasterAuthorizationTest, KillPendingTaskInTaskGroup)
   AWAIT_READY(task1Status);
   EXPECT_EQ(TASK_KILLED, task1Status->state());
   EXPECT_TRUE(strings::contains(
-      task1Status->message(), "Killed pending task"));
+      task1Status->message(), "Killed before delivery to the agent"));
+  EXPECT_EQ(TaskStatus::REASON_TASK_KILLED_DURING_LAUNCH,
+            task1Status->reason());
 
   Future<Nothing> recoverResources =
     FUTURE_DISPATCH(_, &MesosAllocatorProcess::recoverResources);
@@ -544,6 +547,8 @@ TEST_F(MasterAuthorizationTest, KillPendingTaskInTaskGroup)
   EXPECT_TRUE(strings::contains(
       task2Status->message(),
       "A task within the task group was killed before delivery to the agent"));
+  EXPECT_EQ(TaskStatus::REASON_TASK_KILLED_DURING_LAUNCH,
+            task2Status->reason());
 
   // No task launch should happen resulting in all resources being
   // returned to the allocator.
@@ -595,7 +600,7 @@ TEST_F(MasterAuthorizationTest, SlaveRemovedLost)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
 
@@ -700,7 +705,7 @@ TEST_F(MasterAuthorizationTest, SlaveRemovedDropped)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
 
@@ -801,7 +806,7 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
 
@@ -873,7 +878,7 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   ASSERT_SOME(slave1);
 
   AWAIT_READY(offers1);
-  EXPECT_NE(0u, offers1->size());
+  EXPECT_FALSE(offers1->empty());
 
   // Launch the first task with the default executor id.
   ExecutorInfo executor1;
@@ -915,7 +920,7 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
-  EXPECT_NE(0u, offers2->size());
+  EXPECT_FALSE(offers2->empty());
 
   // Now launch the second task with the same executor id but
   // a different executor command.
@@ -1534,7 +1539,7 @@ TYPED_TEST(MasterAuthorizerTest, FilterStateEndpoint)
   AWAIT_READY(registered);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test");
@@ -1723,7 +1728,7 @@ TYPED_TEST(MasterAuthorizerTest, FilterFrameworksEndpoint)
   AWAIT_READY(registered);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test");
@@ -1914,7 +1919,7 @@ TYPED_TEST(MasterAuthorizerTest, FilterTasksEndpoint)
   AWAIT_READY(registered);
 
   AWAIT_READY(offers);
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("test");
@@ -2141,7 +2146,7 @@ TYPED_TEST(MasterAuthorizerTest, FilterRolesEndpoint)
 
     JSON::Object tasks = parse.get();
     ASSERT_TRUE(tasks.values["roles"].is<JSON::Array>());
-    EXPECT_EQ(0u, tasks.values["roles"].as<JSON::Array>().values.size());
+    EXPECT_TRUE(tasks.values["roles"].as<JSON::Array>().values.empty());
   }
 }
 

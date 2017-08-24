@@ -38,6 +38,7 @@
 #include <process/queue.hpp>
 #include <process/subprocess.hpp>
 
+#include <stout/json.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -58,6 +59,7 @@
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
 #include "tests/mock_fetcher.hpp"
+#include "tests/utils.hpp"
 
 using mesos::fetcher::FetcherInfo;
 
@@ -146,6 +148,8 @@ protected:
   Try<Task> launchTask(const CommandInfo& commandInfo, size_t taskIndex);
 
   Try<vector<Task>> launchTasks(const vector<CommandInfo>& commandInfos);
+
+  void verifyCacheMetrics();
 
   // Promises whose futures indicate that FetcherProcess::_fetch() has been
   // called for a task with a given index.
@@ -251,6 +255,43 @@ static void logSandbox(const Path& path)
 }
 
 
+void FetcherCacheTest::verifyCacheMetrics()
+{
+  JSON::Object metrics = Metrics();
+
+  ASSERT_EQ(
+      1u,
+      metrics.values.count("containerizer/fetcher/cache_size_total_bytes"));
+
+  // The total size is always given by the corresponding agent flag.
+  EXPECT_SOME_EQ(
+      flags.fetcher_cache_size.bytes(),
+      metrics.at<JSON::Number>("containerizer/fetcher/cache_size_total_bytes"));
+
+  Try<std::list<Path>> files = fetcherProcess->cacheFiles();
+  ASSERT_SOME(files);
+
+  Bytes used;
+
+  foreach (const auto& file, files.get()) {
+    Try<Bytes> size = os::stat::size(file);
+    ASSERT_SOME(size);
+
+    used += size.get();
+  }
+
+  ASSERT_EQ(
+      1u,
+      metrics.values.count("containerizer/fetcher/cache_size_used_bytes"));
+
+  // Verify that the used amount of cache is the total of the size of
+  // all the files in the cache.
+  EXPECT_SOME_EQ(
+      used.bytes(),
+      metrics.at<JSON::Number>("containerizer/fetcher/cache_size_used_bytes"));
+}
+
+
 void FetcherCacheTest::TearDown()
 {
   if (HasFatalFailure()) {
@@ -333,7 +374,7 @@ void FetcherCacheTest::setupArchiveAsset()
   archivePath = path::join(assetsDirectory, ARCHIVE_NAME);
 
   // Make the archive file read-only, so we can tell if it becomes
-  // executable by acccident.
+  // executable by accident.
   ASSERT_SOME(os::chmod(archivePath, S_IRUSR | S_IRGRP | S_IROTH));
 }
 
@@ -534,7 +575,7 @@ Try<vector<FetcherCacheTest::Task>> FetcherCacheTest::launchTasks(
            (offers.isFailed() ? offers.failure() : "discarded"));
   }
 
-  EXPECT_NE(0u, offers->size());
+  EXPECT_FALSE(offers->empty());
   const Offer offer = offers.get()[0];
 
   vector<TaskInfo> tasks;
@@ -618,7 +659,7 @@ TEST_F(FetcherCacheTest, LocalUncached)
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles()->size());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
 
   const string path = path::join(task->runDirectory.string(), COMMAND_NAME);
   EXPECT_TRUE(isExecutable(path));
@@ -656,6 +697,8 @@ TEST_F(FetcherCacheTest, LocalCached)
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
     ASSERT_SOME(fetcherProcess->cacheFiles());
     EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+    verifyCacheMetrics();
   }
 }
 
@@ -685,6 +728,8 @@ TEST_F(FetcherCacheTest, CachedCustomFilename)
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // Verify that the downloaded executable lives at our custom output path.
   const string executablePath = path::join(
@@ -727,6 +772,8 @@ TEST_F(FetcherCacheTest, CachedCustomOutputFileWithSubdirectory)
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // Verify that the downloaded executable lives at our custom output file
   // path.
@@ -790,7 +837,9 @@ TEST_F(FetcherCacheTest, CachedFallback)
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles()->size());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
+
+  verifyCacheMetrics();
 }
 
 
@@ -827,7 +876,9 @@ TEST_F(FetcherCacheTest, LocalUncachedExtract)
 
   EXPECT_EQ(0u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
-  EXPECT_EQ(0u, fetcherProcess->cacheFiles()->size());
+  EXPECT_TRUE(fetcherProcess->cacheFiles()->empty());
+
+  verifyCacheMetrics();
 }
 
 
@@ -863,6 +914,8 @@ TEST_F(FetcherCacheTest, LocalCachedExtract)
     EXPECT_EQ(1u, fetcherProcess->cacheSize());
     ASSERT_SOME(fetcherProcess->cacheFiles());
     EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+    verifyCacheMetrics();
   }
 }
 
@@ -1013,6 +1066,8 @@ TEST_F(FetcherCacheHttpTest, HttpCachedSerialized)
     ASSERT_SOME(fetcherProcess->cacheFiles());
     EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
+    verifyCacheMetrics();
+
     // 2 requests: 1 for content-length, 1 for download.
     EXPECT_EQ(2u, httpServer->countCommandRequests);
   }
@@ -1077,6 +1132,8 @@ TEST_F(FetcherCacheHttpTest, HttpCachedConcurrent)
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // HTTP requests regarding the archive asset as follows. Archive
   // "content-length" requests: 1, archive file downloads: 2.
@@ -1186,6 +1243,8 @@ TEST_F(FetcherCacheHttpTest, HttpMixed)
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 
   // HTTP requests regarding the command asset as follows. Command
   // "content-length" requests: 0, command file downloads: 3.
@@ -1333,6 +1392,8 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
     ASSERT_SOME(fetcherProcess->cacheFiles());
     EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
+    verifyCacheMetrics();
+
     // content-length requests: 1
     // downloads: 1
     EXPECT_EQ(2u, httpServer->countCommandRequests);
@@ -1391,6 +1452,8 @@ TEST_F(FetcherCacheTest, SimpleEviction)
                 fetcherProcess->cacheFiles()->size());
     }
   }
+
+  verifyCacheMetrics();
 }
 
 
@@ -1473,6 +1536,7 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
+  verifyCacheMetrics();
 
   // Task 1:
 
@@ -1520,6 +1584,7 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
 
+  verifyCacheMetrics();
 
   // Task 2:
 
@@ -1564,6 +1629,8 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
   EXPECT_EQ(1u, fetcherProcess->cacheSize());
   ASSERT_SOME(fetcherProcess->cacheFiles());
   EXPECT_EQ(1u, fetcherProcess->cacheFiles()->size());
+
+  verifyCacheMetrics();
 }
 
 
@@ -1619,6 +1686,8 @@ TEST_F(FetcherCacheTest, RemoveLRUCacheEntries)
   }
 
   EXPECT_EQ(2u, fetcherProcess->cacheSize());
+
+  verifyCacheMetrics();
 
   // FetcherProcess::cacheFiles returns all cache files that are in the cache
   // directory. We expect cmd1 and cmd2 to be there, cmd0 should have been

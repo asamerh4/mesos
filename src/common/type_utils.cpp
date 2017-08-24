@@ -362,7 +362,11 @@ bool operator==(
     return false;
   }
 
-  if (Resources(left.resources()) != Resources(right.resources())) {
+  if (left.type() != right.type()) {
+    return false;
+  }
+
+  if (left.name() != right.name()) {
     return false;
   }
 

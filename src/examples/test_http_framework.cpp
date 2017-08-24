@@ -15,8 +15,8 @@
 // limitations under the License.
 
 #include <iostream>
-#include <string>
 #include <queue>
+#include <string>
 
 #include <boost/lexical_cast.hpp>
 
@@ -39,7 +39,6 @@
 #include <stout/numify.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
-#include <stout/option.hpp>
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
 
@@ -64,6 +63,11 @@ using mesos::v1::scheduler::Event;
 
 const int32_t CPUS_PER_TASK = 1;
 const int32_t MEM_PER_TASK = 128;
+
+constexpr char EXECUTOR_BINARY[] = "test-http-executor";
+constexpr char EXECUTOR_NAME[] = "Test Executor (C++)";
+constexpr char FRAMEWORK_NAME[] = "Event Call Scheduler using libprocess (C++)";
+
 
 class HTTPScheduler : public process::Process<HTTPScheduler>
 {
@@ -201,26 +205,26 @@ public:
   }
 
 protected:
-virtual void initialize()
-{
-  // We initialize the library here to ensure that callbacks are only invoked
-  // after the process has spawned.
-  mesos.reset(new scheduler::Mesos(
-      master,
-      mesos::ContentType::PROTOBUF,
-      process::defer(self(), &Self::connected),
-      process::defer(self(), &Self::disconnected),
-      process::defer(self(), &Self::received, lambda::_1),
-      None()));
-}
+  virtual void initialize()
+  {
+    // We initialize the library here to ensure that callbacks are only invoked
+    // after the process has spawned.
+    mesos.reset(
+        new scheduler::Mesos(
+            master,
+            mesos::ContentType::PROTOBUF,
+            process::defer(self(), &Self::connected),
+            process::defer(self(), &Self::disconnected),
+            process::defer(self(), &Self::received, lambda::_1),
+            None()));
+  }
 
 private:
   void resourceOffers(const vector<Offer>& offers)
   {
     foreach (const Offer& offer, offers) {
       cout << "Received offer " << offer.id() << " with "
-           << Resources(offer.resources())
-           << endl;
+           << Resources(offer.resources()) << endl;
 
       Resources taskResources = Resources::parse(
           "cpus:" + stringify(CPUS_PER_TASK) +
@@ -240,8 +244,7 @@ private:
 
         TaskInfo task;
         task.set_name("Task " + lexical_cast<string>(taskId));
-        task.mutable_task_id()->set_value(
-            lexical_cast<string>(taskId));
+        task.mutable_task_id()->set_value(lexical_cast<string>(taskId));
         task.mutable_agent_id()->MergeFrom(offer.agent_id());
         task.mutable_executor()->MergeFrom(executor);
 
@@ -344,9 +347,7 @@ private:
 
     mesos->send(call);
 
-    process::delay(Seconds(1),
-                   self(),
-                   &Self::doReliableRegistration);
+    process::delay(Seconds(1), self(), &Self::doReliableRegistration);
   }
 
   void finalize()
@@ -406,11 +407,10 @@ int main(int argc, char** argv)
   string uri;
   Option<string> value = os::getenv("MESOS_HELPER_DIR");
   if (value.isSome()) {
-    uri = path::join(value.get(), "test-http-executor");
+    uri = path::join(value.get(), EXECUTOR_BINARY);
   } else {
-    uri = path::join(
-        os::realpath(Path(argv[0]).dirname()).get(),
-        "test-http-executor");
+    uri =
+      path::join(os::realpath(Path(argv[0]).dirname()).get(), EXECUTOR_BINARY);
   }
 
   Flags flags;
@@ -436,7 +436,7 @@ int main(int argc, char** argv)
   }
 
   FrameworkInfo framework;
-  framework.set_name("Event Call Scheduler using libprocess (C++)");
+  framework.set_name(FRAMEWORK_NAME);
   framework.set_role(flags.role);
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::RESERVATION_REFINEMENT);
@@ -448,15 +448,13 @@ int main(int argc, char** argv)
 
   value = os::getenv("MESOS_CHECKPOINT");
   if (value.isSome()) {
-    framework.set_checkpoint(
-        numify<bool>(value.get()).get());
+    framework.set_checkpoint(numify<bool>(value.get()).get());
   }
 
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
   executor.mutable_command()->set_value(uri);
-  executor.set_name("Test Executor (C++)");
-  executor.set_source("cpp_test");
+  executor.set_name(EXECUTOR_NAME);
 
   value = os::getenv("DEFAULT_PRINCIPAL");
   if (value.isNone()) {

@@ -48,10 +48,14 @@ struct UPID;
 }
 
 namespace mesos {
+
+class AuthorizationAcceptor;
+
 namespace internal {
 
 namespace master {
 // Forward declaration (in lieu of an include).
+struct Framework;
 struct Slave;
 } // namespace master {
 
@@ -303,9 +307,25 @@ mesos::master::Event createTaskUpdated(
 mesos::master::Event createTaskAdded(const Task& task);
 
 
+// Helper for creating a 'FRAMEWORK_ADDED' event from a `Framework`.
+mesos::master::Event createFrameworkAdded(
+    const mesos::internal::master::Framework& framework);
+
+
+// Helper for creating a 'FRAMEWORK_UPDATED' event from a `Framework`.
+mesos::master::Event createFrameworkUpdated(
+    const mesos::internal::master::Framework& framework);
+
+
+// Helper for creating a 'FRAMEWORK_REMOVED' event from a `FrameworkInfo`.
+mesos::master::Event createFrameworkRemoved(const FrameworkInfo& frameworkInfo);
+
+
 // Helper for creating an `Agent` response.
 mesos::master::Response::GetAgents::Agent createAgentResponse(
-    const mesos::internal::master::Slave& slave);
+    const mesos::internal::master::Slave& slave,
+    const Option<process::Owned<AuthorizationAcceptor>>& rolesAcceptor =
+      None());
 
 
 // Helper for creating an `AGENT_ADDED` event from a `Slave`.

@@ -117,6 +117,12 @@ Resources devolve(const v1::Resources& resources)
 }
 
 
+ResourceProviderID devolve(const v1::ResourceProviderID& resourceProviderId)
+{
+  return devolve<ResourceProviderID>(resourceProviderId);
+}
+
+
 SlaveID devolve(const v1::AgentID& agentId)
 {
   // NOTE: Not using 'devolve<v1::AgentID, SlaveID>(agentId)' since
@@ -166,15 +172,16 @@ executor::Event devolve(const v1::executor::Event& event)
 }
 
 
-resource_provider::Call devolve(const v1::resource_provider::Call& call)
+mesos::resource_provider::Call devolve(const v1::resource_provider::Call& call)
 {
-  return devolve<resource_provider::Call>(call);
+  return devolve<mesos::resource_provider::Call>(call);
 }
 
 
-resource_provider::Event devolve(const v1::resource_provider::Event& event)
+mesos::resource_provider::Event devolve(
+    const v1::resource_provider::Event& event)
 {
-  return devolve<resource_provider::Event>(event);
+  return devolve<mesos::resource_provider::Event>(event);
 }
 
 

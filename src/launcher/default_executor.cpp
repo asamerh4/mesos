@@ -230,7 +230,11 @@ public:
       }
 
       case Event::KILL: {
-        killTask(event.kill().task_id());
+        Option<KillPolicy> killPolicy = event.kill().has_kill_policy()
+          ? Option<KillPolicy>(event.kill().kill_policy())
+          : None();
+
+        killTask(event.kill().task_id(), killPolicy);
         break;
       }
 
@@ -966,7 +970,9 @@ protected:
     terminate(self());
   }
 
-  Future<Nothing> kill(Owned<Container> container)
+  Future<Nothing> kill(
+      Owned<Container> container,
+      const Option<KillPolicy>& killPolicy = None())
   {
     CHECK_EQ(SUBSCRIBED, state);
 
@@ -993,7 +999,59 @@ protected:
       container->healthChecker = None();
     }
 
-    LOG(INFO) << "Killing child container " << container->containerId;
+    const TaskID& taskId = container->taskInfo.task_id();
+
+    LOG(INFO)
+      << "Killing task " << taskId << " running in child container"
+      << " " << container->containerId << " with SIGTERM signal";
+
+    // Default grace period is set to 3s.
+    Duration gracePeriod = Seconds(3);
+
+    Option<KillPolicy> taskInfoKillPolicy;
+    if (container->taskInfo.has_kill_policy()) {
+      taskInfoKillPolicy = container->taskInfo.kill_policy();
+    }
+
+    // Kill policy provided in the `Kill` event takes precedence
+    // over kill policy specified when the task was launched.
+    if (killPolicy.isSome() && killPolicy->has_grace_period()) {
+      gracePeriod = Nanoseconds(killPolicy->grace_period().nanoseconds());
+    } else if (taskInfoKillPolicy.isSome() &&
+               taskInfoKillPolicy->has_grace_period()) {
+      gracePeriod =
+        Nanoseconds(taskInfoKillPolicy->grace_period().nanoseconds());
+    }
+
+    LOG(INFO) << "Scheduling escalation to SIGKILL in " << gracePeriod
+              << " from now";
+
+    const ContainerID& containerId = container->containerId;
+
+    delay(gracePeriod,
+          self(),
+          &Self::escalated,
+          connectionId.get(),
+          containerId,
+          container->taskInfo.task_id(),
+          gracePeriod);
+
+    // Send a 'TASK_KILLING' update if the framework can handle it.
+    CHECK_SOME(frameworkInfo);
+
+    if (protobuf::frameworkHasCapability(
+            frameworkInfo.get(),
+            FrameworkInfo::Capability::TASK_KILLING_STATE)) {
+      TaskStatus status = createTaskStatus(taskId, TASK_KILLING);
+      forward(status);
+    }
+
+    return kill(containerId, SIGTERM);
+  }
+
+  Future<Nothing> kill(const ContainerID& containerId, int signal)
+  {
+    CHECK_EQ(SUBSCRIBED, state);
 
     agent::Call call;
     call.set_type(agent::Call::KILL_NESTED_CONTAINER);
@@ -1001,7 +1059,8 @@ protected:
     agent::Call::KillNestedContainer* kill =
       call.mutable_kill_nested_container();
 
-    kill->mutable_container_id()->CopyFrom(container->containerId);
+    kill->mutable_container_id()->CopyFrom(containerId);
+    kill->set_signal(signal);
 
     return post(None(), call)
       .then([](const Response& /* response */) {
@@ -1009,7 +1068,40 @@ protected:
       });
   }
 
-  void killTask(const TaskID& taskId)
+  void escalated(
+      const UUID& _connectionId,
+      const ContainerID& containerId,
+      const TaskID& taskId,
+      const Duration& timeout)
+  {
+    if (connectionId != _connectionId) {
+      VLOG(1) << "Ignoring signal escalation timeout from a stale connection";
+      return;
+    }
+
+    CHECK_EQ(SUBSCRIBED, state);
+
+    // It might be possible that the container is already terminated.
+    // If that happens, don't bother escalating to SIGKILL.
+    if (!containers.contains(taskId)) {
+      LOG(WARNING)
+        << "Ignoring escalation to SIGKILL since the task '" << taskId
+        << "' running in child container " << containerId << " has"
+        << " already terminated";
+      return;
+    }
+
+    LOG(INFO)
+      << "Task '" << taskId << "' running in child container " << containerId
+      << " did not terminate after " << timeout << ", sending SIGKILL"
+      << " to the container";
+
+    kill(containerId, SIGKILL);
+  }
+
+  void killTask(
+      const TaskID& taskId,
+      const Option<KillPolicy>& killPolicy = None())
   {
     if (shuttingDown) {
       LOG(WARNING) << "Ignoring kill for task '" << taskId
@@ -1019,7 +1111,10 @@ protected:
 
     CHECK_EQ(SUBSCRIBED, state);
 
-    // TODO(anand): Add support for handling kill policies.
+    // TODO(anand): Add support for adjusting the remaining grace period if
+    // we receive another kill request while a task is being killed but has
+    // not terminated yet. See similar comments in the command executor
+    // for more context.
 
     LOG(INFO) << "Received kill for task '" << taskId << "'";
 
@@ -1036,7 +1131,7 @@ protected:
       return;
     }
 
-    kill(container);
+    kill(container, killPolicy);
   }
 
   void taskCheckUpdated(

@@ -90,7 +90,7 @@ TEST_F(FsTest, Find)
 
 TEST_F(FsTest, ReadWriteString)
 {
-  const string testfile  = path::join(os::getcwd(), UUID::random().toString());
+  const string testfile = path::join(os::getcwd(), UUID::random().toString());
   const string teststr = "line1\nline2";
 
   ASSERT_SOME(os::write(testfile, teststr));
@@ -173,7 +173,7 @@ TEST_F(FsTest, Exists)
 
 TEST_F(FsTest, Touch)
 {
-  const string testfile  = path::join(os::getcwd(), UUID::random().toString());
+  const string testfile = path::join(os::getcwd(), UUID::random().toString());
 
   ASSERT_SOME(os::touch(testfile));
   ASSERT_TRUE(os::exists(testfile));
@@ -315,7 +315,7 @@ TEST_F(FsTest, List)
   // Verify that we return empty list when we provide an invalid path.
   Try<list<string>> noFiles = fs::list("this_path_does_not_exist");
   ASSERT_SOME(noFiles);
-  EXPECT_EQ(0u, noFiles.get().size());
+  EXPECT_TRUE(noFiles->empty());
 }
 
 

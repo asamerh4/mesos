@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 
+#include <memory>
 #include <map>
 #include <queue>
 #include <vector>
@@ -40,6 +41,8 @@
 namespace process {
 
 // Forward declaration.
+class EventQueue;
+class Gate;
 class Logging;
 class Sequence;
 
@@ -73,7 +76,7 @@ public:
 
   virtual ~ProcessBase();
 
-  UPID self() const { return pid; }
+  const UPID& self() const { return pid; }
 
 protected:
   /**
@@ -130,17 +133,6 @@ protected:
   virtual void lost(const UPID&) {}
 
   /**
-   * Puts the message at front of this process's message queue.
-   *
-   * @see process::Message
-   */
-  void inject(
-      const UPID& from,
-      const std::string& name,
-      const char* data = nullptr,
-      size_t length = 0);
-
-  /**
    * Sends the message to the specified `UPID`.
    *
    * @see process::Message
@@ -148,6 +140,12 @@ protected:
   void send(
       const UPID& to,
       const std::string& name,
+      const char* data = nullptr,
+      size_t length = 0);
+
+  void send(
+      const UPID& to,
+      std::string&& name,
       const char* data = nullptr,
       size_t length = 0);
 
@@ -377,50 +375,38 @@ protected:
   }
 
   /**
-   * Returns the number of events of the given type currently on the event
-   * queue.
+   * Returns the number of events of the given type currently on the
+   * event queue. MUST be invoked from within the process itself in
+   * order to safely examine events.
    */
   template <typename T>
-  size_t eventCount()
-  {
-    size_t count = 0U;
-
-    synchronized (mutex) {
-      count = std::count_if(events.begin(), events.end(), isEventType<T>);
-    }
-
-    return count;
-  }
+  size_t eventCount();
 
 private:
   friend class SocketManager;
   friend class ProcessManager;
-  friend class ProcessReference;
   friend void* schedule(void*);
 
   // Process states.
-  enum
+  //
+  // Transitioning from BLOCKED to READY also requires enqueueing the
+  // process in the run queue otherwise the events will never be
+  // processed!
+  enum class State
   {
-    BOTTOM,
-    READY,
-    RUNNING,
-    BLOCKED,
-    TERMINATING,
-    TERMINATED
-  } state;
+    BOTTOM, // Uninitialized but events may be enqueued.
+    BLOCKED, // Initialized, no events enqueued.
+    READY, // Initialized, events enqueued.
+    TERMINATING // Initialized, no more events will be enqueued.
+  };
 
-  template <typename T>
-  static bool isEventType(const Event* event)
-  {
-    return event->is<T>();
-  }
+  std::atomic<State> state = ATOMIC_VAR_INIT(State::BOTTOM);
 
-  // Mutex protecting internals.
-  // TODO(benh): Consider replacing with a spinlock, on multi-core systems.
-  std::recursive_mutex mutex;
+  // Flag for indicating that a terminate event has been injected.
+  std::atomic<bool> termination = ATOMIC_VAR_INIT(false);
 
   // Enqueue the specified message, request, or function call.
-  void enqueue(Event* event, bool inject = false);
+  void enqueue(Event* event);
 
   // Delegates for messages.
   std::map<std::string, UPID> delegates;
@@ -472,14 +458,22 @@ private:
       const std::string& name,
       const Owned<http::Request>& request);
 
+  // JSON representation of process. MUST be invoked from within the
+  // process itself in order to safely examine events.
+  operator JSON::Object();
+
   // Static assets(s) to provide.
   std::map<std::string, Asset> assets;
 
-  // Queue of received events, requires lock()ed access!
-  std::deque<Event*> events;
+  // Queue of received events. We employ the PIMPL idiom here and use
+  // a pointer so we can hide the implementation of `EventQueue`.
+  std::unique_ptr<EventQueue> events;
 
-  // Active references.
-  std::atomic_long refs;
+  // NOTE: this is a shared pointer to a _pointer_, hence this is not
+  // responsible for the ProcessBase itself.
+  std::shared_ptr<ProcessBase*> reference;
+
+  std::shared_ptr<Gate> gate;
 
   // Process PID.
   UPID pid;
@@ -556,6 +550,14 @@ network::inet::Address address();
  * Return the PID associated with the global logging process.
  */
 PID<Logging> logging();
+
+
+/**
+ * Returns the number of worker threads the library has created. A
+ * worker thread is a thread that runs a process (i.e., calls
+ * `ProcessBase::serve`).
+ */
+long workers();
 
 
 /**

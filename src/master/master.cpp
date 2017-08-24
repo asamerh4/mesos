@@ -2701,6 +2701,11 @@ void Master::_subscribe(
     // Start the heartbeat after sending SUBSCRIBED event.
     framework->heartbeat();
 
+    if (!subscribers.subscribed.empty()) {
+      subscribers.send(
+          protobuf::master::event::createFrameworkAdded(*framework));
+    }
+
     return;
   }
 
@@ -2745,6 +2750,11 @@ void Master::_subscribe(
       http.close();
       return;
     }
+  }
+
+  if (!subscribers.subscribed.empty()) {
+    subscribers.send(
+        protobuf::master::event::createFrameworkUpdated(*framework));
   }
 
   // Broadcast the new framework pid to all the slaves. We have to
@@ -2996,6 +3006,11 @@ void Master::_subscribe(
     message.mutable_master_info()->MergeFrom(info_);
     framework->send(message);
 
+    if (!subscribers.subscribed.empty()) {
+      subscribers.send(
+          protobuf::master::event::createFrameworkAdded(*framework));
+    }
+
     return;
   }
 
@@ -3067,6 +3082,11 @@ void Master::_subscribe(
       // if necesssary.
       LOG(INFO) << "Framework " << *framework << " failed over";
       failoverFramework(framework, from);
+
+      if (!subscribers.subscribed.empty()) {
+        subscribers.send(
+            protobuf::master::event::createFrameworkUpdated(*framework));
+      }
     } else {
       LOG(INFO) << "Allowing framework " << *framework
                 << " to subscribe with an already used id";
@@ -3114,6 +3134,11 @@ void Master::_subscribe(
       message.mutable_framework_id()->MergeFrom(frameworkInfo.id());
       message.mutable_master_info()->MergeFrom(info_);
       framework->send(message);
+
+      if (!subscribers.subscribed.empty()) {
+        subscribers.send(
+            protobuf::master::event::createFrameworkUpdated(*framework));
+      }
       return;
     }
   } else {
@@ -3129,6 +3154,11 @@ void Master::_subscribe(
       message.set_message(activate.error());
       send(from, message);
       return;
+    }
+
+    if (!subscribers.subscribed.empty()) {
+      subscribers.send(
+          protobuf::master::event::createFrameworkUpdated(*framework));
     }
   }
 
@@ -4771,13 +4801,13 @@ void Master::_accept(
             // since the master rejects attempts to create refined
             // reservations on non-capable agents.
             if (!slave->capabilities.reservationRefinement) {
-              CHECK_SOME(downgradeResources(
-                  message.mutable_task()->mutable_resources()));
+              TaskInfo& task = *message.mutable_task();
 
-              if (message.mutable_task()->has_executor()) {
-                CHECK_SOME(downgradeResources(message.mutable_task()
-                                                ->mutable_executor()
-                                                ->mutable_resources()));
+              CHECK_SOME(downgradeResources(task.mutable_resources()));
+
+              if (task.has_executor()) {
+                CHECK_SOME(downgradeResources(
+                    task.mutable_executor()->mutable_resources()));
               }
             }
 
@@ -4921,7 +4951,8 @@ void Master::_accept(
                   TaskStatus::SOURCE_MASTER,
                   None(),
                   "A task within the task group was killed before"
-                  " delivery to the agent");
+                  " delivery to the agent",
+                  TaskStatus::REASON_TASK_KILLED_DURING_LAUNCH);
 
               metrics->tasks_killed++;
 
@@ -4978,6 +5009,11 @@ void Master::_accept(
           foreach (
               TaskInfo& task, *message.mutable_task_group()->mutable_tasks()) {
             CHECK_SOME(downgradeResources(task.mutable_resources()));
+
+            if (task.has_executor()) {
+              CHECK_SOME(downgradeResources(
+                  task.mutable_executor()->mutable_resources()));
+            }
           }
         }
 
@@ -5285,7 +5321,8 @@ void Master::kill(Framework* framework, const scheduler::Call::Kill& kill)
         TASK_KILLED,
         TaskStatus::SOURCE_MASTER,
         None(),
-        "Killed pending task");
+        "Killed before delivery to the agent",
+        TaskStatus::REASON_TASK_KILLED_DURING_LAUNCH);
 
     forward(update, UPID(), framework);
 
@@ -6231,7 +6268,7 @@ void Master::__reregisterSlave(
     const vector<ExecutorInfo>& executorInfos_,
     const vector<Task>& tasks_,
     const vector<FrameworkInfo>& frameworks,
-    const vector<Archive::Framework>& completedFrameworks,
+    const vector<Archive::Framework>& completedFrameworks_,
     const string& version,
     const vector<SlaveInfo::Capability>& agentCapabilities,
     const Future<bool>& readmit)
@@ -6282,6 +6319,7 @@ void Master::__reregisterSlave(
   protobuf::slave::Capabilities slaveCapabilities(agentCapabilities);
   vector<Task> tasks = tasks_;
   vector<ExecutorInfo> executorInfos = executorInfos_;
+  vector<Archive::Framework> completedFrameworks = completedFrameworks_;
 
   // If the agent is not multi-role capable, inject allocation info.
   if (!slaveCapabilities.multiRole) {
@@ -6324,6 +6362,14 @@ void Master::__reregisterSlave(
     foreach (ExecutorInfo& executor, executorInfos) {
       convertResourceFormat(
           executor.mutable_resources(), POST_RESERVATION_REFINEMENT);
+    }
+
+    foreach (Archive::Framework& completedFramework,
+             completedFrameworks) {
+      foreach (Task& task, *completedFramework.mutable_tasks()) {
+        convertResourceFormat(
+            task.mutable_resources(), POST_RESERVATION_REFINEMENT);
+      }
     }
   }
 
@@ -8469,6 +8515,11 @@ void Master::removeFramework(Framework* framework)
 
   // The framework pointer is now owned by `frameworks.completed`.
   frameworks.completed.set(framework->id(), Owned<Framework>(framework));
+
+  if (!subscribers.subscribed.empty()) {
+    subscribers.send(
+        protobuf::master::event::createFrameworkRemoved(framework->info));
+  }
 }
 
 
@@ -9112,6 +9163,7 @@ void Master::removeOffer(Offer* offer, bool rescind)
   }
 
   // Delete it.
+  LOG(INFO) << "Removing offer " << offer->id();
   offers.erase(offer->id());
   delete offer;
 }

@@ -22,7 +22,6 @@
 #error "linux/ns.hpp is only available on Linux systems."
 #endif
 
-#include <assert.h>
 #include <sched.h>
 #include <unistd.h>
 
@@ -33,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include <stout/assert.hpp>
 #include <stout/error.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/nothing.hpp>
@@ -521,7 +521,7 @@ inline Try<pid_t> clone(
     for (size_t i = 0; i < NAMESPACES; i++) {
       Option<int> fd = fds.get(namespaces[i].nstype);
       if (fd.isSome()) {
-        assert(namespaces[i].nstype & nstypes);
+        ASSERT(namespaces[i].nstype & nstypes);
         if (::setns(fd.get(), namespaces[i].nstype) < 0) {
           close(fds.values());
           ::close(sockets[1]);
@@ -532,12 +532,60 @@ inline Try<pid_t> clone(
 
     close(fds.values());
 
+    auto grandchildMain = [=]() -> int {
+      // Grandchild (second child, now completely entered in the
+      // namespaces of the target).
+      //
+      // Now clone with the specified flags, close the unused socket,
+      // and execute the specified function.
+      pid_t pid = os::clone([=]() {
+        // Now send back the pid and have it be translated appropriately
+        // by the kernel to the enclosing pid namespace.
+        //
+        // NOTE: sending back the pid is best effort because we're going
+        // to exit no matter what.
+        ((struct ucred*) CMSG_DATA(CMSG_FIRSTHDR(&message)))->pid = ::getpid();
+        ((struct ucred*) CMSG_DATA(CMSG_FIRSTHDR(&message)))->uid = ::getuid();
+        ((struct ucred*) CMSG_DATA(CMSG_FIRSTHDR(&message)))->gid = ::getgid();
+
+        if (sendmsg(sockets[1], &message, 0) == -1) {
+          // Failed to send the pid back to the parent!
+          _exit(EXIT_FAILURE);
+        }
+
+        ::close(sockets[1]);
+
+        return f();
+      },
+      flags,
+      stack.get());
+
+      ::close(sockets[1]);
+
+      // TODO(benh): Kill ourselves with an exit status that we can
+      // decode above to determine why `clone` failed.
+      _exit(pid < 0 ? EXIT_FAILURE : EXIT_SUCCESS);
+      UNREACHABLE();
+    };
+
     // Fork again to make sure we're actually in those namespaces
     // (required for the pid namespace at least).
     //
+    // NOTE: We use clone instead of fork here because of a glibc bug.
+    // glibc version < 2.25 has an assertion in 'fork()' which checks
+    // if the child process's pid is not the same as the parent. This
+    // invariant is no longer true with pid namespaces being
+    // introduced. See more details in MESOS-7858.
+    //
+    // NOTE: glibc 'fork()' also specifies 'CLONE_CHILD_SETTID' and
+    // 'CLONE_CHILD_CLEARTID' for the clone flags. However, since we
+    // are not using any pthread library in the grandchild, we don't
+    // need those flags.
+    //
     // TODO(benh): Don't do a fork if we're not actually entering the
     // PID namespace since the extra fork is unnecessary.
-    pid_t grandchild = fork();
+    pid_t grandchild = os::clone(grandchildMain, SIGCHLD);
+
     if (grandchild < 0) {
       // TODO(benh): Exit with `errno` in order to capture `fork` error?
       ::close(sockets[1]);
@@ -565,122 +613,18 @@ inline Try<pid_t> clone(
         }
       }
 
-      assert(WIFEXITED(status) || WIFSIGNALED(status));
+      ASSERT(WIFEXITED(status) || WIFSIGNALED(status));
 
       if (WIFEXITED(status)) {
         _exit(WEXITSTATUS(status));
       }
 
-      assert(WIFSIGNALED(status));
+      ASSERT(WIFSIGNALED(status));
       raise(WTERMSIG(status));
     }
-
-    // Grandchild (second child, now completely entered in the
-    // namespaces of the target).
-    //
-    // Now clone with the specified flags, close the unused socket,
-    // and execute the specified function.
-    pid_t pid = os::clone([=]() {
-      // Now send back the pid and have it be translated appropriately
-      // by the kernel to the enclosing pid namespace.
-      //
-      // NOTE: sending back the pid is best effort because we're going
-      // to exit no matter what.
-      ((struct ucred*) CMSG_DATA(CMSG_FIRSTHDR(&message)))->pid = ::getpid();
-      ((struct ucred*) CMSG_DATA(CMSG_FIRSTHDR(&message)))->uid = ::getuid();
-      ((struct ucred*) CMSG_DATA(CMSG_FIRSTHDR(&message)))->gid = ::getgid();
-
-      if (sendmsg(sockets[1], &message, 0) == -1) {
-        // Failed to send the pid back to the parent!
-        _exit(EXIT_FAILURE);
-      }
-
-      ::close(sockets[1]);
-
-      return f();
-    },
-    flags,
-    stack.get());
-
-    ::close(sockets[1]);
-
-    // TODO(benh): Kill ourselves with an exit status that we can
-    // decode above to determine why `clone` failed.
-    _exit(pid < 0 ? EXIT_FAILURE : EXIT_SUCCESS);
   }
   UNREACHABLE();
 }
-
-
-namespace pid {
-
-inline process::Future<Nothing> destroy(ino_t inode)
-{
-  // Check we're not trying to kill the root namespace.
-  Try<ino_t> ns = ns::getns(1, "pid");
-  if (ns.isError()) {
-    return process::Failure(ns.error());
-  }
-
-  if (ns.get() == inode) {
-    return process::Failure("Cannot destroy root pid namespace");
-  }
-
-  // Or ourselves.
-  ns = ns::getns(::getpid(), "pid");
-  if (ns.isError()) {
-    return process::Failure(ns.error());
-  }
-
-  if (ns.get() == inode) {
-    return process::Failure("Cannot destroy own pid namespace");
-  }
-
-  // Signal all pids in the namespace, including the init pid if it's
-  // still running. Once the init pid has been signalled the kernel
-  // will prevent any new children forking in the namespace and will
-  // also signal all other pids in the namespace.
-  Try<std::set<pid_t>> pids = os::pids();
-  if (pids.isError()) {
-    return process::Failure("Failed to list of processes");
-  }
-
-  foreach (pid_t pid, pids.get()) {
-    // Ignore any errors, probably because the process no longer
-    // exists, and ignorable otherwise.
-    Try<ino_t> ns = ns::getns(pid, "pid");
-    if (ns.isSome() && ns.get() == inode) {
-      kill(pid, SIGKILL);
-    }
-  }
-
-  // Get a new snapshot and do a second pass of the pids to capture
-  // any pids that are dying so we can reap them.
-  pids = os::pids();
-  if (pids.isError()) {
-    return process::Failure("Failed to list of processes");
-  }
-
-  std::list<process::Future<Option<int>>> futures;
-
-  foreach (pid_t pid, pids.get()) {
-    Try<ino_t> ns = ns::getns(pid, "pid");
-    if (ns.isSome() && ns.get() == inode) {
-      futures.push_back(process::reap(pid));
-    }
-
-    // Ignore any errors, probably because the process no longer
-    // exists, and ignorable otherwise.
-  }
-
-  // Wait for all the signalled processes to terminate. The pid
-  // namespace will then be empty and will be released by the kernel
-  // (unless there are additional references).
-  return process::collect(futures)
-    .then([]() { return Nothing(); });
-}
-
-} // namespace pid {
 
 
 // Returns the namespace flags in the string form of bitwise-ORing the

@@ -28,6 +28,7 @@
 #include <process/process.hpp>
 
 #include <process/metrics/counter.hpp>
+#include <process/metrics/gauge.hpp>
 
 #include <stout/hashmap.hpp>
 
@@ -135,13 +136,11 @@ public:
     explicit Cache(Bytes _space) : space(_space), tally(0), filenameSerial(0) {}
     virtual ~Cache() {}
 
-    // Registers the maximum usable space in the cache directory.
-    // TODO(bernd-mesos): This method will disappear when injecting 'flags'
-    // into the fetcher instead of passing 'flags' around as parameter.
-    void setSpace(const Bytes& bytes);
-
     void claimSpace(const Bytes& bytes);
     void releaseSpace(const Bytes& bytes);
+
+    Bytes totalSpace() const;
+    Bytes usedSpace() const;
     Bytes availableSpace() const;
 
     // Invents a new, distinct base name for a cache file, using the same
@@ -247,18 +246,27 @@ private:
       const Try<Bytes>& requestedSpace,
       const std::shared_ptr<Cache::Entry>& entry);
 
+  struct Metrics
+  {
+    explicit Metrics(FetcherProcess *fetcher);
+    ~Metrics();
+
+    // NOTE: These metrics will increment at most once per task. Even if
+    // a single task asks for multiple artifacts, the total number of
+    // fetches will only go up by one. And if any of those artifacts
+    // fail to fetch, the failure count will only increase by one.
+    process::metrics::Counter task_fetches_succeeded;
+    process::metrics::Counter task_fetches_failed;
+
+    process::metrics::Gauge cache_size_total_bytes;
+    process::metrics::Gauge cache_size_used_bytes;
+  } metrics;
+
   const Flags flags;
 
   Cache cache;
 
   hashmap<ContainerID, pid_t> subprocessPids;
-
-  // NOTE: These metrics will increment at most once per task. Even if
-  // a single task asks for multiple artifacts, the total number of
-  // fetches will only go up by one. And if any of those artifacts
-  // fail to fetch, the failure count will only increase by one.
-  process::metrics::Counter fetchesTotal;
-  process::metrics::Counter fetchesFailed;
 };
 
 

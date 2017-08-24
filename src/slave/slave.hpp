@@ -158,7 +158,7 @@ public:
 
   // Made 'virtual' for Slave mocking.
   virtual void _run(
-      const process::Future<bool>& future,
+      const process::Future<std::list<bool>>& unschedules,
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo,
       const Option<TaskInfo>& task,
@@ -170,8 +170,6 @@ public:
       const FrameworkInfo& frameworkInfo,
       const ExecutorInfo& executorInfo,
       const TaskGroupInfo& taskGroupInfo);
-
-  process::Future<bool> unschedule(const std::string& path);
 
   // Made 'virtual' for Slave mocking.
   virtual void killTask(
@@ -252,7 +250,7 @@ public:
       StatusUpdate update,
       const Option<process::UPID>& pid,
       const ExecutorID& executorId,
-      const process::Future<ContainerStatus>& future);
+      const Option<process::Future<ContainerStatus>>& containerStatus);
 
   // Continue handling the status update after optionally updating the
   // container's resources.
@@ -396,8 +394,9 @@ public:
 
   Executor* getExecutor(const ContainerID& containerId) const;
 
-  // Returns an ExecutorInfo for a TaskInfo (possibly
-  // constructing one if the task has a CommandInfo).
+  // Returns the ExecutorInfo associated with a TaskInfo. If the task has no
+  // ExecutorInfo, then we generate an ExecutorInfo corresponding to the
+  // command executor.
   ExecutorInfo getExecutorInfo(
       const FrameworkInfo& frameworkInfo,
       const TaskInfo& task) const;
@@ -576,6 +575,14 @@ private:
 
   hashmap<FrameworkID, Framework*> frameworks;
 
+  // Note that these frameworks are "completed" only in that
+  // they no longer have any active tasks or executors on this
+  // particular agent.
+  //
+  // TODO(bmahler): Implement a more accurate framework lifecycle
+  // in the agent code, ideally the master can inform the agent
+  // when a framework is actually completed, and the agent can
+  // perhaps store a cache of "idle" frameworks. See MESOS-7890.
   BoundedHashMap<FrameworkID, process::Owned<Framework>> completedFrameworks;
 
   mesos::master::detector::MasterDetector* detector;
@@ -705,7 +712,12 @@ public:
 
   ~Executor();
 
-  Task* addTask(const TaskInfo& task);
+  // Note that these tasks will also be tracked within `queuedTasks`.
+  void enqueueTaskGroup(const TaskGroupInfo& taskGroup);
+
+  void enqueueTask(const TaskInfo& task);
+  Option<TaskInfo> dequeueTask(const TaskID& taskId);
+  Task* addLaunchedTask(const TaskInfo& task);
   void completeTask(const TaskID& taskId);
   void checkpointExecutor();
   void checkpointTask(const TaskInfo& task);
@@ -807,8 +819,6 @@ public:
   // Not yet launched task groups. This is needed for correctly sending
   // TASK_KILLED status updates for all tasks in the group if any of the
   // tasks were killed before the executor could register with the agent.
-  //
-  // TODO(anand): Replace this with `LinkedHashSet` when it is available.
   std::list<TaskGroupInfo> queuedTaskGroups;
 
   // Running.
@@ -850,6 +860,15 @@ public:
 
   ~Framework();
 
+  // Returns whether the framework is idle, where idle is
+  // defined as having no activity:
+  //   (1) The framework has no non-terminal tasks and executors.
+  //   (2) All status updates have been acknowledged.
+  //
+  // TODO(bmahler): The framework should also not be considered
+  // idle if there are unacknowledged updates for "pending" tasks.
+  bool idle() const;
+
   void checkpointFramework() const;
 
   const FrameworkID id() const { return info.id(); }
@@ -865,11 +884,25 @@ public:
       bool recheckpointExecutor,
       const hashset<TaskID>& tasksToRecheckpoint);
 
-  bool hasTask(const TaskID& taskId);
+  void addPendingTask(
+      const ExecutorID& executorId,
+      const TaskInfo& task);
 
-  bool removePendingTask(
-      const TaskInfo& task,
-      const ExecutorInfo& executorInfo);
+  // Note that these tasks will also be tracked within `pendingTasks`.
+  void addPendingTaskGroup(
+      const ExecutorID& executorId,
+      const TaskGroupInfo& taskGroup);
+
+  bool hasTask(const TaskID& taskId) const;
+  bool isPending(const TaskID& taskId) const;
+
+  // Returns the task group associated with a pending task.
+  Option<TaskGroupInfo> getTaskGroupForPendingTask(const TaskID& taskId);
+
+  // Returns whether the pending task was removed.
+  bool removePendingTask(const TaskID& taskId);
+
+  Option<ExecutorID> getExecutorIdForPendingTask(const TaskID& taskId) const;
 
   Resources allocatedResources() const;
 
@@ -903,7 +936,12 @@ public:
   // being bypassed, and provide public views into them.
 
   // Executors with pending tasks.
-  hashmap<ExecutorID, hashmap<TaskID, TaskInfo>> pending;
+  hashmap<ExecutorID, hashmap<TaskID, TaskInfo>> pendingTasks;
+
+  // Pending task groups. This is needed for correctly sending
+  // TASK_KILLED status updates for all tasks in the group if
+  // any of the tasks are killed while pending.
+  std::list<TaskGroupInfo> pendingTaskGroups;
 
   // Current running executors.
   hashmap<ExecutorID, Executor*> executors;

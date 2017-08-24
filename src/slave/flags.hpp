@@ -113,6 +113,7 @@ public:
   std::string systemd_runtime_directory;
   Option<CapabilityInfo> effective_capabilities;
   Option<CapabilityInfo> bounding_capabilities;
+  bool disallow_sharing_agent_pid_namespace;
 #endif
   Option<Firewall> firewall_rules;
   Option<Path> credential;
@@ -122,6 +123,7 @@ public:
   Option<std::string> docker_mesos_image;
   Duration docker_remove_delay;
   std::string sandbox_directory;
+  Option<ContainerDNSInfo> default_container_dns;
   Option<ContainerInfo> default_container_info;
 
   // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).

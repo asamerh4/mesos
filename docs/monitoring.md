@@ -1255,6 +1255,42 @@ the agent and their current usage.
 </thead>
 <tr>
   <td>
+  <code>containerizer/fetcher/cache_size_total_bytes</code>
+  </td>
+  <td>The configured maximum size of the fetcher cache in bytes. This value is
+  constant for the life of the Mesos agent.</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>containerizer/fetcher/cache_size_used_bytes</code>
+  </td>
+  <td>The current amount of data stored in the fetcher cache in bytes.</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>gc/path_removals_failed</code>
+  </td>
+  <td>Number of times the agent garbage collection process has failed to remove a sandbox path.</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
+  <code>gc/path_removals_pending</code>
+  </td>
+  <td>Number of sandbox paths that are currently pending agent garbage collection.</td>
+  <td>Gauge</td>
+</tr>
+<tr>
+  <td>
+  <code>gc/path_removals_succeeded</code>
+  </td>
+  <td>Number of sandbox paths the agent successfully removed.</td>
+  <td>Counter</td>
+</tr>
+<tr>
+  <td>
   <code>slave/cpus_percent</code>
   </td>
   <td>Percentage of allocated CPUs</td>
@@ -1518,9 +1554,9 @@ on the agent.
 </tr>
 <tr>
   <td>
-  <code>containerizer/fetcher/task_fetches_total</code>
+  <code>containerizer/fetcher/task_fetches_succeeded</code>
   </td>
-  <td>Total number of times the Mesos fetcher tried to fetch URIs for a task.</td>
+  <td>Total number of times the Mesos fetcher successfully fetched all the URIs for a task.</td>
   <td>Counter</td>
 </tr>
 <tr>

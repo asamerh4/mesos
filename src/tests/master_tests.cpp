@@ -60,6 +60,7 @@
 
 #include "slave/constants.hpp"
 #include "slave/gc.hpp"
+#include "slave/gc_process.hpp"
 #include "slave/flags.hpp"
 #include "slave/slave.hpp"
 
@@ -157,7 +158,7 @@ TEST_F(MasterTest, TaskRunning)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   // Ensure the hostname and url are set correctly.
   EXPECT_EQ(
@@ -247,7 +248,7 @@ TEST_F(MasterTest, ShutdownFrameworkWhileTaskRunning)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   TaskInfo task;
@@ -354,7 +355,7 @@ TEST_F(MasterTest, KillTask)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskID taskId;
   taskId.set_value("1");
@@ -427,7 +428,7 @@ TEST_F(MasterTest, KillUnknownTask)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskID taskId;
   taskId.set_value("1");
@@ -515,7 +516,7 @@ TEST_F(MasterTest, KillUnknownTaskSlaveInTransition)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   // Start a task.
   TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
@@ -725,7 +726,7 @@ TEST_F(MasterTest, EndpointsForHalfRemovedSlave)
   Try<JSON::Object> parse2 = JSON::parse<JSON::Object>(response2->body);
   Result<JSON::Array> array2 = parse2->find<JSON::Array>("slaves");
   ASSERT_SOME(array2);
-  EXPECT_EQ(0u, array2->values.size());
+  EXPECT_TRUE(array2->values.empty());
 
   Clock::resume();
 }
@@ -757,7 +758,7 @@ TEST_F(MasterTest, StatusUpdateAck)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -967,7 +968,7 @@ TEST_F(MasterTest, RecoverResources)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   ExecutorInfo executorInfo;
   executorInfo.MergeFrom(DEFAULT_EXECUTOR_INFO);
@@ -1021,7 +1022,7 @@ TEST_F(MasterTest, RecoverResources)
   driver.reviveOffers(); // Don't wait till the next allocation.
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
   EXPECT_EQ(taskResources, offer.resources());
@@ -1053,7 +1054,7 @@ TEST_F(MasterTest, RecoverResources)
   // the allocator tests for inspiration.
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   Resources slaveResources = Resources::parse(flags.resources.get()).get();
   EXPECT_EQ(allocatedResources(slaveResources, DEFAULT_FRAMEWORK_INFO.role()),
@@ -1090,7 +1091,7 @@ TEST_F(MasterTest, FrameworkMessage)
   schedDriver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -1177,7 +1178,7 @@ TEST_F(MasterTest, MultipleExecutors)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task1;
   task1.set_name("");
@@ -1520,7 +1521,7 @@ TEST_F(MasterTest, LaunchCombinedOfferTest)
   driver.start();
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
   Resources resources1(offers1.get()[0].resources());
   EXPECT_EQ(2, resources1.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources1.mem().get());
@@ -1561,7 +1562,7 @@ TEST_F(MasterTest, LaunchCombinedOfferTest)
 
   // Await 2nd offer.
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
 
   Resources resources2(offers2.get()[0].resources());
   EXPECT_EQ(1, resources2.cpus().get());
@@ -1593,7 +1594,7 @@ TEST_F(MasterTest, LaunchCombinedOfferTest)
 
   // Await 3rd offer - 2nd and 3rd offer to same slave are now ready.
   AWAIT_READY(offers3);
-  ASSERT_NE(0u, offers3->size());
+  ASSERT_FALSE(offers3->empty());
   Resources resources3(offers3.get()[0].resources());
   EXPECT_EQ(1, resources3.cpus().get());
   EXPECT_EQ(Megabytes(512), resources3.mem().get());
@@ -1666,7 +1667,7 @@ TEST_F(MasterTest, LaunchAcrossSlavesLost)
   driver.start();
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
   Resources resources1(offers1.get()[0].resources());
   EXPECT_EQ(2, resources1.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources1.mem().get());
@@ -1686,7 +1687,7 @@ TEST_F(MasterTest, LaunchAcrossSlavesLost)
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
   Resources resources2(offers1.get()[0].resources());
   EXPECT_EQ(2, resources2.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources2.mem().get());
@@ -1775,7 +1776,7 @@ TEST_F(MasterTest, LaunchAcrossSlavesDropped)
   driver.start();
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
   Resources resources1(offers1.get()[0].resources());
   EXPECT_EQ(2, resources1.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources1.mem().get());
@@ -1795,7 +1796,7 @@ TEST_F(MasterTest, LaunchAcrossSlavesDropped)
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
   Resources resources2(offers1.get()[0].resources());
   EXPECT_EQ(2, resources2.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources2.mem().get());
@@ -1886,7 +1887,7 @@ TEST_F(MasterTest, LaunchDuplicateOfferLost)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
   Resources resources(offers.get()[0].resources());
   EXPECT_EQ(2, resources.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources.mem().get());
@@ -1978,7 +1979,7 @@ TEST_F(MasterTest, LaunchDuplicateOfferDropped)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
   Resources resources(offers.get()[0].resources());
   EXPECT_EQ(2, resources.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources.mem().get());
@@ -2093,7 +2094,7 @@ TEST_F(MasterTest, LaunchDifferentRoleLost)
   Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
   Resources resources1(offers1.get()[0].resources());
   EXPECT_EQ(2, resources1.cpus().get());
   EXPECT_EQ(Megabytes(1024), resources1.mem().get());
@@ -2133,7 +2134,7 @@ TEST_F(MasterTest, LaunchDifferentRoleLost)
 
   // Await 2nd offer.
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
   ASSERT_TRUE(offers2.get()[0].has_allocation_info());
 
   Resources resources2(offers2.get()[0].resources());
@@ -2165,7 +2166,7 @@ TEST_F(MasterTest, LaunchDifferentRoleLost)
 
   // Await 3rd offer - 2nd and 3rd offer to same slave are now ready.
   AWAIT_READY(offers3);
-  ASSERT_NE(0u, offers3->size());
+  ASSERT_FALSE(offers3->empty());
   ASSERT_TRUE(offers3.get()[0].has_allocation_info());
   Resources resources3(offers3.get()[0].resources());
   EXPECT_EQ(1, resources3.cpus().get());
@@ -2231,6 +2232,7 @@ TEST_F(MasterTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("master/slaves_disconnected"));
   EXPECT_EQ(1u, snapshot.values.count("master/slaves_active"));
   EXPECT_EQ(1u, snapshot.values.count("master/slaves_inactive"));
+  EXPECT_EQ(1u, snapshot.values.count("master/slaves_unreachable"));
 
   EXPECT_EQ(1u, snapshot.values.count("master/frameworks_connected"));
   EXPECT_EQ(1u, snapshot.values.count("master/frameworks_disconnected"));
@@ -2242,10 +2244,16 @@ TEST_F(MasterTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_staging"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_starting"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_running"));
+  EXPECT_EQ(1u, snapshot.values.count("master/tasks_unreachable"));
+  EXPECT_EQ(1u, snapshot.values.count("master/tasks_killing"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_finished"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_failed"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_killed"));
   EXPECT_EQ(1u, snapshot.values.count("master/tasks_lost"));
+  EXPECT_EQ(1u, snapshot.values.count("master/tasks_error"));
+  EXPECT_EQ(1u, snapshot.values.count("master/tasks_dropped"));
+  EXPECT_EQ(1u, snapshot.values.count("master/tasks_gone"));
+  EXPECT_EQ(1u, snapshot.values.count("master/tasks_gone_by_operator"));
 
   EXPECT_EQ(1u, snapshot.values.count("master/dropped_messages"));
 
@@ -2274,6 +2282,7 @@ TEST_F(MasterTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count("master/messages_unregister_slave"));
   EXPECT_EQ(1u, snapshot.values.count("master/messages_status_update"));
   EXPECT_EQ(1u, snapshot.values.count("master/messages_exited_executor"));
+  EXPECT_EQ(1u, snapshot.values.count("master/messages_update_slave"));
 
   // Messages from both schedulers and slaves.
   EXPECT_EQ(1u, snapshot.values.count("master/messages_authenticate"));
@@ -2282,6 +2291,10 @@ TEST_F(MasterTest, MetricsInMetricsEndpoint)
       "master/valid_framework_to_executor_messages"));
   EXPECT_EQ(1u, snapshot.values.count(
       "master/invalid_framework_to_executor_messages"));
+  EXPECT_EQ(1u, snapshot.values.count(
+      "master/valid_executor_to_framework_messages"));
+  EXPECT_EQ(1u, snapshot.values.count(
+      "master/invalid_executor_to_framework_messages"));
 
   EXPECT_EQ(1u, snapshot.values.count("master/valid_status_updates"));
   EXPECT_EQ(1u, snapshot.values.count("master/invalid_status_updates"));
@@ -2291,27 +2304,50 @@ TEST_F(MasterTest, MetricsInMetricsEndpoint)
   EXPECT_EQ(1u, snapshot.values.count(
       "master/invalid_status_update_acknowledgements"));
 
+  // Recovery counters.
   EXPECT_EQ(1u, snapshot.values.count("master/recovery_slave_removals"));
 
+  // Process metrics.
   EXPECT_EQ(1u, snapshot.values.count("master/event_queue_messages"));
   EXPECT_EQ(1u, snapshot.values.count("master/event_queue_dispatches"));
   EXPECT_EQ(1u, snapshot.values.count("master/event_queue_http_requests"));
+
+  // Slave observer metrics.
+  EXPECT_EQ(1u, snapshot.values.count("master/slave_unreachable_scheduled"));
+  EXPECT_EQ(1u, snapshot.values.count("master/slave_unreachable_completed"));
+  EXPECT_EQ(1u, snapshot.values.count("master/slave_unreachable_canceled"));
 
   EXPECT_EQ(1u, snapshot.values.count("master/cpus_total"));
   EXPECT_EQ(1u, snapshot.values.count("master/cpus_used"));
   EXPECT_EQ(1u, snapshot.values.count("master/cpus_percent"));
 
+  EXPECT_EQ(1u, snapshot.values.count("master/cpus_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("master/cpus_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("master/cpus_revocable_percent"));
+
   EXPECT_EQ(1u, snapshot.values.count("master/gpus_total"));
   EXPECT_EQ(1u, snapshot.values.count("master/gpus_used"));
   EXPECT_EQ(1u, snapshot.values.count("master/gpus_percent"));
+
+  EXPECT_EQ(1u, snapshot.values.count("master/gpus_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("master/gpus_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("master/gpus_revocable_percent"));
 
   EXPECT_EQ(1u, snapshot.values.count("master/mem_total"));
   EXPECT_EQ(1u, snapshot.values.count("master/mem_used"));
   EXPECT_EQ(1u, snapshot.values.count("master/mem_percent"));
 
+  EXPECT_EQ(1u, snapshot.values.count("master/mem_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("master/mem_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("master/mem_revocable_percent"));
+
   EXPECT_EQ(1u, snapshot.values.count("master/disk_total"));
   EXPECT_EQ(1u, snapshot.values.count("master/disk_used"));
   EXPECT_EQ(1u, snapshot.values.count("master/disk_percent"));
+
+  EXPECT_EQ(1u, snapshot.values.count("master/disk_revocable_total"));
+  EXPECT_EQ(1u, snapshot.values.count("master/disk_revocable_used"));
+  EXPECT_EQ(1u, snapshot.values.count("master/disk_revocable_percent"));
 
   // Registrar Metrics.
   EXPECT_EQ(1u, snapshot.values.count("registrar/queued_operations"));
@@ -2746,7 +2782,7 @@ TEST_F(MasterTest, UnreachableTaskAfterFailover)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 100");
 
@@ -3553,7 +3589,7 @@ TEST_F(MasterTest, OrphanTasksMultipleAgents)
   driver.start();
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
 
   TaskInfo task1 =
     createTask(offers1.get()[0], "sleep 100", DEFAULT_EXECUTOR_ID);
@@ -3588,7 +3624,7 @@ TEST_F(MasterTest, OrphanTasksMultipleAgents)
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
 
   TaskInfo task2 =
     createTask(offers2.get()[0], "sleep 100", DEFAULT_EXECUTOR_ID);
@@ -3648,8 +3684,8 @@ TEST_F(MasterTest, OrphanTasksMultipleAgents)
       parse->values["unregistered_frameworks"].as<JSON::Array>();
 
     ASSERT_EQ(1u, frameworks.values.size());
-    EXPECT_EQ(0u, orphanTasks.values.size());
-    EXPECT_EQ(0u, unregisteredFrameworks.values.size());
+    EXPECT_TRUE(orphanTasks.values.empty());
+    EXPECT_TRUE(unregisteredFrameworks.values.empty());
 
     JSON::Object framework = frameworks.values.front().as<JSON::Object>();
 
@@ -3676,7 +3712,7 @@ TEST_F(MasterTest, OrphanTasksMultipleAgents)
       parse->values["unregistered_frameworks"].as<JSON::Array>();
 
     ASSERT_EQ(1u, frameworks.values.size());
-    EXPECT_EQ(0u, unregisteredFrameworks.values.size());
+    EXPECT_TRUE(unregisteredFrameworks.values.empty());
 
     JSON::Object framework = frameworks.values.front().as<JSON::Object>();
 
@@ -4623,7 +4659,7 @@ TEST_F(MasterTest, StateSummaryEndpoint)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskID taskId;
   taskId.set_value("1");
@@ -4776,7 +4812,7 @@ TEST_F(MasterTest, StateEndpointAllocationRole)
 
   AWAIT_READY(registered);
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   Resources executorResources = Resources::parse("cpus:0.1;mem:32").get();
   executorResources.allocate("foo");
@@ -4899,7 +4935,7 @@ TEST_F(MasterTest, RecoveredSlaves)
 
     Result<JSON::Array> array1 = parse->find<JSON::Array>("slaves");
     ASSERT_SOME(array1);
-    EXPECT_EQ(0u, array1->values.size());
+    EXPECT_TRUE(array1->values.empty());
 
     Result<JSON::Array> array2 =
       parse->find<JSON::Array>("recovered_slaves");
@@ -4923,7 +4959,7 @@ TEST_F(MasterTest, RecoveredSlaves)
 
     Result<JSON::Array> array1 = parse->find<JSON::Array>("slaves");
     ASSERT_SOME(array1);
-    EXPECT_EQ(0u, array1->values.size());
+    EXPECT_TRUE(array1->values.empty());
 
     Result<JSON::Array> array2 =
       parse->find<JSON::Array>("recovered_slaves");
@@ -4965,7 +5001,7 @@ TEST_F(MasterTest, RecoveredSlaves)
     Result<JSON::Array> array2 =
       parse->find<JSON::Array>("recovered_slaves");
     ASSERT_SOME(array2);
-    EXPECT_EQ(0u, array2->values.size());
+    EXPECT_TRUE(array2->values.empty());
   }
 
   {
@@ -4987,7 +5023,7 @@ TEST_F(MasterTest, RecoveredSlaves)
     Result<JSON::Array> array2 =
       parse->find<JSON::Array>("recovered_slaves");
     ASSERT_SOME(array2);
-    EXPECT_EQ(0u, array2->values.size());
+    EXPECT_TRUE(array2->values.empty());
   }
 }
 
@@ -5020,7 +5056,7 @@ TEST_F(MasterTest, ExecutorLabels)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -5112,7 +5148,7 @@ TEST_F(MasterTest, TaskLabels)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -5216,7 +5252,7 @@ TEST_F(MasterTest, TaskStatusLabels)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 100", DEFAULT_EXECUTOR_ID);
 
@@ -5318,7 +5354,7 @@ TEST_F(MasterTest, TaskStatusContainerStatus)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task = createTask(offers.get()[0], "sleep 100", DEFAULT_EXECUTOR_ID);
 
@@ -5520,7 +5556,7 @@ TEST_F(MasterTest, TaskDiscoveryInfo)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("testtask");
@@ -5720,7 +5756,7 @@ TEST_F(MasterTest, MasterFailoverLongLivedExecutor)
   driver.start();
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
 
   TaskInfo task1;
   task1.set_name("");
@@ -5761,7 +5797,7 @@ TEST_F(MasterTest, MasterFailoverLongLivedExecutor)
   detector.appoint(master.get()->pid);
 
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
 
   // The second task is a just a copy of the first task (using the
   // same executor and resources). We have to set a new task id.
@@ -6608,7 +6644,7 @@ TEST_F(MasterTest, DISABLED_RecoverResourcesOrphanedTask)
   v1::FrameworkID frameworkId = subscribed->framework_id();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->offers().size());
+  ASSERT_FALSE(offers->offers().empty());
 
   v1::executor::Mesos* execMesos = nullptr;
 
@@ -7321,7 +7357,7 @@ TEST_F(MasterTest, MultiRoleFrameworkReceivesOffers)
   Clock::settle();
 
   AWAIT_READY(offers1);
-  ASSERT_NE(0u, offers1->size());
+  ASSERT_FALSE(offers1->empty());
   ASSERT_TRUE(offers1.get()[0].has_allocation_info());
 
   // Start second agent.
@@ -7336,7 +7372,7 @@ TEST_F(MasterTest, MultiRoleFrameworkReceivesOffers)
   Clock::settle();
 
   AWAIT_READY(offers2);
-  ASSERT_NE(0u, offers2->size());
+  ASSERT_FALSE(offers2->empty());
   ASSERT_TRUE(offers2.get()[0].has_allocation_info());
 
   // We cannot deterministically expect roles for each offer, however we
@@ -8099,7 +8135,7 @@ TEST_P(MasterTestPrePostReservationRefinement, LaunchTask)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers->front();
 
   TaskInfo task;
@@ -8219,7 +8255,7 @@ TEST_P(MasterTestPrePostReservationRefinement, LaunchGroup)
       evolve<v1::Resource>(outboundResources(resources)));
 
   AWAIT_READY(offers);
-  EXPECT_NE(0, offers->offers().size());
+  EXPECT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
@@ -8517,7 +8553,7 @@ TEST_P(MasterTestPrePostReservationRefinement, StateEndpointPendingTasks)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers->front();
 

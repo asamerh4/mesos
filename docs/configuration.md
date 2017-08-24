@@ -212,6 +212,33 @@ Cannot be used in conjunction with <code>--ip</code>.
 </tr>
 <tr>
   <td>
+    --ip6=VALUE
+  </td>
+  <td>
+IPv6 address to listen on. This cannot be used in conjunction
+with <code>--ip6_discovery_command</code>.
+<p/>
+NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence
+this IPv6 address is only used to advertise IPv6 addresses for
+containers running on the host network.
+  </td>
+</tr>
+<tr>
+  <td>
+    --ip6_discovery_command=VALUE
+  </td>
+  <td>
+Optional IPv6 discovery binary: if set, it is expected to emit
+the IPv6 address on which Mesos will try to bind when IPv6 socket
+support is enabled in Mesos.
+<p/>
+NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence
+this IPv6 address is only used to advertise IPv6 addresses for
+containers running on the host network.
+  </td>
+</tr>
+<tr>
+  <td>
     --modules=VALUE
   </td>
   <td>
@@ -1329,6 +1356,52 @@ Example:
 </tr>
 <tr>
   <td>
+    --default_container_dns=VALUE
+  </td>
+  <td>
+JSON-formatted DNS information for CNI networks (Mesos containerizer)
+and CNM networks (Docker containerizer). For CNI networks, this flag
+can be used to configure `nameservers`, `domain`, `search` and
+`options`, and its priority is lower than the DNS information returned
+by a CNI plugin, but higher than the DNS information in agent host's
+/etc/resolv.conf. For CNM networks, this flag can be used to configure
+`nameservers`, `search` and `options`, it will only be used if there
+is no DNS information provided in the ContainerInfo.docker.parameters
+message.
+<p/>
+See the ContainerDNS message in `flags.proto` for the expected format.
+<p/>
+Example:
+<pre><code>{
+  "mesos": [
+    {
+      "network_mode": "CNI",
+      "network_name": "net1",
+      "dns": {
+        "nameservers": [ "8.8.8.8", "8.8.4.4" ]
+      }
+    }
+  ],
+  "docker": [
+    {
+      "network_mode": "BRIDGE",
+      "dns": {
+        "nameservers": [ "8.8.8.8", "8.8.4.4" ]
+      }
+    },
+    {
+      "network_mode": "USER",
+      "network_name": "net2",
+      "dns": {
+        "nameservers": [ "8.8.8.8", "8.8.4.4" ]
+      }
+    }
+  ]
+}</code></pre>
+  </td>
+</tr>
+<tr>
+  <td>
     --default_container_info=VALUE
   </td>
   <td>
@@ -1499,7 +1572,7 @@ volumes that each container uses.
   </td>
   <td>
 Whether to enable disk quota enforcement for containers. This flag
-is used for the <code>disk/du</code> isolator. (default: false)
+is used by the <code>disk/du</code> and <code>disk/xfs</code> isolators. (default: false)
   </td>
 </tr>
 <tr>
@@ -1540,7 +1613,32 @@ master until this timeout has elapsed (see MESOS-7539). (default: 2secs)
 </tr>
 <tr>
   <td>
-    --max_completed_executors_per_framework
+    --executor_reregistration_retry_interval=VALUE
+  </td>
+  <td>
+For PID-based executors, how long the agent waits before retrying
+the reconnect message sent to the executor during recovery.
+NOTE: Do not use this unless you understand the following
+(see MESOS-5332): PID-based executors using Mesos libraries &gt;= 1.1.2
+always re-link with the agent upon receiving the reconnect message.
+This avoids the executor replying on a half-open TCP connection to
+the old agent (possible if netfilter is dropping packets,
+see: MESOS-7057). However, PID-based executors using Mesos
+libraries &lt; 1.1.2 do not re-link and are therefore prone to
+replying on a half-open connection after the agent restarts. If we
+only send a single reconnect message, these "old" executors will
+reply on their half-open connection and receive a RST; without any
+retries, they will fail to reconnect and be killed by the agent once
+the executor re-registration timeout elapses. To ensure these "old"
+executors can reconnect in the presence of netfilter dropping
+packets, we introduced optional retries of the reconnect message.
+This results in "old" executors correctly establishing a link
+when processing the second reconnect message. (default: no retries)
+  </td>
+</tr>
+<tr>
+  <td>
+    --max_completed_executors_per_framework=VALUE
   </td>
   <td>
 Maximum number of completed executors per framework to store
@@ -1578,6 +1676,16 @@ terminations may occur.
   <td>
 Parent directory for fetcher cache directories
 (one subdirectory per agent). (default: /tmp/mesos/fetch)
+
+Directory for the fetcher cache. The agent will clear this directory
+on startup. It is recommended to set this value to a separate volume
+for several reasons:
+<ul>
+<li> The cache directories are transient and not meant to be
+     backed up. Upon restarting the agent, the cache is always empty. </li>
+<li> The cache and container sandboxes can potentially interfere with
+     each other when occupying a shared space (i.e. disk contention). </li>
+</ul>
   </td>
 </tr>
 <tr>
@@ -1975,6 +2083,20 @@ sandbox is mapped to.
 </tr>
 <tr>
   <td>
+    --[no-]disallow_sharing_agent_pid_namespace
+  </td>
+  <td>
+If set to <code>true</code>, each top-level container will have its own pid
+namespace, and if the framework requests to share the agent pid namespace for
+the top level container, the container launch will be rejected. If set to
+<code>false</code>, the top-level containers will share the pid namespace with
+agent if the framework requests it. This flag will be ignored if the
+`namespaces/pid` isolator is not enabled.
+(default: false)
+  </td>
+</tr>
+<tr>
+  <td>
     --[no-]strict
   </td>
   <td>
@@ -1986,6 +2108,18 @@ state as possible is recovered.
 (default: true)
   </td>
 </tr>
+<tr>
+  <td>
+    --secret_resolver=VALUE
+  </td>
+  <td>
+The name of the secret resolver module to use for resolving
+environment and file-based secrets. If this flag is not specified,
+the default behavior is to resolve value-based secrets and error on
+reference-based secrets.
+  </td>
+</tr>
+
 <tr>
   <td>
     --[no-]switch_user
@@ -2444,6 +2578,14 @@ quotas for container sandbox directories. Valid project IDs range from
   </tr>
   <tr>
     <td>
+      --enable-parallel-test-execution
+    </td>
+    <td>
+      Whether to attempt to run tests in parallel.
+    </td>
+  </tr>
+  <tr>
+    <td>
       --disable-python
     </td>
     <td>
@@ -2500,6 +2642,23 @@ quotas for container sandbox directories. Valid project IDs range from
     <td>
       Disables zlib compression, which means the webui will be far less
       responsive; not recommended.
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --enable-lock-free-event-queue
+    </td>
+    <td>
+      Enables the lock-free event queue to be used in libprocess which
+      greatly improves message passing performance!
+    </td>
+  </tr>
+  <tr>
+    <td>
+      --disable-werror
+    </td>
+    <td>
+      Disables treating compiler warnings as fatal errors.
     </td>
   </tr>
 </table>

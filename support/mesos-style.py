@@ -279,7 +279,8 @@ class PyLinter(LinterBase):
     """The linter for Python files, uses pylint."""
     linter_type = 'Python'
 
-    source_dirs = [os.path.join('src', 'cli_new')]
+    source_dirs = [os.path.join('src', 'python', 'cli_new'),
+                   os.path.join('src', 'python', 'lib')]
 
     exclude_files = '(' \
                     r'protobuf\-2\.4\.1|' \
@@ -293,8 +294,6 @@ class PyLinter(LinterBase):
     source_files = r'\.(py)$'
 
     comment_prefix = '#'
-
-    test = 'hello'
 
     def run_lint(self, source_paths):
         """

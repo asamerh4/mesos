@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-
-CURRDIR="$(cd "$(dirname "$0")" && pwd)"
-
-source ${CURRDIR}/../activate
-python ${CURRDIR}/main.py "$@"

@@ -25,4 +25,4 @@ function exit_hook {
 
 trap exit_hook EXIT
 
-bundle install && bundle exec rake && bundle exec rake dev
+bundle exec rake && bundle exec rake dev

@@ -44,6 +44,7 @@
 #include <stout/windows.hpp>
 #endif // __WINDOWS__
 
+#include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/resources_utils.hpp"
 
@@ -60,6 +61,7 @@ using google::protobuf::RepeatedPtrField;
 using mesos::slave::ContainerLimitation;
 using mesos::slave::ContainerState;
 
+using process::Owned;
 using process::UPID;
 
 namespace mesos {
@@ -808,8 +810,79 @@ mesos::master::Event createTaskAdded(const Task& task)
 }
 
 
+mesos::master::Event createFrameworkAdded(
+    const mesos::internal::master::Framework& _framework)
+{
+  CHECK(_framework.active());
+  CHECK(_framework.connected());
+  CHECK(!_framework.recovered());
+
+  mesos::master::Event event;
+  event.set_type(mesos::master::Event::FRAMEWORK_ADDED);
+
+  mesos::master::Response::GetFrameworks::Framework* framework =
+    event.mutable_framework_added()->mutable_framework();
+
+  framework->mutable_framework_info()->CopyFrom(_framework.info);
+  framework->set_active(_framework.active());
+  framework->set_connected(_framework.connected());
+  framework->set_recovered(_framework.recovered());
+
+  framework->mutable_registered_time()->set_nanoseconds(
+      _framework.registeredTime.duration().ns());
+
+  framework->mutable_reregistered_time()->set_nanoseconds(
+      _framework.reregisteredTime.duration().ns());
+
+  framework->mutable_unregistered_time()->set_nanoseconds(
+      _framework.unregisteredTime.duration().ns());
+
+  return event;
+}
+
+
+mesos::master::Event createFrameworkUpdated(
+    const mesos::internal::master::Framework& _framework)
+{
+  mesos::master::Event event;
+  event.set_type(mesos::master::Event::FRAMEWORK_UPDATED);
+
+  mesos::master::Response::GetFrameworks::Framework* framework =
+    event.mutable_framework_updated()->mutable_framework();
+
+  framework->mutable_framework_info()->CopyFrom(_framework.info);
+  framework->set_active(_framework.active());
+  framework->set_connected(_framework.connected());
+  framework->set_recovered(_framework.recovered());
+
+  framework->mutable_registered_time()->set_nanoseconds(
+      _framework.registeredTime.duration().ns());
+
+  framework->mutable_reregistered_time()->set_nanoseconds(
+      _framework.reregisteredTime.duration().ns());
+
+  framework->mutable_unregistered_time()->set_nanoseconds(
+      _framework.unregisteredTime.duration().ns());
+
+  return event;
+}
+
+
+mesos::master::Event createFrameworkRemoved(const FrameworkInfo& frameworkInfo)
+{
+  mesos::master::Event event;
+  event.set_type(mesos::master::Event::FRAMEWORK_REMOVED);
+
+  event.mutable_framework_removed()->mutable_framework_info()->CopyFrom(
+      frameworkInfo);
+
+  return event;
+}
+
+
 mesos::master::Response::GetAgents::Agent createAgentResponse(
-    const mesos::internal::master::Slave& slave)
+    const mesos::internal::master::Slave& slave,
+    const Option<Owned<AuthorizationAcceptor>>& rolesAcceptor)
 {
   mesos::master::Response::GetAgents::Agent agent;
 
@@ -827,22 +900,32 @@ mesos::master::Response::GetAgents::Agent createAgentResponse(
         slave.reregisteredTime.get().duration().ns());
   }
 
-  foreach (Resource resource, slave.totalResources) {
-    convertResourceFormat(&resource, ENDPOINT);
+  agent.mutable_agent_info()->clear_resources();
+  foreach (const Resource& resource, slave.info.resources()) {
+    if (authorizeResource(resource, rolesAcceptor)) {
+      agent.mutable_agent_info()->add_resources()->CopyFrom(resource);
+    }
+  }
 
-    agent.add_total_resources()->CopyFrom(resource);
+  foreach (Resource resource, slave.totalResources) {
+    if (authorizeResource(resource, rolesAcceptor)) {
+      convertResourceFormat(&resource, ENDPOINT);
+      agent.add_total_resources()->CopyFrom(resource);
+    }
   }
 
   foreach (Resource resource, Resources::sum(slave.usedResources)) {
-    convertResourceFormat(&resource, ENDPOINT);
-
-    agent.add_allocated_resources()->CopyFrom(resource);
+    if (authorizeResource(resource, rolesAcceptor)) {
+      convertResourceFormat(&resource, ENDPOINT);
+      agent.add_allocated_resources()->CopyFrom(resource);
+    }
   }
 
   foreach (Resource resource, slave.offeredResources) {
-    convertResourceFormat(&resource, ENDPOINT);
-
-    agent.add_offered_resources()->CopyFrom(resource);
+    if (authorizeResource(resource, rolesAcceptor)) {
+      convertResourceFormat(&resource, ENDPOINT);
+      agent.add_offered_resources()->CopyFrom(resource);
+    }
   }
 
   agent.mutable_capabilities()->CopyFrom(

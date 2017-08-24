@@ -20,18 +20,34 @@
 #include <functional>
 #include <queue>
 
+#include <process/future.hpp>
+#include <process/http.hpp>
 #include <process/owned.hpp>
 
 #include <mesos/http.hpp>
 
+#include <mesos/v1/mesos.hpp>
+
 #include <mesos/v1/resource_provider/resource_provider.hpp>
 
+#include <stout/nothing.hpp>
+#include <stout/option.hpp>
+
 namespace mesos {
+namespace internal {
+
+// Forward declarations.
+template <typename Call, typename Event>
+class HttpConnectionProcess;
+
+class EndpointDetector;
+
+} // namespace internal {
+
 namespace v1 {
 namespace resource_provider {
 
-// Forward declarations.
-class DriverProcess;
+typedef ::mesos::internal::HttpConnectionProcess<Call, Event> DriverProcess;
 
 
 /**
@@ -50,6 +66,7 @@ public:
    * the resource provider manager. Note that we drop events while
    * disconnected.
    *
+   * @param url the URL where the resource provider API is served.
    * @param contentType the content type expected by this driver.
    * @param connected a callback which will be invoked when the driver
    *     is connected.
@@ -58,17 +75,19 @@ public:
    * @param received a callback which will be invoked when the driver
    *     receives resource provider Events.
    */
-  Driver(ContentType contentType,
+  Driver(process::Owned<mesos::internal::EndpointDetector> detector,
+         ContentType contentType,
          const std::function<void(void)>& connected,
          const std::function<void(void)>& disconnected,
-         const std::function<void(const std::queue<Event>&)>& received);
+         const std::function<void(const std::queue<Event>&)>& received,
+         const Option<Credential>& credential);
 
   ~Driver();
 
   Driver(const Driver& other) = delete;
   Driver& operator=(const Driver& other) = delete;
 
-  void send(const Call& call) {}
+  process::Future<Nothing> send(const Call& call);
 
 private:
   process::Owned<DriverProcess> process;

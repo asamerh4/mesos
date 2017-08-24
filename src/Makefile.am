@@ -24,6 +24,7 @@ include ../3rdparty/versions.am
 
 # TODO(charles): Move these into an included automakefile and have
 # them include $(top_builddir) as appropriate.
+CSI = 3rdparty/csi-$(CSI_VERSION)
 LEVELDB = 3rdparty/leveldb-$(LEVELDB_VERSION)
 PIP = 3rdparty/pip-$(PIP_VERSION)
 SETUPTOOLS = 3rdparty/setuptools-$(SETUPTOOLS_VERSION)
@@ -39,6 +40,7 @@ GLOG = 3rdparty/glog-$(GLOG_VERSION)
 GOOGLETEST = 3rdparty/googletest-release-$(GOOGLETEST_VERSION)
 GMOCK = $(GOOGLETEST)/googlemock
 GTEST = $(GOOGLETEST)/googletest
+GRPC = 3rdparty/grpc-$(GRPC_VERSION)
 PROTOBUF = 3rdparty/protobuf-$(PROTOBUF_VERSION)
 PICOJSON = 3rdparty/picojson-$(PICOJSON_VERSION)
 NVML = 3rdparty/nvml-$(NVML_VERSION)
@@ -56,15 +58,6 @@ testlibexecdir = $(pkglibexecdir)/tests
 # Directory where Mesos modules are installed.
 pkgmoduledir = $(pkglibdir)/modules
 relative_pkgmoduledir = $(PACKAGE)/modules
-
-if WITH_BUNDLED_PROTOBUF
-# Protocol buffer compiler.
-PROTOC = ../$(PROTOBUF)/src/protoc
-else
-PROTOC = @PROTOCOMPILER@
-endif
-
-PROTOCFLAGS = -I$(top_srcdir)/include -I$(srcdir)
 
 # Initialize variables here so we can use += operator everywhere else.
 lib_LTLIBRARIES =
@@ -122,7 +115,7 @@ AM_LIBS = $(PTHREAD_LIBS)
 
 # Setup CPPFLAGS that are used for most source files.
 MESOS_CPPFLAGS = $(AM_CPPFLAGS)
-MESOS_CPPFLAGS += -Werror
+MESOS_CPPFLAGS += @WERROR@
 MESOS_CPPFLAGS += -DLIBDIR=\"$(libdir)\"
 MESOS_CPPFLAGS += -DPKGLIBEXECDIR=\"$(pkglibexecdir)\"
 MESOS_CPPFLAGS += -DPKGDATADIR=\"$(pkgdatadir)\"
@@ -173,6 +166,20 @@ LIB_GLOG = -lglog
 LDADD += -lglog
 endif
 
+if ENABLE_GRPC
+if WITH_BUNDLED_GRPC
+MESOS_CPPFLAGS += -I../$(GRPC)/include
+LIB_GRPC = ../$(GRPC)/libs/opt/libgrpc++.a	\
+           ../$(GRPC)/libs/opt/libgrpc.a	\
+           ../$(GRPC)/libs/opt/libgpr.a		\
+           -lssl -lcrypto
+GRPC_CPP_PLUGIN = ../$(GRPC)/bins/opt/grpc_cpp_plugin
+else
+LIB_GRPC = -lgrpc++ -lgrpc -lgpr -lssl -lcrypto
+GRPC_CPP_PLUGIN = @GRPC_CXX_PLUGIN@
+endif
+endif
+
 if WITH_BUNDLED_LEVELDB
 MESOS_CPPFLAGS += -I../$(LEVELDB)/include
 
@@ -204,9 +211,11 @@ endif
 if WITH_BUNDLED_PROTOBUF
 MESOS_CPPFLAGS += -I../$(PROTOBUF)/src
 LIB_PROTOBUF = ../$(PROTOBUF)/src/libprotobuf.la
+PROTOC = ../$(PROTOBUF)/src/protoc
 else
 LIB_PROTOBUF = -lprotobuf
 LDADD += -lprotobuf
+PROTOC = @PROTOCOMPILER@
 endif
 
 if WITH_BUNDLED_STOUT
@@ -223,6 +232,12 @@ LDADD += -lzookeeper_mt
 endif
 
 MESOS_CPPFLAGS += -DHAS_AUTHENTICATION=1
+
+# Set up include paths for the protocol buffer compiler.
+PROTOCFLAGS = -I$(top_srcdir)/include -I$(srcdir)
+if ENABLE_GRPC
+PROTOCFLAGS += -I../$(CSI)
+endif
 
 # README: we build the Mesos library out of a collection of
 # convenience libraries (that is, libraries that do not get installed
@@ -349,6 +364,14 @@ CXX_PROTOS +=								\
   slave/containerizer/mesos/isolators/network/cni/spec.pb.cc		\
   slave/containerizer/mesos/isolators/network/cni/spec.pb.h
 
+if ENABLE_GRPC
+CXX_CSI_PROTOS =							\
+  csi/csi.grpc.pb.cc							\
+  csi/csi.grpc.pb.h							\
+  csi/csi.pb.cc								\
+  csi/csi.pb.h
+endif
+
 CXX_LOG_PROTOS =							\
   messages/log.pb.cc							\
   messages/log.pb.h
@@ -388,6 +411,7 @@ V1_PYTHON_PROTOS =                                                      \
   python/interface/src/mesos/v1/interface/scheduler_pb2.py
 
 BUILT_SOURCES +=							\
+  $(CXX_CSI_PROTOS)							\
   $(CXX_LOG_PROTOS)							\
   $(CXX_PROTOS)								\
   $(CXX_STATE_PROTOS)							\
@@ -397,6 +421,7 @@ BUILT_SOURCES +=							\
   $(V1_PYTHON_PROTOS)
 
 CLEANFILES +=								\
+  $(CXX_CSI_PROTOS)							\
   $(CXX_LOG_PROTOS)							\
   $(CXX_PROTOS)								\
   $(CXX_STATE_PROTOS)							\
@@ -406,13 +431,19 @@ CLEANFILES +=								\
   $(V1_PYTHON_PROTOS)
 
 
-# Targets for generating C++ protocol buffer code.
+# Targets for generating C++ protocol buffer and gRPC code.
 ../include/mesos/%.pb.cc ../include/mesos/%.pb.h: $(top_srcdir)/include/mesos/%.proto
 	$(PROTOC) $(PROTOCFLAGS) --cpp_out=../include $^
+
+csi/%.pb.cc csi/%.pb.h: ../$(CSI)/%.proto
+	$(PROTOC) $(PROTOCFLAGS) --cpp_out=csi $^
 
 %.pb.cc %.pb.h: %.proto
 	$(PROTOC) $(PROTOCFLAGS) --cpp_out=. $^
 
+csi/%.grpc.pb.cc csi/%.grpc.pb.h: ../$(CSI)/%.proto
+	$(PROTOC) $(PROTOCFLAGS) --grpc_out=csi $^		\
+	          --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN)
 
 # Targets for generating Java protocol buffer code.
 java/generated/org/apache/mesos/executor/Protos.java: $(EXECUTOR_PROTO)
@@ -953,9 +984,11 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   oci/spec.cpp								\
   posix/rlimits.cpp							\
   resource_provider/daemon.cpp						\
+  resource_provider/detector.cpp					\
   resource_provider/driver.cpp						\
   resource_provider/local.cpp						\
   resource_provider/manager.cpp						\
+  resource_provider/validation.cpp					\
   resource_provider/storage/provider.cpp				\
   sched/sched.cpp							\
   scheduler/scheduler.cpp						\
@@ -1049,6 +1082,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   common/resources_utils.hpp						\
   common/status_utils.hpp						\
   common/validation.hpp							\
+  common/values.hpp							\
   credentials/credentials.hpp						\
   docker/docker.hpp							\
   docker/executor.hpp							\
@@ -1091,9 +1125,12 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   module/manager.hpp							\
   posix/rlimits.hpp							\
   resource_provider/daemon.hpp						\
+  resource_provider/detector.hpp					\
+  resource_provider/http_connection.hpp					\
   resource_provider/local.hpp						\
   resource_provider/manager.hpp						\
   resource_provider/message.hpp						\
+  resource_provider/validation.hpp					\
   resource_provider/storage/provider.hpp				\
   sched/constants.hpp							\
   sched/flags.hpp							\
@@ -1102,6 +1139,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/constants.hpp							\
   slave/flags.hpp							\
   slave/gc.hpp								\
+  slave/gc_process.hpp							\
   slave/http.hpp							\
   slave/metrics.hpp							\
   slave/paths.hpp							\
@@ -1354,7 +1392,7 @@ endif
 
 if ENABLE_SSL
 libmesos_no_3rdparty_la_SOURCES +=					\
-  authentication/executor/jwt_secret_generator.cpp				\
+  authentication/executor/jwt_secret_generator.cpp			\
   authentication/executor/jwt_secret_generator.hpp
 endif
 
@@ -1399,6 +1437,21 @@ BUILD_FLAGS = $(echo $(MESOS_CPPFLAGS) $(CPPFLAGS) | $(SED) 's/\"/\\\"/g')	\
 libbuild_la_CPPFLAGS += -DBUILD_FLAGS="\"$$BUILD_FLAGS\""
 
 libmesos_no_3rdparty_la_LIBADD += libbuild.la
+
+
+if ENABLE_GRPC
+# Convenience library for build the CSI client.
+noinst_LTLIBRARIES += libcsi.la
+libcsi_la_SOURCES =							\
+  csi/client.cpp
+libcsi_la_SOURCES +=							\
+  csi/client.hpp							\
+  csi/spec.hpp
+nodist_libcsi_la_SOURCES = $(CXX_CSI_PROTOS)
+libcsi_la_CPPFLAGS = $(MESOS_CPPFLAGS)
+
+libmesos_no_3rdparty_la_LIBADD += libcsi.la
+endif
 
 
 # Convenience library for building the replicated log in order to
@@ -1507,6 +1560,7 @@ libmesos_la_LIBTOOLFLAGS = --tag=CXX
 libmesos_la_LIBADD =							\
   libmesos_no_3rdparty.la						\
   $(LIB_GLOG)								\
+  $(LIB_GRPC)								\
   $(LIB_LEVELDB)							\
   $(LIB_PROCESS)							\
   $(LIB_PROTOBUF)							\
@@ -2361,7 +2415,8 @@ mesos_tests_SOURCES =						\
   tests/reservation_endpoints_tests.cpp				\
   tests/reservation_tests.cpp					\
   tests/resource_offers_tests.cpp				\
-  tests/resource_provider_http_api_tests.cpp			\
+  tests/resource_provider_manager_tests.cpp			\
+  tests/resource_provider_validation_tests.cpp			\
   tests/resources_tests.cpp					\
   tests/resources_utils.cpp					\
   tests/role_tests.cpp						\
@@ -2429,7 +2484,7 @@ mesos_tests_CPPFLAGS += -isystem ../$(GMOCK)/include
 mesos_tests_CPPFLAGS += -DTESTLIBEXECDIR=\"$(testlibexecdir)\"
 mesos_tests_CPPFLAGS += -DSBINDIR=\"$(sbindir)\"
 
-mesos_tests_LDADD = ../3rdparty/libgmock.la libmesos.la $(LDADD)
+mesos_tests_LDADD = ../3rdparty/libgmock.la libmesos.la $(LIB_GRPC) $(LDADD)
 
 if !OS_FREEBSD
   mesos_tests_LDADD += -ldl # FreeBSD includes dynamic lib utils in libc.
@@ -2470,6 +2525,13 @@ if ENABLE_PORT_MAPPING_ISOLATOR
 mesos_tests_SOURCES +=						\
   tests/containerizer/port_mapping_tests.cpp			\
   tests/containerizer/routing_tests.cpp
+endif
+
+if ENABLE_GRPC
+mesos_tests_SOURCES +=						\
+  tests/csi_client_tests.cpp					\
+  tests/mock_csi_plugin.cpp					\
+  tests/mock_csi_plugin.hpp
 endif
 
 if ENABLE_SSL

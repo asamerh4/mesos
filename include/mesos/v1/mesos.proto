@@ -964,7 +964,6 @@ message AgentInfo {
 message ResourceProviderInfo {
   optional ResourceProviderID id = 1;
   repeated Attribute attributes = 2;
-  repeated Resource resources = 3;
 
   // The type of the resource provider. This uniquely identifies a
   // resource provider implementation. For instance:
@@ -973,12 +972,12 @@ message ResourceProviderInfo {
   // Please follow to Java package naming convention
   // (https://en.wikipedia.org/wiki/Java_package#Package_naming_conventions)
   // to avoid conflicts on type names.
-  required string type = 4;
+  required string type = 3;
 
   // The name of the resource provider. There could be multiple
   // instances of a type of resource provider. The name field is used
   // to distinguish these instances.
-  required string name = 5;
+  required string name = 4;
 }
 
 
@@ -1391,15 +1390,15 @@ message TrafficControlStatistics {
 
 
 message IpStatistics {
-  optional int64 Forwarding =  1;
-  optional int64 DefaultTTL =  2;
-  optional int64 InReceives =  3;
-  optional int64 InHdrErrors =  4;
-  optional int64 InAddrErrors =  5;
-  optional int64 ForwDatagrams =  6;
+  optional int64 Forwarding = 1;
+  optional int64 DefaultTTL = 2;
+  optional int64 InReceives = 3;
+  optional int64 InHdrErrors = 4;
+  optional int64 InAddrErrors = 5;
+  optional int64 ForwDatagrams = 6;
   optional int64 InUnknownProtos = 7;
-  optional int64 InDiscards =  8;
-  optional int64 InDelivers  = 9;
+  optional int64 InDiscards = 8;
+  optional int64 InDelivers = 9;
   optional int64 OutRequests = 10;
   optional int64 OutDiscards = 11;
   optional int64 OutNoRoutes = 12;
@@ -1415,11 +1414,11 @@ message IpStatistics {
 
 message IcmpStatistics {
   optional int64 InMsgs = 1;
-  optional int64 InErrors =  2;
+  optional int64 InErrors = 2;
   optional int64 InCsumErrors = 3;
-  optional int64 InDestUnreachs =  4;
+  optional int64 InDestUnreachs = 4;
   optional int64 InTimeExcds = 5;
-  optional int64 InParmProbs =  6;
+  optional int64 InParmProbs = 6;
   optional int64 InSrcQuenchs = 7;
   optional int64 InRedirects = 8;
   optional int64 InEchos = 9;
@@ -1567,6 +1566,9 @@ message ResourceStatistics {
 
   // Per disk (resource) statistics.
   repeated DiskStatistics disk_statistics = 43;
+
+  // Cgroups blkio statistics.
+  optional CgroupInfo.Blkio.Statistics blkio_statistics = 44;
 
   // Perf statistics.
   optional PerfStatistics perf = 13;
@@ -2144,7 +2146,7 @@ message TaskStatus {
     REASON_EXECUTOR_REGISTRATION_TIMEOUT = 23;
     REASON_EXECUTOR_REREGISTRATION_TIMEOUT = 24;
     REASON_EXECUTOR_TERMINATED = 1;
-    REASON_EXECUTOR_UNREGISTERED = 2;
+    REASON_EXECUTOR_UNREGISTERED = 2; // No longer used.
     REASON_FRAMEWORK_REMOVED = 3;
     REASON_GC_ERROR = 4;
     REASON_INVALID_FRAMEWORKID = 5;
@@ -2157,6 +2159,7 @@ message TaskStatus {
     REASON_AGENT_REMOVED = 11;
     REASON_AGENT_RESTARTED = 12;
     REASON_AGENT_UNKNOWN = 13;
+    REASON_TASK_KILLED_DURING_LAUNCH = 30;
     REASON_TASK_CHECK_STATUS_UPDATED = 28;
     REASON_TASK_HEALTH_CHECK_STATUS_UPDATED = 29;
     REASON_TASK_GROUP_INVALID = 25;
@@ -2235,6 +2238,11 @@ message Filters {
   // SchedulerDriver::launchTasks. You MUST pass Filters with this
   // field set to change this behavior (i.e., get another offer which
   // includes unused resources sooner or later than the default).
+  //
+  // If this field is set to a number of seconds greater than 31536000
+  // (365 days), then the resources will be considered refused for 365
+  // days. If it is set to a negative number, then the default value
+  // will be used.
   optional double refuse_seconds = 1 [default = 5.0];
 }
 
@@ -2718,6 +2726,14 @@ message LinuxInfo {
   // Represents the set of capabilities that the task will
   // be executed with.
   optional CapabilityInfo effective_capabilities = 3;
+
+  // If set as 'true', the container shares the pid namespace with
+  // its parent. If the container is a top level container, it will
+  // share the pid namespace with the agent. If the container is a
+  // nested container, it will share the pid namespace with its
+  // parent container. This field will be ignored if 'namespaces/pid'
+  // isolator is not enabled.
+  optional bool share_pid_namespace = 4;
 }
 
 
@@ -2885,6 +2901,71 @@ message ContainerStatus {
  * Linux control group (cgroup) information.
  */
 message CgroupInfo {
+  // Configuration of a blkio cgroup subsystem.
+  message Blkio {
+    enum Operation {
+      UNKNOWN = 0;
+      TOTAL = 1;
+      READ = 2;
+      WRITE = 3;
+      SYNC = 4;
+      ASYNC = 5;
+    }
+
+    // Describes a stat value without the device descriptor part.
+    message Value {
+      optional Operation op = 1; // Required.
+      optional uint64 value = 2; // Required.
+    }
+
+    message CFQ {
+      message Statistics {
+        // Stats are grouped by block devices. If `device` is not
+        // set, it represents `Total`.
+        optional Device.Number device = 1;
+        // blkio.sectors
+        optional uint64 sectors = 2;
+        // blkio.time
+        optional uint64 time = 3;
+        // blkio.io_serviced
+        repeated Value io_serviced = 4;
+        // blkio.io_service_bytes
+        repeated Value io_service_bytes = 5;
+        // blkio.io_service_time
+        repeated Value io_service_time = 6;
+        // blkio.io_wait_time
+        repeated Value io_wait_time = 7;
+        // blkio.io_merged
+        repeated Value io_merged = 8;
+        // blkio.io_queued
+        repeated Value io_queued = 9;
+      }
+
+      // TODO(jasonlai): Add fields for blkio weight and weight
+      // device.
+    }
+
+    message Throttling {
+      message Statistics {
+        // Stats are grouped by block devices. If `device` is not
+        // set, it represents `Total`.
+        optional Device.Number device = 1;
+        // blkio.throttle.io_serviced
+        repeated Value io_serviced = 2;
+        // blkio.throttle.io_service_bytes
+        repeated Value io_service_bytes = 3;
+      }
+
+      // TODO(jasonlai): Add fields for blkio.throttle.*_device.
+    }
+
+    message Statistics {
+      repeated CFQ.Statistics cfq = 1;
+      repeated CFQ.Statistics cfq_recursive = 2;
+      repeated Throttling.Statistics throttling = 3;
+    }
+  }
+
   // Configuration of a net_cls cgroup subsystem.
   message NetCls {
     // The 32-bit classid consists of two parts, a 16 bit major handle
@@ -3068,7 +3149,13 @@ message FileInfo {
  * Describes information abount a device.
  */
 message Device {
-  required string path = 1;
+  message Number {
+    required uint64 major_number = 1;
+    required uint64 minor_number = 2;
+  }
+
+  optional string path = 1;
+  optional Number number = 2;
 }
 
 

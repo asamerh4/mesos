@@ -41,11 +41,13 @@
 
 #include <stout/check.hpp>
 #include <stout/duration.hpp>
+#include <stout/error.hpp>
 #include <stout/foreach.hpp>
 #include <stout/jsonify.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/protobuf.hpp>
+#include <stout/recordio.hpp>
 #include <stout/stopwatch.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
@@ -136,6 +138,49 @@ static pid_t cloneWithSetns(
   }
 }
 #endif
+
+
+// Reads `ProcessIO::Data` records from a string containing "Record-IO"
+// data encoded in protobuf messages, and returns the stdout and stderr.
+//
+// NOTE: This function ignores any `ProcessIO::Control` records.
+//
+// TODO(gkleiman): This function is very similar to one in `api_tests.cpp`, we
+// should refactor them into a common helper when fixing MESOS-7903.
+static Try<tuple<string, string>> decodeProcessIOData(const string& data)
+{
+  string stdoutReceived;
+  string stderrReceived;
+
+  ::recordio::Decoder<v1::agent::ProcessIO> decoder(
+      lambda::bind(
+          deserialize<v1::agent::ProcessIO>,
+          ContentType::PROTOBUF,
+          lambda::_1));
+
+  Try<std::deque<Try<v1::agent::ProcessIO>>> records = decoder.decode(data);
+
+  if (records.isError()) {
+    return Error(records.error());
+  }
+
+  while (!records->empty()) {
+    Try<v1::agent::ProcessIO> record = records->front();
+    records->pop_front();
+
+    if (record.isError()) {
+      return Error(record.error());
+    }
+
+    if (record->data().type() == v1::agent::ProcessIO::Data::STDOUT) {
+      stdoutReceived += record->data().data();
+    } else if (record->data().type() == v1::agent::ProcessIO::Data::STDERR) {
+      stderrReceived += record->data().data();
+    }
+  }
+
+  return std::make_tuple(stdoutReceived, stderrReceived);
+}
 
 
 CheckerProcess::CheckerProcess(
@@ -542,6 +587,10 @@ void CheckerProcess::__nestedCommandCheck(
   //
   // This means that this future will not be completed until after the
   // check command has finished or the connection has been closed.
+  //
+  // TODO(gkleiman): The output of timed-out checks is lost, we'll
+  // probably have to call `Connection::send` with `streamed = true`
+  // to be able to log it. See MESOS-7903.
   connection.send(request, false)
     .after(checkTimeout,
            defer(self(),
@@ -581,6 +630,25 @@ void CheckerProcess::___nestedCommandCheck(
 
     promise->discard();
     return;
+  }
+
+  Try<tuple<string, string>> checkOutput =
+    decodeProcessIOData(launchResponse.body);
+
+  if (checkOutput.isError()) {
+    LOG(WARNING) << "Failed to decode the output of the " << name
+                 << " for task '" << taskId << "': " << checkOutput.error();
+  } else {
+    string stdoutReceived;
+    string stderrReceived;
+
+    tie(stdoutReceived, stderrReceived) = checkOutput.get();
+
+    LOG(INFO) << "Output of the " << name << " for task '" << taskId
+              << "' (stdout):" << std::endl << stdoutReceived;
+
+    LOG(INFO) << "Output of the " << name << " for task '" << taskId
+              << "' (stderr):" << std::endl << stderrReceived;
   }
 
   waitNestedContainer(checkContainerId)
@@ -727,7 +795,7 @@ void CheckerProcess::processCommandCheckResult(
   // see MESOS-7242.
   if (future.isReady() && WIFEXITED(future.get())) {
     const int exitCode = WEXITSTATUS(future.get());
-    VLOG(1) << name << " for task '" << taskId << "' returned: " << exitCode;
+    LOG(INFO) << name << " for task '" << taskId << "' returned: " << exitCode;
 
     CheckStatusInfo checkStatusInfo;
     checkStatusInfo.set_type(check.type());
@@ -844,32 +912,35 @@ Future<int> CheckerProcess::_httpCheck(
 
   int exitCode = status->get();
   if (exitCode != 0) {
-    const Future<string>& error = std::get<2>(t);
-    if (!error.isReady()) {
+    const Future<string>& commandError = std::get<2>(t);
+    if (!commandError.isReady()) {
       return Failure(
-          string(HTTP_CHECK_COMMAND) + " returned " +
-          WSTRINGIFY(exitCode) + "; reading stderr failed: " +
-          (error.isFailed() ? error.failure() : "discarded"));
+          string(HTTP_CHECK_COMMAND) + " " + WSTRINGIFY(exitCode) +
+          "; reading stderr failed: " +
+          (commandError.isFailed() ? commandError.failure() : "discarded"));
     }
 
     return Failure(
-        string(HTTP_CHECK_COMMAND) + " returned " +
-        WSTRINGIFY(exitCode) + ": " + error.get());
+        string(HTTP_CHECK_COMMAND) + " " + WSTRINGIFY(exitCode) + ": " +
+        commandError.get());
   }
 
-  const Future<string>& output = std::get<1>(t);
-  if (!output.isReady()) {
+  const Future<string>& commandOutput = std::get<1>(t);
+  if (!commandOutput.isReady()) {
     return Failure(
         "Failed to read stdout from " + string(HTTP_CHECK_COMMAND) + ": " +
-        (output.isFailed() ? output.failure() : "discarded"));
+        (commandOutput.isFailed() ? commandOutput.failure() : "discarded"));
   }
 
+  VLOG(1) << "Output of the " << name << " for task '" << taskId
+          << "': " << commandOutput.get();
+
   // Parse the output and get the HTTP status code.
-  Try<int> statusCode = numify<int>(output.get());
+  Try<int> statusCode = numify<int>(commandOutput.get());
   if (statusCode.isError()) {
     return Failure(
         "Unexpected output from " + string(HTTP_CHECK_COMMAND) + ": " +
-        output.get());
+        commandOutput.get());
   }
 
   return statusCode.get();
@@ -885,8 +956,8 @@ void CheckerProcess::processHttpCheckResult(
   Result<CheckStatusInfo> result = None();
 
   if (future.isReady()) {
-    VLOG(1) << name << " for task '" << taskId << "'"
-            << " returned: " << future.get();
+    LOG(INFO) << name << " for task '" << taskId << "'"
+              << " returned: " << future.get();
 
     CheckStatusInfo checkStatusInfo;
     checkStatusInfo.set_type(check.type());
@@ -998,7 +1069,8 @@ Future<bool> CheckerProcess::_tcpCheck(
 
   const Future<string>& commandOutput = std::get<1>(t);
   if (commandOutput.isReady()) {
-    VLOG(1) << string(TCP_CHECK_COMMAND) << ": " << commandOutput.get();
+    VLOG(1) << "Output of the " << name << " for task '" << taskId
+            << "': " << commandOutput.get();
   }
 
   if (exitCode != 0) {
@@ -1025,8 +1097,8 @@ void CheckerProcess::processTcpCheckResult(
   Result<CheckStatusInfo> result = None();
 
   if (future.isReady()) {
-    VLOG(1) << name << " for task '" << taskId << "'"
-            << " returned: " << future.get();
+    LOG(INFO) << name << " for task '" << taskId << "'"
+              << " returned: " << future.get();
 
     CheckStatusInfo checkStatusInfo;
     checkStatusInfo.set_type(check.type());

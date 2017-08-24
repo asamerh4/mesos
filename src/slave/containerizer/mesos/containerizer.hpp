@@ -103,6 +103,10 @@ public:
   virtual process::Future<bool> destroy(
       const ContainerID& containerId);
 
+  virtual process::Future<bool> kill(
+      const ContainerID& containerId,
+      int signal);
+
   virtual process::Future<hashset<ContainerID>> containers();
 
   virtual process::Future<Nothing> remove(const ContainerID& containerId);
@@ -167,6 +171,10 @@ public:
 
   virtual process::Future<bool> destroy(
       const ContainerID& containerId);
+
+  virtual process::Future<bool> kill(
+      const ContainerID& containerId,
+      int signal);
 
   virtual process::Future<Nothing> remove(const ContainerID& containerId);
 
@@ -356,6 +364,9 @@ private:
   };
 
   hashmap<ContainerID, process::Owned<Container>> containers_;
+
+  // Helper to transition container state.
+  void transition(const ContainerID& containerId, const State& state);
 
   struct Metrics
   {

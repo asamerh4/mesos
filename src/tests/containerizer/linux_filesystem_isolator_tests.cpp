@@ -239,6 +239,67 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromSandbox)
 }
 
 
+// This is a regression test for MESOS-5187. It is a ROOT test to
+// simulate the scenario that the framework user is non-root while
+// the agent process is root, to make sure that non-root user can
+// still have the permission to write to the volume as expected.
+TEST_F(LinuxFilesystemIsolatorTest, ROOT_SandboxVolumeOwnership)
+{
+  string registry = path::join(sandbox.get(), "registry");
+  AWAIT_READY(DockerArchive::create(registry, "test_image"));
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "filesystem/linux,docker/runtime";
+  flags.docker_registry = registry;
+  flags.docker_store_dir = path::join(sandbox.get(), "store");
+  flags.image_providers = "docker";
+
+  Fetcher fetcher(flags);
+
+  Try<MesosContainerizer*> create =
+    MesosContainerizer::create(flags, true, &fetcher);
+
+  ASSERT_SOME(create);
+
+  Owned<Containerizer> containerizer(create.get());
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  ExecutorInfo executor = createExecutorInfo(
+      "test_executor",
+      "echo abc > /tmp/file");
+
+  executor.mutable_container()->CopyFrom(createContainerInfo(
+      "test_image",
+      {createVolumeFromHostPath("/tmp", "tmp", Volume::RW)}));
+
+  string directory = path::join(flags.work_dir, "sandbox");
+  ASSERT_SOME(os::mkdir(directory));
+
+  // Simulate the executor sandbox ownership as the user
+  // from FrameworkInfo.
+  ASSERT_SOME(os::chown("nobody", directory));
+
+  Future<bool> launch = containerizer->launch(
+      containerId,
+      createContainerConfig(None(), executor, directory, "nobody"),
+      map<string, string>(),
+      None());
+
+  AWAIT_READY(launch);
+
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait->get().has_status());
+  EXPECT_WEXITSTATUS_EQ(0, wait->get().status());
+
+  EXPECT_SOME_EQ("abc\n", os::read(path::join(directory, "tmp", "file")));
+}
+
+
 // This test verifies that a volume with an absolute host path as
 // well as an absolute container path is properly mounted in the
 // container's mount namespace.
@@ -978,7 +1039,7 @@ TEST_F(LinuxFilesystemIsolatorMesosTest,
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -1049,7 +1110,7 @@ TEST_F(LinuxFilesystemIsolatorMesosTest,
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -1143,7 +1204,7 @@ TEST_F(LinuxFilesystemIsolatorMesosTest,
   AWAIT_READY(frameworkId);
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -1413,7 +1474,7 @@ TEST_F(LinuxFilesystemIsolatorMesosTest, ROOT_SandboxEnvironmentVariable)
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -1497,7 +1558,7 @@ TEST_F(LinuxFilesystemIsolatorMesosTest,
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   // We request a sandbox (1MB) that is smaller than the persistent
   // volume (4MB) and attempt to create a file in that volume that is
@@ -1591,7 +1652,7 @@ TEST_F(LinuxFilesystemIsolatorMesosTest,
   driver.start();
 
   AWAIT_READY(offers);
-  ASSERT_NE(0u, offers->size());
+  ASSERT_FALSE(offers->empty());
 
   // We create a shared volume which shall be used by the task to
   // write to that volume.

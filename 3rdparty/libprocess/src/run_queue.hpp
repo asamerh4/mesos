@@ -13,21 +13,26 @@
 #ifndef __PROCESS_RUN_QUEUE_HPP__
 #define __PROCESS_RUN_QUEUE_HPP__
 
-// At _configuration_ (i.e., build) time you can specify
-// RUN_QUEUE=... as an environment variable (i.e., just like CC or
-// CXXFLAGS) to pick the run queue implementation. If nothing is
-// specified we'll default to the LockingRunQueue.
+// At _configuration_ (i.e., build) time you can specify a few
+// optimizations:
 //
-// Alternatively we could have made this be a _runtime_ decision but
-// for performance reasons we wanted the run queue implementation to
-// be compile-time optimized (e.g., inlined, etc).
+//  (1) --enable-lock-free-run-queue (autotools) or
+//      -DENABLE_LOCK_FREE_RUN_QUEUE (cmake) which enables the
+//      lock-free run queue implementation (see below for more details).
 //
-// Note that care should be taken not to reconfigure with a different
-// value of RUN_QUEUE when reusing a build directory!
-#define RUN_QUEUE LockingRunQueue
+//  (2) --enable-last-in-first-out-fixed-size-semaphore (autotools) or
+//      -DENABLE_LAST_IN_FIRST_OUT_FIXED_SIZE_SEMAPHORE (cmake) which
+//      enables an optimized semaphore implementation (see semaphore.hpp
+//      for more details).
+//
+// By default we use the `LockingRunQueue` and
+// `DecomissionableKernelSemaphore`.
+//
+// We choose to make these _compile-time_ decisions rather than
+// _runtime_ decisions because we wanted the run queue implementation
+// to be compile-time optimized (e.g., inlined, etc).
 
 #ifdef LOCK_FREE_RUN_QUEUE
-#define RUN_QUEUE LockFreeRunQueue
 #include <concurrentqueue.h>
 #endif // LOCK_FREE_RUN_QUEUE
 
@@ -42,7 +47,8 @@
 
 namespace process {
 
-class LockingRunQueue
+#ifndef LOCK_FREE_RUN_QUEUE
+class RunQueue
 {
 public:
   bool extract(ProcessBase* process)
@@ -104,6 +110,11 @@ public:
     semaphore.decomission();
   }
 
+  size_t capacity() const
+  {
+    return semaphore.capacity();
+  }
+
   // Epoch used to capture changes to the run queue when settling.
   std::atomic_long epoch = ATOMIC_VAR_INIT(0L);
 
@@ -112,12 +123,16 @@ private:
   std::mutex mutex;
 
   // Semaphore used for threads to wait.
+#ifndef LAST_IN_FIRST_OUT_FIXED_SIZE_SEMAPHORE
   DecomissionableKernelSemaphore semaphore;
+#else
+  DecomissionableLastInFirstOutFixedSizeSemaphore semaphore;
+#endif // LAST_IN_FIRST_OUT_FIXED_SIZE_SEMAPHORE
 };
 
+#else // LOCK_FREE_RUN_QUEUE
 
-#ifdef LOCK_FREE_RUN_QUEUE
-class LockFreeRunQueue
+class RunQueue
 {
 public:
   bool extract(ProcessBase*)
@@ -166,15 +181,24 @@ public:
     semaphore.decomission();
   }
 
+  size_t capacity() const
+  {
+    return semaphore.capacity();
+  }
+
   // Epoch used to capture changes to the run queue when settling.
   std::atomic_long epoch = ATOMIC_VAR_INIT(0L);
 
 private:
   moodycamel::ConcurrentQueue<ProcessBase*> queue;
 
-  // Semaphore used for threads to wait for the queue.
+#ifndef LAST_IN_FIRST_OUT_FIXED_SIZE_SEMAPHORE
   DecomissionableKernelSemaphore semaphore;
+#else
+  DecomissionableLastInFirstOutFixedSizeSemaphore semaphore;
+#endif // LAST_IN_FIRST_OUT_FIXED_SIZE_SEMAPHORE
 };
+
 #endif // LOCK_FREE_RUN_QUEUE
 
 } // namespace process {

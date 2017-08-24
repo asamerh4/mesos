@@ -63,6 +63,7 @@
 #include <process/address.hpp>
 #include <process/check.hpp>
 #include <process/clock.hpp>
+#include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/dispatch.hpp>
@@ -113,6 +114,7 @@
 #include "decoder.hpp"
 #include "encoder.hpp"
 #include "event_loop.hpp"
+#include "event_queue.hpp"
 #include "gate.hpp"
 #include "process_reference.hpp"
 #include "run_queue.hpp"
@@ -295,7 +297,7 @@ class HttpProxy : public Process<HttpProxy>
 {
 public:
   explicit HttpProxy(const Socket& _socket);
-  virtual ~HttpProxy() {};
+  virtual ~HttpProxy() {}
 
   // Enqueues the response to be sent once all previously enqueued
   // responses have been processed (e.g., waited for and sent).
@@ -573,6 +575,11 @@ public:
     }
   }
 
+  long workers() const
+  {
+    return threads.size() - 1; // Less 1 for event loop thread.
+  }
+
 private:
   // Delegate process name to receive root HTTP requests.
   const Option<string> delegate;
@@ -581,14 +588,11 @@ private:
   hashmap<string, ProcessBase*> processes;
   std::recursive_mutex processes_mutex;
 
-  // Gates for waiting threads (protected by processes_mutex).
-  map<ProcessBase*, Gate*> gates;
-
   // Queue of runnable processes.
   //
-  // See run_queue.hpp for more information about the RUN_QUEUE
-  // preprocessor definition.
-  RUN_QUEUE runq;
+  // See run_queue.hpp for more information about the run queue
+  // implementation.
+  RunQueue runq;
 
   // Number of running processes, to support Clock::settle operation.
   std::atomic_long running;
@@ -765,6 +769,18 @@ static Message encode(
 }
 
 
+static Message encode(
+    const UPID& from,
+    const UPID& to,
+    string&& name,
+    const char* data,
+    size_t length)
+{
+  Message message{std::move(name), from, to, string(data, length)};
+  return message;
+}
+
+
 static void transport(Message&& message, ProcessBase* sender = nullptr)
 {
   if (message.to.address == __address__) {
@@ -774,6 +790,56 @@ static void transport(Message&& message, ProcessBase* sender = nullptr)
   } else {
     // Remote message.
     socket_manager->send(std::move(message));
+  }
+}
+
+
+static void transport(
+    const UPID& from,
+    const UPID& to,
+    const string& name,
+    const char* data,
+    size_t length,
+    ProcessBase* sender = nullptr)
+{
+  if (to.address == __address__) {
+    // Local message.
+    MessageEvent* event = new MessageEvent(
+        from,
+        to,
+        name,
+        data,
+        length);
+
+    process_manager->deliver(event->message.to, event, sender);
+  } else {
+    // Remote message.
+    socket_manager->send(encode(from, to, name, data, length));
+  }
+}
+
+
+static void transport(
+    const UPID& from,
+    const UPID& to,
+    string&& name,
+    const char* data,
+    size_t length,
+    ProcessBase* sender = nullptr)
+{
+  if (to.address == __address__) {
+    // Local message.
+    MessageEvent* event = new MessageEvent(
+        from,
+        to,
+        std::move(name),
+        data,
+        length);
+
+    process_manager->deliver(event->message.to, event, sender);
+  } else {
+    // Remote message.
+    socket_manager->send(encode(from, to, std::move(name), data, length));
   }
 }
 
@@ -1438,6 +1504,13 @@ PID<Logging> logging()
 {
   process::initialize();
   return _logging;
+}
+
+
+long workers()
+{
+  process::initialize();
+  return process_manager->workers();
 }
 
 
@@ -2500,7 +2573,6 @@ void SocketManager::close(int_fd s)
       // 'sockets.erase(s)' to avoid the potential race with the last
       // reference being in 'sockets'.
 
-
       // Hold on to the Socket and remove it from the 'sockets' map so
       // that in the case where 'shutdown()' ends up calling close the
       // termination logic is not run twice.
@@ -2817,6 +2889,11 @@ long ProcessManager::init_threads()
     }
   }
 
+  if (runq.capacity() < (size_t) num_worker_threads) {
+    EXIT(EXIT_FAILURE) << "Number of worker threads can not exceed "
+                       << runq.capacity() << " at this time";
+  }
+
   threads.reserve(num_worker_threads + 1);
 
   // Create processing threads.
@@ -2853,19 +2930,22 @@ long ProcessManager::init_threads()
 
 ProcessReference ProcessManager::use(const UPID& pid)
 {
+  if (pid.reference.isSome()) {
+    if (std::shared_ptr<ProcessBase*> reference = pid.reference->lock()) {
+      return ProcessReference(std::move(reference));
+    }
+  }
+
   if (pid.address == __address__) {
     synchronized (processes_mutex) {
       Option<ProcessBase*> process = processes.get(pid.id);
       if (process.isSome()) {
-        // Note that the ProcessReference constructor _must_ get
-        // called while holding the lock on processes so that waiting
-        // for references is atomic (i.e., race free).
-        return ProcessReference(process.get());
+        return ProcessReference(process.get()->reference);
       }
     }
   }
 
-  return ProcessReference(nullptr);
+  return ProcessReference();
 }
 
 
@@ -2956,22 +3036,17 @@ void ProcessManager::handle(
         // capture happens-before timing relationships for testing.
         bool accepted = deliver(event->message.to, event);
 
-        // Only send back an HTTP response if this isn't from libprocess
-        // (which we determine by looking at the User-Agent). This is
-        // necessary because older versions of libprocess would try and
-        // recv the data and parse it as an HTTP request which would
-        // fail thus causing the socket to get closed (but now
-        // libprocess will ignore responses, see ignore_data).
-        Option<string> agent = request->headers.get("User-Agent");
-        if (agent.getOrElse("").find("libprocess/") == string::npos) {
-          if (accepted) {
-            VLOG(2) << "Accepted libprocess message to " << request->url.path;
-            dispatch(proxy, &HttpProxy::enqueue, Accepted(), *request);
-          } else {
-            VLOG(1) << "Failed to handle libprocess message to "
-                    << request->url.path << ": not found";
-            dispatch(proxy, &HttpProxy::enqueue, NotFound(), *request);
-          }
+        // NOTE: prior to commit d5fe51c on April 11, 2014 we needed
+        // to ignore sending responses in the event the receiver was a
+        // version of libprocess that didn't properly ignore
+        // responses. Now we always send a response.
+        if (accepted) {
+          VLOG(2) << "Delivered libprocess message to " << request->url.path;
+          dispatch(proxy, &HttpProxy::enqueue, Accepted(), *request);
+        } else {
+          VLOG(1) << "Failed to deliver libprocess message to "
+                  << request->url.path;
+          dispatch(proxy, &HttpProxy::enqueue, NotFound(), *request);
         }
 
         delete request;
@@ -3122,6 +3197,7 @@ bool ProcessManager::deliver(
   if (ProcessReference receiver = use(to)) {
     return deliver(receiver, event, sender);
   }
+
   VLOG(2) << "Dropping event for process " << to;
 
   delete event;
@@ -3149,9 +3225,21 @@ UPID ProcessManager::spawn(ProcessBase* process, bool manage)
 
   synchronized (processes_mutex) {
     if (processes.count(process->pid.id) > 0) {
+      VLOG(1) << "Attempting to spawn already spawned process " << process->pid;
       return UPID();
     } else {
       processes[process->pid.id] = process;
+
+      // NOTE: we set process reference on it's `UPID` _after_ we've
+      // spawned so that we make sure that we'll take the
+      // `ProcessManager::use()` code path in the event that we aren't
+      // able to spawn the process. This is important in circumstances
+      // where there are multiple processes with the same ID because
+      // the semantics that people have come to expect from libprocess
+      // is that a `UPID` should "resolve" to the already spawned
+      // process rather than a process that has the same name but
+      // hasn't yet been spawned.
+      process->pid.reference = process->reference;
     }
   }
 
@@ -3184,11 +3272,12 @@ void ProcessManager::resume(ProcessBase* process)
   bool terminate = false;
   bool blocked = false;
 
-  CHECK(process->state == ProcessBase::BOTTOM ||
-        process->state == ProcessBase::READY);
+  ProcessBase::State state = process->state.load();
 
-  if (process->state == ProcessBase::BOTTOM) {
-    process->state = ProcessBase::RUNNING;
+  CHECK(state == ProcessBase::State::BOTTOM ||
+        state == ProcessBase::State::READY);
+
+  if (state == ProcessBase::State::BOTTOM) {
     try { process->initialize(); }
     catch (...) { terminate = true; }
   }
@@ -3196,19 +3285,54 @@ void ProcessManager::resume(ProcessBase* process)
   while (!terminate && !blocked) {
     Event* event = nullptr;
 
-    synchronized (process->mutex) {
-      if (process->events.size() > 0) {
-        event = process->events.front();
-        process->events.pop_front();
-        process->state = ProcessBase::RUNNING;
-      } else {
-        process->state = ProcessBase::BLOCKED;
-        blocked = true;
+    // NOTE: the event queue requires only a _single_ consumer at a
+    // time ... this is where we act as that single consumer (and down
+    // in `ProcessManager::cleanup` which we call from here).
+
+    if (!process->events->consumer.empty()) {
+      event = process->events->consumer.dequeue();
+    } else {
+      state = ProcessBase::State::BLOCKED;
+      process->state.store(state);
+      blocked = true;
+
+      // Now check that we didn't miss any events that got added
+      // before we set ourselves to BLOCKED since we won't have been
+      // added to the run queue in those circumstances so we need to
+      // serve those events!
+      if (!process->events->consumer.empty()) {
+        // Make sure the state is in READY! Either we need to
+        // explicitly do this because `ProcessBase::enqueue` saw us as
+        // READY (or BOTTOM) and didn't change the state or we're
+        // racing with `ProcessBase::enqueue` because they saw us at
+        // BLOCKED and are trying to change the state. If they change
+        // the state then they'll also enqueue this process, which
+        // means we need to bail because another thread might resume
+        // (and the reason we'll bail is because `blocked` is true)!
+        if (process->state.compare_exchange_strong(
+                state,
+                ProcessBase::State::READY)) {
+          blocked = false;
+          continue;
+        }
       }
     }
 
     if (!blocked) {
-      CHECK(event != nullptr);
+      CHECK_NOTNULL(event);
+
+      // Before serving this event check if we've triggered a
+      // terminate and if so purge all events until we get to the
+      // terminate event.
+      terminate = process->termination.load();
+      if (terminate) {
+        // Now purge all events until the terminate event.
+        while (!event->is<TerminateEvent>()) {
+          delete event;
+          event = process->events->consumer.dequeue();
+          CHECK_NOTNULL(event);
+        }
+      }
 
       // Determine if we should filter this event.
       //
@@ -3259,6 +3383,10 @@ void ProcessManager::resume(ProcessBase* process)
     }
   }
 
+  // TODO(benh): If `terminate` was set to true when we initialized
+  // then we'll never actually cleanup! This bug has been here a long
+  // time!!!
+
   __process__ = nullptr;
 }
 
@@ -3268,61 +3396,45 @@ void ProcessManager::cleanup(ProcessBase* process)
   VLOG(2) << "Cleaning up " << process->pid;
 
   // First, set the terminating state so no more events will get
-  // enqueued and delete all the pending events. We want to delete the
-  // events before we hold the processes lock because deleting an
-  // event could cause code outside libprocess to get executed which
-  // might cause a deadlock with the processes lock. Likewise,
-  // deleting the events now rather than later has the nice property
-  // of making sure that any events that might have gotten enqueued on
-  // the process we are cleaning up will get dropped (since it's
-  // terminating) and eliminates the potential of enqueueing them on
-  // another process that gets spawned with the same PID.
-  deque<Event*> events;
+  // enqueued and then decomission the event queue which will also
+  // delete all the pending events. We want to delete the events
+  // before we hold `processes_mutex` because deleting an event could
+  // cause code outside libprocess to get executed which might cause a
+  // deadlock with `processes_mutex`. Also, deleting the events now
+  // rather than later has the nice property of making sure that any
+  // _new_ events that might have gotten enqueued _BACK_ onto this
+  // process due to the deleting of the pending events will get
+  // dropped since this process is now TERMINATING, which eliminates
+  // the potential of these new events from getting enqueued onto a
+  // _new_ process that gets spawned with the same PID.
+  process->state.store(ProcessBase::State::TERMINATING);
 
-  synchronized (process->mutex) {
-    process->state = ProcessBase::TERMINATING;
-    events = process->events;
-    process->events.clear();
-  }
-
-  // Delete pending events.
-  while (!events.empty()) {
-    Event* event = events.front();
-    events.pop_front();
-    delete event;
-  }
+  process->events->consumer.decomission();
 
   // Remove help strings for all installed routes for this process.
   dispatch(help, &Help::remove, process->pid.id);
 
   // Possible gate non-libprocess threads are waiting at.
-  Gate* gate = nullptr;
+  std::shared_ptr<Gate> gate = process->gate;
 
   // Remove process.
   synchronized (processes_mutex) {
+    // Reset the reference so that we don't keep giving out references
+    // in `ProcessManager::use`.
+    //
+    // NOTE: this must be done from within the `processes_mutex` since
+    // that is where we read it and this is considered a write.
+    process->reference.reset();
+
     // Wait for all process references to get cleaned up.
-    while (process->refs.load() > 0) {
+    CHECK_SOME(process->pid.reference);
+    while (!process->pid.reference->expired()) {
 #if defined(__i386__) || defined(__x86_64__)
       asm ("pause");
 #endif
     }
 
-    synchronized (process->mutex) {
-      CHECK(process->events.empty());
-
-      processes.erase(process->pid.id);
-
-      // Lookup gate to wake up waiting threads.
-      map<ProcessBase*, Gate*>::iterator it = gates.find(process);
-      if (it != gates.end()) {
-        gate = it->second;
-        // N.B. The last thread that leaves the gate also free's it.
-        gates.erase(it);
-      }
-
-      CHECK(process->refs.load() == 0);
-      process->state = ProcessBase::TERMINATED;
-    }
+    processes.erase(process->pid.id);
 
     // Note that we don't remove the process from the clock during
     // cleanup, but rather the clock is reset for a process when it is
@@ -3357,9 +3469,8 @@ void ProcessManager::cleanup(ProcessBase* process)
     // another thread _approaches_ the gate causing that thread to
     // wait on _arrival_ to the gate forever (see
     // ProcessManager::wait).
-    if (gate != nullptr) {
-      gate->open();
-    }
+    CHECK(gate);
+    gate->open();
   }
 }
 
@@ -3399,9 +3510,9 @@ void ProcessManager::terminate(
     }
 
     if (sender != nullptr) {
-      process->enqueue(new TerminateEvent(sender->self()), inject);
+      process->enqueue(new TerminateEvent(sender->self(), inject));
     } else {
-      process->enqueue(new TerminateEvent(UPID()), inject);
+      process->enqueue(new TerminateEvent(UPID(), inject));
     }
   }
 }
@@ -3409,36 +3520,20 @@ void ProcessManager::terminate(
 
 bool ProcessManager::wait(const UPID& pid)
 {
-  // We use a gate for waiters. A gate is single use. That is, a new
-  // gate is created when the first thread shows up and wants to wait
-  // for a process that currently has no gate. Once that process
-  // exits, the last thread to leave the gate will also clean it
-  // up. Note that a gate will never get more threads waiting on it
-  // after it has been opened, since the process should no longer be
-  // valid and therefore will not have an entry in 'processes'.
-
-  Gate* gate = nullptr;
-  Gate::state_t old;
+  std::shared_ptr<Gate> gate;
 
   ProcessBase* process = nullptr; // Set to non-null if we donate thread.
 
-  // Try and approach the gate if necessary.
-  synchronized (processes_mutex) {
-    if (processes.count(pid.id) > 0) {
-      process = processes[pid.id];
-      CHECK(process->state != ProcessBase::TERMINATED);
+  if (ProcessReference reference = use(pid)) {
+    // Save the process assuming we can donate to it.
+    process = reference;
 
-      // Check and see if a gate already exists.
-      if (gates.find(process) == gates.end()) {
-        gates[process] = new Gate();
-      }
+    gate = process->gate;
 
-      gate = gates[process];
-      old = gate->approach();
-
-      // Check if it is runnable in order to donate this thread.
-      if (process->state == ProcessBase::BOTTOM ||
-          process->state == ProcessBase::READY) {
+    // Check if it is runnable in order to donate this thread.
+    switch (process->state.load()) {
+      case ProcessBase::State::BOTTOM:
+      case ProcessBase::State::READY:
         // Assume that we'll be able to successfully extract the
         // process from the run queue and optimistically increment
         // `running` so that `Clock::settle` properly waits. In the
@@ -3456,10 +3551,11 @@ bool ProcessManager::wait(const UPID& pid)
           running.fetch_sub(1);
           process = nullptr;
         }
-      } else {
-        // Process is not runnable, so no need to donate ...
+        break;
+      case ProcessBase::State::BLOCKED:
+      case ProcessBase::State::TERMINATING:
         process = nullptr;
-      }
+        break;
     }
   }
 
@@ -3482,14 +3578,9 @@ bool ProcessManager::wait(const UPID& pid)
   // (i.e., donate for a message, check and see if our gate is open,
   // if not, keep donating).
 
-  // Now arrive at the gate and wait until it opens.
-  if (gate != nullptr) {
-    int remaining = gate->arrive(old);
-
-    if (remaining == 0) {
-      delete gate;
-    }
-
+  // Now wait at the gate until it opens.
+  if (gate) {
+    gate->wait();
     return true;
   }
 
@@ -3649,93 +3740,35 @@ void ProcessManager::settle()
 
 Future<Response> ProcessManager::__processes__(const Request&)
 {
-  JSON::Array array;
-
   synchronized (processes_mutex) {
-    foreachvalue (ProcessBase* process, process_manager->processes) {
-      JSON::Object object;
-      object.values["id"] = process->pid.id;
-
-      JSON::Array events;
-
-      struct JSONVisitor : EventVisitor
-      {
-        explicit JSONVisitor(JSON::Array* _events) : events(_events) {}
-
-        virtual void visit(const MessageEvent& event)
-        {
-          JSON::Object object;
-          object.values["type"] = "MESSAGE";
-
-          const Message& message = event.message;
-
-          object.values["name"] = message.name;
-          object.values["from"] = string(message.from);
-          object.values["to"] = string(message.to);
-          object.values["body"] = message.body;
-
-          events->values.push_back(object);
+    return collect(lambda::map(
+        [](ProcessBase* process) {
+          // TODO(benh): Try and "inject" this dispatch or create a
+          // high-priority set of events (i.e., mailbox).
+          return dispatch(
+              process->self(),
+              [process]() -> JSON::Object {
+                return *process;
+              });
+        },
+        process_manager->processes.values()))
+      .then([](const std::list<JSON::Object>& objects) -> Response {
+        JSON::Array array;
+        foreach (const JSON::Object& object, objects) {
+          array.values.push_back(object);
         }
-
-        virtual void visit(const HttpEvent& event)
-        {
-          JSON::Object object;
-          object.values["type"] = "HTTP";
-
-          const Request& request = *event.request;
-
-          object.values["method"] = request.method;
-          object.values["url"] = stringify(request.url);
-
-          events->values.push_back(object);
-        }
-
-        virtual void visit(const DispatchEvent& event)
-        {
-          JSON::Object object;
-          object.values["type"] = "DISPATCH";
-          events->values.push_back(object);
-        }
-
-        virtual void visit(const ExitedEvent& event)
-        {
-          JSON::Object object;
-          object.values["type"] = "EXITED";
-          events->values.push_back(object);
-        }
-
-        virtual void visit(const TerminateEvent& event)
-        {
-          JSON::Object object;
-          object.values["type"] = "TERMINATE";
-          events->values.push_back(object);
-        }
-
-        JSON::Array* events;
-      } visitor(&events);
-
-      synchronized (process->mutex) {
-        foreach (Event* event, process->events) {
-          event->visit(&visitor);
-        }
-      }
-
-      object.values["events"] = events;
-      array.values.push_back(object);
-    }
+        return OK(array);
+      });
   }
-
-  return OK(array);
 }
 
 
 ProcessBase::ProcessBase(const string& id)
+  : events(new EventQueue()),
+    reference(std::make_shared<ProcessBase*>(this)),
+    gate(std::make_shared<Gate>())
 {
   process::initialize();
-
-  state = ProcessBase::BOTTOM;
-
-  refs = 0;
 
   pid.id = id != "" ? id : ID::generate();
   pid.address = __address__;
@@ -3753,45 +3786,93 @@ ProcessBase::ProcessBase(const string& id)
 ProcessBase::~ProcessBase() {}
 
 
-void ProcessBase::enqueue(Event* event, bool inject)
+template <>
+size_t ProcessBase::eventCount<MessageEvent>()
 {
-  CHECK(event != nullptr);
-
-  synchronized (mutex) {
-    if (state != TERMINATING && state != TERMINATED) {
-      if (!inject) {
-        events.push_back(event);
-      } else {
-        events.push_front(event);
-      }
-
-      if (state == BLOCKED) {
-        state = READY;
-        process_manager->enqueue(this);
-      }
-
-      CHECK(state == BOTTOM ||
-            state == READY ||
-            state == RUNNING);
-    } else {
-      delete event;
-    }
-  }
+  CHECK_EQ(this, __process__);
+  return events->consumer.count<MessageEvent>();
 }
 
 
-void ProcessBase::inject(
-    const UPID& from,
-    const string& name,
-    const char* data,
-    size_t length)
+template <>
+size_t ProcessBase::eventCount<DispatchEvent>()
 {
-  if (!from)
-    return;
+  CHECK_EQ(this, __process__);
+  return events->consumer.count<DispatchEvent>();
+}
 
-  Message message = encode(from, pid, name, data, length);
 
-  enqueue(new MessageEvent(std::move(message)), true);
+template <>
+size_t ProcessBase::eventCount<HttpEvent>()
+{
+  CHECK_EQ(this, __process__);
+  return events->consumer.count<HttpEvent>();
+}
+
+
+template <>
+size_t ProcessBase::eventCount<ExitedEvent>()
+{
+  CHECK_EQ(this, __process__);
+  return events->consumer.count<ExitedEvent>();
+}
+
+
+template <>
+size_t ProcessBase::eventCount<TerminateEvent>()
+{
+  CHECK_EQ(this, __process__);
+  return events->consumer.count<TerminateEvent>();
+}
+
+
+void ProcessBase::enqueue(Event* event)
+{
+  CHECK_NOTNULL(event);
+
+  State old = state.load();
+
+  // Need to check if this is a terminate event _BEFORE_ we enqueue
+  // because it's possible that it'll get deleted after we enqueue it
+  // and before we use it again!
+  bool terminate =
+    event->is<TerminateEvent>() &&
+    event->as<TerminateEvent>().inject;
+
+  switch (old) {
+    case State::BOTTOM:
+    case State::READY:
+    case State::BLOCKED:
+      events->producer.enqueue(event);
+      break;
+    case State::TERMINATING:
+      delete event;
+      return;
+  }
+
+  // We need to store terminate _AFTER_ we enqueue the event because
+  // the code in `ProcessMNager::resume` assumes that if it sees
+  // `termination` as true then there must be at least one event in
+  // the queue.
+  if (terminate) {
+    termination.store(true);
+  }
+
+  // If we're BLOCKED then we need to try and enqueue us into the run
+  // queue. It's possible that in the time we enqueued the event and
+  // are attempting to enqueue us in the run queue another thread has
+  // already served the event! Worse case scenario we'll end up
+  // enqueuing us in the run queue only to find out in
+  // `ProcessManager::resume` that our event queue is empty!
+  if ((old = state.load()) == State::BLOCKED) {
+    if (state.compare_exchange_strong(old, State::READY)) {
+      // NOTE: we only enqueue if _we_ successfully did the exchange
+      // since another thread executing this code or a thread in
+      // `ProcessBase::resume` might have already done the exchange to
+      // READY.
+      process_manager->enqueue(this);
+    }
+  }
 }
 
 
@@ -3806,7 +3887,22 @@ void ProcessBase::send(
   }
 
   // Encode and transport outgoing message.
-  transport(encode(pid, to, name, data, length), this);
+  transport(pid, to, name, data, length, this);
+}
+
+
+void ProcessBase::send(
+    const UPID& to,
+    string&& name,
+    const char* data,
+    size_t length)
+{
+  if (!to) {
+    return;
+  }
+
+  // Encode and transport outgoing message.
+  transport(pid, to, std::move(name), data, length, this);
 }
 
 
@@ -4085,6 +4181,26 @@ void ProcessBase::route(
 }
 
 
+ProcessBase:: operator JSON::Object()
+{
+  CHECK_EQ(this, __process__);
+
+  JSON::Object object;
+  object.values["id"] = (const string&) pid.id;
+  object.values["events"] = JSON::Array(events->consumer);
+  return object;
+}
+
+
+void UPID::resolve()
+{
+  if (ProcessReference process = process_manager->use(*this)) {
+    reference = process.reference;
+  }
+  // Otherwise keep it `None` to force look ups in the future!
+}
+
+
 UPID spawn(ProcessBase* process, bool manage)
 {
   process::initialize();
@@ -4193,8 +4309,8 @@ void post(const UPID& to, const string& name, const char* data, size_t length)
     return;
   }
 
-  // Encode and transport outgoing message.
-  transport(encode(UPID(), to, name, data, length));
+  // Transport outgoing message.
+  transport(UPID(), to, name, data, length);
 }
 
 
@@ -4210,8 +4326,8 @@ void post(const UPID& from,
     return;
   }
 
-  // Encode and transport outgoing message.
-  transport(encode(from, to, name, data, length));
+  // Transport outgoing message.
+  transport(from, to, name, data, length);
 }
 
 

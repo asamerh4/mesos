@@ -52,6 +52,8 @@ using std::ostringstream;
 using std::string;
 using std::vector;
 
+constexpr char FRAMEWORK_NAME[] = "Persistent Volume Framework (C++)";
+
 
 // TODO(jieyu): Currently, persistent volume is only allowed for
 // reserved resources.
@@ -144,20 +146,22 @@ public:
   {
     // Initialize the shards using regular persistent volume.
     for (size_t i = 0; i < numShards; i++) {
-      shards.push_back(Shard(
-          "shard-" + stringify(i),
-          frameworkInfo.role(),
-          tasksPerShard,
-          false));
+      shards.push_back(
+          Shard(
+              "shard-" + stringify(i),
+              frameworkInfo.role(),
+              tasksPerShard,
+              false));
     }
 
     // Initialize the shards using shared persistent volume.
     for (size_t i = 0; i < numSharedShards; i++) {
-      shards.push_back(Shard(
-          "shared-shard-" + stringify(i),
-          frameworkInfo.role(),
-          tasksPerShard,
-          true));
+      shards.push_back(
+          Shard(
+              "shared-shard-" + stringify(i),
+              frameworkInfo.role(),
+              tasksPerShard,
+              true));
     }
   }
 
@@ -179,8 +183,7 @@ public:
     LOG(INFO) << "Reregistered with master " << masterInfo;
   }
 
-  virtual void disconnected(
-      SchedulerDriver* driver)
+  virtual void disconnected(SchedulerDriver* driver)
   {
     LOG(INFO) << "Disconnected!";
   }
@@ -342,16 +345,12 @@ public:
     }
   }
 
-  virtual void offerRescinded(
-      SchedulerDriver* driver,
-      const OfferID& offerId)
+  virtual void offerRescinded(SchedulerDriver* driver, const OfferID& offerId)
   {
     LOG(INFO) << "Offer " << offerId << " has been rescinded";
   }
 
-  virtual void statusUpdate(
-      SchedulerDriver* driver,
-      const TaskStatus& status)
+  virtual void statusUpdate(SchedulerDriver* driver, const TaskStatus& status)
   {
     LOG(INFO) << "Task '" << status.task_id() << "' is in state "
               << status.state();
@@ -401,9 +400,7 @@ public:
               << "' on agent " << slaveId << ": '" << data << "'";
   }
 
-  virtual void slaveLost(
-      SchedulerDriver* driver,
-      const SlaveID& slaveId)
+  virtual void slaveLost(SchedulerDriver* driver, const SlaveID& slaveId)
   {
     LOG(INFO) << "Lost agent " << slaveId;
   }
@@ -418,9 +415,7 @@ public:
               << slaveId << ", " << WSTRINGIFY(status);
   }
 
-  virtual void error(
-      SchedulerDriver* driver,
-      const string& message)
+  virtual void error(SchedulerDriver* driver, const string& message)
   {
     LOG(ERROR) << message;
   }
@@ -457,8 +452,7 @@ private:
     // The persistent volume associated with this shard.
     struct Volume
     {
-      explicit Volume(bool _isShared)
-        : isShared(_isShared) {}
+      explicit Volume(bool _isShared) : isShared(_isShared) {}
 
       // `Resource` object for this volume.
       Option<Resource> resource;
@@ -573,7 +567,7 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(""); // Have Mesos fill in the current user.
-  framework.set_name("Persistent Volume Framework (C++)");
+  framework.set_name(FRAMEWORK_NAME);
   framework.set_role(flags.role);
   framework.set_checkpoint(true);
   framework.set_principal(flags.principal);
