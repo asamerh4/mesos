@@ -124,11 +124,11 @@ mesos::internal::master::Flags::Flags()
   add(&Flags::agent_reregister_timeout,
       "agent_reregister_timeout",
       flags::DeprecatedName("slave_reregister_timeout"),
-      "The timeout within which an agent is expected to re-register.\n"
-      "Agents re-register when they become disconnected from the master\n"
+      "The timeout within which an agent is expected to reregister.\n"
+      "Agents reregister when they become disconnected from the master\n"
       "or when a new master is elected as the leader. Agents that do not\n"
-      "re-register within the timeout will be marked unreachable in the\n"
-      "registry; if/when the agent re-registers with the master, any\n"
+      "reregister within the timeout will be marked unreachable in the\n"
+      "registry; if/when the agent reregisters with the master, any\n"
       "non-partition-aware tasks running on the agent will be terminated.\n"
       "NOTE: This value has to be at least " +
         stringify(MIN_AGENT_REREGISTER_TIMEOUT) + ".",
@@ -484,7 +484,7 @@ mesos::internal::master::Flags::Flags()
       flags::DeprecatedName("slave_ping_timeout"),
       "The timeout within which an agent is expected to respond to a\n"
       "ping from the master. Agents that do not respond within\n"
-      "max_agent_ping_timeouts ping retries will be asked to shutdown.\n"
+      "max_agent_ping_timeouts ping retries will be marked unreachable.\n"
       "NOTE: The total ping timeout (`agent_ping_timeout` multiplied by\n"
       "`max_agent_ping_timeouts`) should be greater than the ZooKeeper\n"
       "session timeout to prevent useless re-registration attempts.\n",
@@ -503,7 +503,7 @@ mesos::internal::master::Flags::Flags()
       flags::DeprecatedName("max_slave_ping_timeouts"),
       "The number of times an agent can fail to respond to a\n"
       "ping from the master. Agents that do not respond within\n"
-      "`max_agent_ping_timeouts` ping retries will be asked to shutdown.\n",
+      "`max_agent_ping_timeouts` ping retries will be marked unreachable.\n",
       DEFAULT_MAX_AGENT_PING_TIMEOUTS,
       [](size_t value) -> Option<Error> {
         if (value < 1) {
@@ -591,18 +591,18 @@ mesos::internal::master::Flags::Flags()
       "Maximum length of time to store information in the registry about\n"
       "agents that are not currently connected to the cluster. This\n"
       "information allows frameworks to determine the status of unreachable\n"
-      "and removed agents. Note that the registry always stores information\n"
-      "on all connected agents. If there are more than\n"
-      "`registry_max_agent_count` partitioned or removed agents, agent\n"
+      "and gone agents. Note that the registry always stores\n"
+      "information on all connected agents. If there are more than\n"
+      "`registry_max_agent_count` partitioned/gone agents, agent\n"
       "information may be discarded from the registry sooner than indicated\n"
       "by this parameter.",
       DEFAULT_REGISTRY_MAX_AGENT_AGE);
 
   add(&Flags::registry_max_agent_count,
       "registry_max_agent_count",
-      "Maximum number of disconnected agents to store in the registry.\n"
-      "This information allows frameworks to determine the status of\n"
-      "disconnected agents. Note that the registry always stores\n"
+      "Maximum number of partitioned/gone agents to store in the\n"
+      "registry. This information allows frameworks to determine the status\n"
+      "of disconnected agents. Note that the registry always stores\n"
       "information about all connected agents. See also the\n"
       "`registry_max_agent_age` flag.",
       DEFAULT_REGISTRY_MAX_AGENT_COUNT);
@@ -627,6 +627,17 @@ mesos::internal::master::Flags::Flags()
       "However, this port (along with `advertise_ip`) may be used to\n"
       "access this master.");
 
+  // TODO(bevers): Switch the default to `true` after gathering some
+  // real-world experience.
+  add(&Flags::memory_profiling,
+      "memory_profiling",
+      "This setting controls whether the memory profiling functionality of\n"
+      "libprocess should be exposed when jemalloc is detected.\n"
+      "NOTE: Even if set to true, memory profiling will not work unless\n"
+      "jemalloc is loaded into the address space of the binary, either by\n"
+      "linking against it at compile-time or using `LD_PRELOAD`.",
+      false);
+
   add(&Flags::zk,
       "zk",
       "ZooKeeper URL (used for leader election amongst masters).\n"
@@ -641,6 +652,11 @@ mesos::internal::master::Flags::Flags()
       "Optional IP discovery binary: if set, it is expected to emit\n"
       "the IP address which the master will try to bind to.\n"
       "Cannot be used in conjunction with `--ip`.");
+
+  add(&Flags::require_agent_domain,
+      "require_agent_domain",
+      "If true, only agents with a configured domain can register.\n",
+      false);
 
   add(&Flags::domain,
       "domain",

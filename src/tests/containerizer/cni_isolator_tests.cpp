@@ -264,13 +264,19 @@ TEST_F(CniIsolatorTest, ROOT_INTERNET_CURL_LaunchCommandTask)
   // Make sure the container join the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -346,17 +352,23 @@ TEST_F(CniIsolatorTest, ROOT_VerifyCheckpointedInfo)
   // Make sure the container join the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
-  Future<hashset<ContainerID>> containers = containerizer.get()->containers();
+  Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   ASSERT_EQ(1u, containers->size());
 
@@ -364,23 +376,23 @@ TEST_F(CniIsolatorTest, ROOT_VerifyCheckpointedInfo)
 
   // Check if the CNI related information is checkpointed successfully.
   const string containerDir =
-    paths::getContainerDir(paths::ROOT_DIR, containerId.value());
+    paths::getContainerDir(paths::ROOT_DIR, containerId);
 
   EXPECT_TRUE(os::exists(containerDir));
   EXPECT_TRUE(os::exists(paths::getNetworkDir(
-      paths::ROOT_DIR, containerId.value(), "__MESOS_TEST__")));
+      paths::ROOT_DIR, containerId, "__MESOS_TEST__")));
 
   EXPECT_TRUE(os::exists(paths::getNetworkConfigPath(
-      paths::ROOT_DIR, containerId.value(), "__MESOS_TEST__")));
+      paths::ROOT_DIR, containerId, "__MESOS_TEST__")));
 
   EXPECT_TRUE(os::exists(paths::getInterfaceDir(
-      paths::ROOT_DIR, containerId.value(), "__MESOS_TEST__", "eth0")));
+      paths::ROOT_DIR, containerId, "__MESOS_TEST__", "eth0")));
 
   EXPECT_TRUE(os::exists(paths::getNetworkInfoPath(
-      paths::ROOT_DIR, containerId.value(), "__MESOS_TEST__", "eth0")));
+      paths::ROOT_DIR, containerId, "__MESOS_TEST__", "eth0")));
 
   EXPECT_TRUE(os::exists(paths::getNamespacePath(
-      paths::ROOT_DIR, containerId.value())));
+      paths::ROOT_DIR, containerId)));
 
   EXPECT_TRUE(os::exists(path::join(containerDir, "hostname")));
   EXPECT_TRUE(os::exists(path::join(containerDir, "hosts")));
@@ -544,26 +556,37 @@ TEST_F(CniIsolatorTest, ROOT_SlaveRecovery)
   // Make sure the container join the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusKilled;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusKilled));
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .Times(AtMost(1));
 
-  Future<Nothing> ack =
+  Future<Nothing> ackRunning =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
+
+  Future<Nothing> ackStarting =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
+  AWAIT_READY(ackStarting);
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   // Wait for the ACK to be checkpointed.
-  AWAIT_READY(ack);
+  AWAIT_READY(ackRunning);
 
   // Stop the slave after TASK_RUNNING is received.
   slave.get()->terminate();
@@ -644,13 +667,19 @@ TEST_F(CniIsolatorTest, ROOT_EnvironmentLibprocessIP)
   // Make sure the container joins the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -722,13 +751,19 @@ TEST_F(CniIsolatorTest, ROOT_INTERNET_CURL_LaunchContainerInHostNetwork)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -853,15 +888,34 @@ TEST_F(CniIsolatorTest, ROOT_DynamicAddDelofCniConfig)
   // Make sure the container is able to join mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
+  Future<Nothing> ackRunning =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
+
+  Future<Nothing> ackStarting =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
+
   driver.launchTasks(offer2.id(), {task}, filters);
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
+  AWAIT_READY(ackStarting);
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  // To avoid having the agent resending the `TASK_RUNNING` update, which can
+  // happen due to clock manipulation below, wait for the status update
+  // acknowledgement to reach the agent.
+  AWAIT_READY(ackRunning);
 
   // Testing dynamic deletion of CNI networks.
   rm = os::rm(path::join(cniConfigDir, "mockConfig"));
@@ -969,13 +1023,19 @@ TEST_F(CniIsolatorTest, ROOT_OverrideHostname)
   // Make sure the container joins the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -1021,8 +1081,8 @@ TEST_F(CniIsolatorTest, ROOT_VerifyResolverConfig)
       echo '  }'
       echo '}'
       )~",
-      hostNetwork.get().address(),
-      hostNetwork.get().prefix());
+      hostNetwork->address(),
+      hostNetwork->prefix());
 
   ASSERT_SOME(mockPlugin);
 
@@ -1087,13 +1147,19 @@ TEST_F(CniIsolatorTest, ROOT_VerifyResolverConfig)
   // Make sure the container joins the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -1143,8 +1209,8 @@ TEST_F(CniIsolatorTest, ROOT_INTERNET_VerifyResolverConfig)
       echo '  }'
       echo '}'
       )~",
-      hostNetwork.get().address(),
-      hostNetwork.get().prefix());
+      hostNetwork->address(),
+      hostNetwork->prefix());
 
   ASSERT_SOME(mockPlugin);
 
@@ -1204,13 +1270,19 @@ TEST_F(CniIsolatorTest, ROOT_INTERNET_VerifyResolverConfig)
   // Make sure the container joins the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -1291,13 +1363,19 @@ TEST_F(CniIsolatorTest, ROOT_INTERNET_CURL_ReadOnlyBindMounts)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -1390,19 +1468,8 @@ TEST_P(DefaultExecutorCniTest, ROOT_VerifyContainerIP)
 
   auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
 
-  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
-
-  Future<Nothing> connected;
   EXPECT_CALL(*scheduler, connected(_))
-    .WillOnce(DoAll(v1::scheduler::SendSubscribe(frameworkInfo),
-                    FutureSatisfy(&connected)));
-
-  v1::scheduler::TestMesos mesos(
-      master.get()->pid,
-      ContentType::PROTOBUF,
-      scheduler);
-
-  AWAIT_READY(connected);
+    .WillOnce(v1::scheduler::SendSubscribe(v1::DEFAULT_FRAMEWORK_INFO));
 
   Future<v1::scheduler::Event::Subscribed> subscribed;
   EXPECT_CALL(*scheduler, subscribed(_, _))
@@ -1416,8 +1483,10 @@ TEST_P(DefaultExecutorCniTest, ROOT_VerifyContainerIP)
   EXPECT_CALL(*scheduler, heartbeat(_))
     .WillRepeatedly(Return()); // Ignore heartbeats.
 
-  AWAIT_READY(subscribed);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler);
 
+  AWAIT_READY(subscribed);
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   v1::ExecutorInfo executorInfo = v1::createExecutorInfo(
@@ -1478,9 +1547,14 @@ TEST_P(DefaultExecutorCniTest, ROOT_VerifyContainerIP)
       v1::Resources::parse("cpus:0.1;mem:32;disk:32").get(),
       command);
 
+  Future<Event::Update> updateStarting;
   Future<Event::Update> updateRunning;
   Future<Event::Update> updateFinished;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(DoAll(FutureArg<1>(&updateStarting),
+                    v1::scheduler::SendAcknowledge(
+                        frameworkId,
+                        offer.agent_id())))
     .WillOnce(DoAll(FutureArg<1>(&updateRunning),
                     v1::scheduler::SendAcknowledge(
                         frameworkId,
@@ -1493,6 +1567,10 @@ TEST_P(DefaultExecutorCniTest, ROOT_VerifyContainerIP)
 
   mesos.send(v1::createCallAccept(frameworkId, offer, {launchGroup}));
 
+  AWAIT_READY(updateStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateStarting->status().task_id());
+
   AWAIT_READY(updateRunning);
   ASSERT_EQ(v1::TASK_RUNNING, updateRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateRunning->status().task_id());
@@ -1500,6 +1578,167 @@ TEST_P(DefaultExecutorCniTest, ROOT_VerifyContainerIP)
   AWAIT_READY(updateFinished);
   ASSERT_EQ(v1::TASK_FINISHED, updateFinished->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateFinished->status().task_id());
+}
+
+
+class NestedContainerCniTest
+  : public CniIsolatorTest,
+    public WithParamInterface<bool>
+{
+protected:
+  slave::Flags CreateSlaveFlags()
+  {
+    slave::Flags flags = CniIsolatorTest::CreateSlaveFlags();
+
+    flags.network_cni_plugins_dir = cniPluginDir;
+    flags.network_cni_config_dir = cniConfigDir;
+    flags.isolation = "docker/runtime,filesystem/linux,network/cni";
+    flags.image_providers = "docker";
+    flags.launcher = "linux";
+
+    return flags;
+  }
+};
+
+
+INSTANTIATE_TEST_CASE_P(
+    JoinParentsNetworkParam,
+    NestedContainerCniTest,
+    ::testing::Values(
+        true,
+        false));
+
+
+TEST_P(NestedContainerCniTest, ROOT_INTERNET_CURL_VerifyContainerHostname)
+{
+  const string parentContainerHostname = "parent_container";
+  const string nestedContainerHostname = "nested_container";
+  const string hostPath = path::join(sandbox.get(), "volume");
+  const string containerPath = "/tmp";
+  const bool joinParentsNetwork = GetParam();
+
+  ASSERT_SOME(os::mkdir(hostPath));
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(v1::scheduler::SendSubscribe(v1::DEFAULT_FRAMEWORK_INFO));
+
+  Future<v1::scheduler::Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  Future<v1::scheduler::Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler);
+
+  AWAIT_READY(subscribed);
+
+  v1::FrameworkID frameworkId(subscribed->framework_id());
+
+  v1::ExecutorInfo executorInfo = v1::createExecutorInfo(
+      "test_default_executor",
+      None(),
+      "cpus:0.1;mem:32;disk:32",
+      v1::ExecutorInfo::DEFAULT);
+
+  // Update `executorInfo` with the subscribed `frameworkId`.
+  executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
+
+  mesos::v1::ContainerInfo *executorContainer =
+    executorInfo.mutable_container();
+  executorContainer->set_type(mesos::v1::ContainerInfo::MESOS);
+  executorContainer->add_network_infos()->set_name("__MESOS_TEST__");
+  executorContainer->set_hostname(parentContainerHostname);
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->offers().empty());
+
+  const v1::Offer& offer = offers->offers(0);
+  const v1::AgentID& agentId = offer.agent_id();
+
+  v1::TaskInfo taskInfo = v1::createTask(
+      agentId,
+      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get(),
+      "touch /tmp/$(hostname)");
+
+  mesos::v1::Image image;
+  image.set_type(mesos::v1::Image::DOCKER);
+  image.mutable_docker()->set_name("alpine");
+
+  mesos::v1::ContainerInfo* nestedContainer = taskInfo.mutable_container();
+  nestedContainer->set_type(mesos::v1::ContainerInfo::MESOS);
+  nestedContainer->mutable_mesos()->mutable_image()->CopyFrom(image);
+
+  if (!joinParentsNetwork) {
+    nestedContainer->add_network_infos()->set_name("__MESOS_TEST__");
+    nestedContainer->set_hostname(nestedContainerHostname);
+  }
+
+  nestedContainer->add_volumes()->CopyFrom(
+      v1::createVolumeHostPath(
+          containerPath,
+          hostPath,
+          mesos::v1::Volume::RW));
+
+  Future<v1::scheduler::Event::Update> updateStarting;
+  Future<v1::scheduler::Event::Update> updateRunning;
+  Future<v1::scheduler::Event::Update> updateFinished;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(DoAll(FutureArg<1>(&updateStarting),
+                    v1::scheduler::SendAcknowledge(
+                        frameworkId,
+                        offer.agent_id())))
+    .WillOnce(DoAll(FutureArg<1>(&updateRunning),
+                    v1::scheduler::SendAcknowledge(
+                        frameworkId,
+                        offer.agent_id())))
+    .WillOnce(FutureArg<1>(&updateFinished));
+
+  v1::Offer::Operation launchGroup = v1::LAUNCH_GROUP(
+      executorInfo,
+      v1::createTaskGroupInfo({taskInfo}));
+
+  mesos.send(v1::createCallAccept(frameworkId, offer, {launchGroup}));
+
+  AWAIT_READY(updateStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateStarting->status().task_id());
+
+  AWAIT_READY(updateRunning);
+  ASSERT_EQ(v1::TASK_RUNNING, updateRunning->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateRunning->status().task_id());
+
+  AWAIT_READY(updateFinished);
+  ASSERT_EQ(v1::TASK_FINISHED, updateFinished->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateFinished->status().task_id());
+
+  if (joinParentsNetwork) {
+    EXPECT_TRUE(os::exists(path::join(
+        sandbox.get(),
+        "volume",
+        parentContainerHostname)));
+  } else {
+    EXPECT_TRUE(os::exists(path::join(
+        sandbox.get(),
+        "volume",
+        nestedContainerHostname)));
+  }
 }
 
 
@@ -1625,7 +1864,7 @@ TEST_F(CniIsolatorPortMapperTest, ROOT_INTERNET_CURL_PortMapper)
 
   // Make sure we have a `ports` resource.
   ASSERT_SOME(resources.ports());
-  ASSERT_LE(1u, resources.ports()->range().size());
+  ASSERT_LE(1, resources.ports()->range().size());
 
   // Select a random port from the offer.
   std::srand(std::time(0));
@@ -1657,11 +1896,17 @@ TEST_F(CniIsolatorPortMapperTest, ROOT_INTERNET_CURL_PortMapper)
   // Set the container for the task.
   task.mutable_container()->CopyFrom(container);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(300));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -1669,7 +1914,7 @@ TEST_F(CniIsolatorPortMapperTest, ROOT_INTERNET_CURL_PortMapper)
   ASSERT_TRUE(statusRunning->has_container_status());
 
   ContainerID containerId = statusRunning->container_status().container_id();
-  ASSERT_EQ(1u, statusRunning->container_status().network_infos().size());
+  ASSERT_EQ(1, statusRunning->container_status().network_infos().size());
 
   // Try connecting to the nginx server on port 80 through a
   // non-loopback IP address on `hostPort`.
@@ -1709,13 +1954,7 @@ TEST_F(CniIsolatorPortMapperTest, ROOT_INTERNET_CURL_PortMapper)
 
   AWAIT_READY(statusKilled);
 
-  // The executor would issue a SIGTERM to the container, followed by
-  // a SIGKILL (in case the container ignores the SIGTERM). The
-  // "nginx:alpine" container returns an "EXIT_STATUS" of 0 on
-  // receiving a SIGTERM making the executor send a `TASK_FINISHED`
-  // instead of a `TASK_KILLED`, hence checking for `TASK_FINISHED`
-  // instead of `TASK_KILLED`.
-  EXPECT_EQ(TASK_FINISHED, statusKilled.get().state());
+  EXPECT_EQ(TASK_KILLED, statusKilled->state());
 
   AWAIT_READY(gcSchedule);
 
@@ -1819,8 +2058,8 @@ TEST_P(DefaultContainerDNSCniTest, ROOT_VerifyDefaultDNS)
       echo '  }'
       echo '}'
       )~",
-      hostNetwork.get().address(),
-      hostNetwork.get().prefix());
+      hostNetwork->address(),
+      hostNetwork->prefix());
 
   ASSERT_SOME(mockPlugin);
 
@@ -1890,13 +2129,19 @@ TEST_P(DefaultContainerDNSCniTest, ROOT_VerifyDefaultDNS)
   // Make sure the container joins the mock CNI network.
   container->add_network_infos()->set_name("__MESOS_TEST__");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());

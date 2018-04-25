@@ -217,17 +217,33 @@ template <typename T1, typename T2>
 #endif // __WINDOWS__
 
 
+// Creates a gtest `TYPED_TEST` that is disabled on Windows.
+// TODO(andschwa): Remove after temporarily-disabled tests are fixed on
+// Windows. See MESOS-6392.
+#ifndef __WINDOWS__
+#define TYPED_TEST_TEMP_DISABLED_ON_WINDOWS(test_case_name, test_name)  \
+  TYPED_TEST(test_case_name, test_name)
+#else
+#define TYPED_TEST_TEMP_DISABLED_ON_WINDOWS(test_case_name, test_name)  \
+  TYPED_TEST(test_case_name, DISABLED_##test_name)
+#endif // __WINDOWS__
+
+
 // NOTE: On Windows, the closest equivalent to `sleep` is `timeout`.
 // Unfortunately, `timeout` requires an interactive terminal, otherwise
 // it errors out immediately. Instead, we use `ping` against localhost
 // with a count.  On Windows, `ping` waits one second between pings.
 // Additionally, because `ping` requires a count greater than 0,
 // we simply `exit 0` if the sleep is too short.
+//
+// This must not be replaced with `powershell -c Start-Sleep`, because
+// that causes flaky tests due to PowerShell crashing when a test
+// machine is overloaded. See MESOS-8308.
 #ifndef __WINDOWS__
 #define SLEEP_COMMAND(x) "sleep " #x
 #else
 #define SLEEP_COMMAND(x) \
-  "powershell -NoProfile -Command Start-Sleep -Seconds " #x
+  ((x) > 0 ? "ping 127.0.0.1 -n " #x " > NUL" : "cmd /C exit 0")
 #endif // __WINDOWS__
 
 
@@ -237,6 +253,7 @@ inline ::testing::AssertionResult AssertExited(
 {
   if (WIFEXITED(actual)) {
     return ::testing::AssertionSuccess();
+#ifndef __WINDOWS__
   } else if (WIFSIGNALED(actual)) {
     return ::testing::AssertionFailure()
       << "Expecting WIFEXITED(" << actualExpr << ") but "
@@ -247,6 +264,7 @@ inline ::testing::AssertionResult AssertExited(
       << "Expecting WIFEXITED(" << actualExpr << ") but"
       << " WIFSTOPPED(" << actualExpr << ") is true and "
       << "WSTOPSIG(" << actualExpr << ") is " << strsignal(WSTOPSIG(actual));
+#endif // __WINDOWS__
   }
 
   return ::testing::AssertionFailure()
@@ -328,6 +346,8 @@ inline ::testing::AssertionResult AssertExitStatusNe(
   EXPECT_PRED_FORMAT2(AssertExitStatusNe, expected, actual)
 
 
+// Signals aren't used in Windows, so #ifdef these out.
+#ifndef __WINDOWS__
 inline ::testing::AssertionResult AssertSignaled(
     const char* actualExpr,
     const int actual)
@@ -422,5 +442,6 @@ inline ::testing::AssertionResult AssertTermSigNe(
 
 #define EXPECT_WTERMSIG_NE(expected, actual)                    \
   EXPECT_PRED_FORMAT2(AssertTermSigNe, expected, actual)
+#endif // __WINDOWS__
 
 #endif // __STOUT_GTEST_HPP__

@@ -34,9 +34,7 @@
 // Note: Header grouping and ordering is considered before
 // inclusion/exclusion by platform.
 // For 'inet_pton', 'inet_ntop'.
-#ifdef __WINDOWS__
-#include <Ws2tcpip.h>
-#else
+#ifndef __WINDOWS__
 #include <netinet/in.h>
 #include <sys/socket.h>
 #endif // __WINDOWS__
@@ -66,7 +64,7 @@
 #include <stout/unreachable.hpp>
 
 #ifdef __WINDOWS__
-#include <stout/windows.hpp>
+#include <stout/windows.hpp> // For `WS2tcpip.h`.
 #endif // __WINDOWS__
 
 namespace net {
@@ -582,7 +580,7 @@ inline Try<IP::Network> IP::Network::create(
 
   switch (address.family()) {
     case AF_INET: {
-      uint32_t mask = ntohl(netmask.in().get().s_addr);
+      uint32_t mask = ntohl(netmask.in()->s_addr);
       if (((~mask + 1) & (~mask)) != 0) {
         return Error("IPv4 netmask is not valid");
       }
@@ -693,7 +691,7 @@ struct hash<net::IP>
 
     switch (ip.family()) {
       case AF_INET:
-        boost::hash_combine(seed, htonl(ip.in().get().s_addr));
+        boost::hash_combine(seed, htonl(ip.in()->s_addr));
         return seed;
       case AF_INET6: {
         in6_addr in6 = ip.in6().get();

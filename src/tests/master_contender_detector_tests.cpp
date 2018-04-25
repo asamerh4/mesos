@@ -28,6 +28,7 @@
 
 #include <process/clock.hpp>
 #include <process/future.hpp>
+#include <process/gtest.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/protobuf.hpp>
@@ -37,6 +38,7 @@
 #include <stout/nothing.hpp>
 #include <stout/path.hpp>
 #include <stout/try.hpp>
+#include <stout/uri.hpp>
 
 #include "common/protobuf_utils.hpp"
 
@@ -109,8 +111,7 @@ TEST_F(MasterContenderDetectorTest, File)
   const string& path = path::join(flags.work_dir, "master");
   ASSERT_SOME(os::write(path, stringify(master.get()->pid)));
 
-  Try<MasterDetector*> _detector =
-    MasterDetector::create("file://" + path);
+  Try<MasterDetector*> _detector = MasterDetector::create(uri::from_path(path));
 
   ASSERT_SOME(_detector);
 
@@ -469,7 +470,7 @@ TEST_F(ZooKeeperMasterContenderDetectorTest, ContenderDetectorShutdownNetwork)
 
   ASSERT_SOME(url);
 
-  Duration sessionTimeout = Seconds(15);
+  Duration sessionTimeout = process::TEST_AWAIT_TIMEOUT;
 
   ZooKeeperMasterContender contender(url.get(), sessionTimeout);
 

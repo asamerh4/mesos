@@ -161,23 +161,23 @@ TEST_F(ExceptionTest, DisallowSchedulerCallbacksOnAbort)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // None of these callbacks should be invoked.
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .Times(0);
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-      .Times(0);
+    .Times(0);
 
   EXPECT_CALL(sched, frameworkMessage(&driver, _, _, _))
-      .Times(0);
+    .Times(0);
 
   EXPECT_CALL(sched, slaveLost(&driver, _))
-      .Times(0);
+    .Times(0);
 
   EXPECT_CALL(sched, error(&driver, _))
-      .Times(0);
+    .Times(0);
 
   ASSERT_EQ(DRIVER_ABORTED, driver.abort());
 

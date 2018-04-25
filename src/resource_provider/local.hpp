@@ -17,12 +17,13 @@
 #ifndef __RESOURCE_PROVIDER_LOCAL_HPP__
 #define __RESOURCE_PROVIDER_LOCAL_HPP__
 
+#include <mesos/mesos.hpp>
+
+#include <process/authenticator.hpp>
 #include <process/http.hpp>
 #include <process/owned.hpp>
 
 #include <stout/try.hpp>
-
-#include <mesos/mesos.hpp>
 
 namespace mesos {
 namespace internal {
@@ -32,6 +33,13 @@ class LocalResourceProvider
 public:
   static Try<process::Owned<LocalResourceProvider>> create(
       const process::http::URL& url,
+      const std::string& workDir,
+      const ResourceProviderInfo& info,
+      const SlaveID& slaveId,
+      const Option<std::string>& authToken,
+      bool strict);
+
+  static Try<process::http::authentication::Principal> principal(
       const ResourceProviderInfo& info);
 
   virtual ~LocalResourceProvider() = default;

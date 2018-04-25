@@ -18,6 +18,8 @@
 
 #include <gmock/gmock.h>
 
+#include <stout/uri.hpp>
+
 #include <process/gmock.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -52,7 +54,7 @@ class CredentialsTest : public MesosTest {};
 
 // This test verifies that an authenticated slave is
 // granted registration by the master.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlave)
+TEST_F(CredentialsTest, AuthenticatedSlave)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -72,7 +74,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlave)
 // Test verifing well executed credential authentication
 // using text formatted credentials so as to test
 // backwards compatibility.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlaveText)
+TEST_F(CredentialsTest, AuthenticatedSlaveText)
 {
   string path = path::join(os::getcwd(), "credentials");
 
@@ -91,7 +93,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlaveText)
 
   ASSERT_SOME(os::close(fd.get()));
 
-  map<string, Option<string>> values{{"credentials", Some("file://" + path)}};
+  map<string, Option<string>> values{
+    {"credentials", Some(uri::from_path(path))}};
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.load(values, true);
@@ -116,7 +119,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlaveText)
 
 // Using JSON base file for authentication without
 // protobuf tools assistance.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlaveJSON)
+TEST_F(CredentialsTest, AuthenticatedSlaveJSON)
 {
   string path = path::join(os::getcwd(), "credentials");
 
@@ -144,7 +147,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CredentialsTest, AuthenticatedSlaveJSON)
 
   ASSERT_SOME(os::close(fd.get()));
 
-  map<string, Option<string>> values{{"credentials", Some("file://" + path)}};
+  map<string, Option<string>> values{
+    {"credentials", Some(uri::from_path(path))}};
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.load(values, true);

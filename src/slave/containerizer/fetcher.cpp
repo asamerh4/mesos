@@ -31,6 +31,7 @@
 #include <stout/net.hpp>
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
+#include <stout/uri.hpp>
 #ifdef __WINDOWS__
 #include <stout/windows.hpp>
 #endif // __WINDOWS__
@@ -38,10 +39,13 @@
 #include <stout/os/exists.hpp>
 #include <stout/os/find.hpp>
 #include <stout/os/killtree.hpp>
+#include <stout/os/realpath.hpp>
 #include <stout/os/read.hpp>
 #include <stout/os/rmdir.hpp>
 
 #include "hdfs/hdfs.hpp"
+
+#include "common/status_utils.hpp"
 
 #include "slave/containerizer/fetcher_process.hpp"
 
@@ -66,9 +70,6 @@ using process::Subprocess;
 namespace mesos {
 namespace internal {
 namespace slave {
-
-static const string FILE_URI_PREFIX = "file://";
-static const string FILE_URI_LOCALHOST = "file://localhost";
 
 static const string CACHE_FILE_NAME_PREFIX = "c";
 
@@ -188,31 +189,23 @@ Result<string> Fetcher::uriToLocalPath(
     const string& uri,
     const Option<string>& frameworksHome)
 {
-  if (!strings::startsWith(uri, FILE_URI_PREFIX) &&
-      strings::contains(uri, "://")) {
+  const bool fileUri = strings::startsWith(uri, uri::FILE_PREFIX);
+
+  if (!fileUri && strings::contains(uri, "://")) {
     return None();
   }
 
-  string path = uri;
-  bool fileUri = false;
+  // TODO(andschwa): Fix `path::from_uri` to remove hostname component, which it
+  // currently does not do, so we remove `localhost` manually here.
+  string path =
+    strings::remove(path::from_uri(uri), "localhost", strings::PREFIX);
 
-  if (strings::startsWith(path, FILE_URI_LOCALHOST)) {
-    path = path.substr(FILE_URI_LOCALHOST.size());
-    fileUri = true;
-  } else if (strings::startsWith(path, FILE_URI_PREFIX)) {
-    path = path.substr(FILE_URI_PREFIX.size());
-    fileUri = true;
-  }
-
-#ifndef __WINDOWS__
-  const bool isRelativePath = !strings::startsWith(path, "/");
-
-  if (isRelativePath) {
+  if (!path::absolute(path)) {
     if (fileUri) {
       return Error("File URI only supports absolute paths");
     }
 
-    if (frameworksHome.isNone() || frameworksHome.get().empty()) {
+    if (frameworksHome.isNone() || frameworksHome->empty()) {
       return Error("A relative path was passed for the resource but the "
                    "Mesos framework home was not specified. "
                    "Please either provide this config option "
@@ -223,7 +216,6 @@ Result<string> Fetcher::uriToLocalPath(
                 << "making it: '" << path << "'";
     }
   }
-#endif // __WINDOWS__
 
   return path;
 }
@@ -266,13 +258,13 @@ FetcherProcess::Metrics::Metrics(FetcherProcess *fetcher)
         "containerizer/fetcher/cache_size_total_bytes",
         [=]() {
           // This value is safe to read while it is concurrently updated.
-          return fetcher->cache.totalSpace().bytes();
+          return static_cast<double>(fetcher->cache.totalSpace().bytes());
         }),
     cache_size_used_bytes(
         "containerizer/fetcher/cache_size_used_bytes",
         [=]() {
           // This value is safe to read while it is concurrently updated.
-          return fetcher->cache.usedSpace().bytes();
+          return static_cast<double>(fetcher->cache.usedSpace().bytes());
         })
 {
   process::metrics::add(task_fetches_succeeded);
@@ -491,14 +483,14 @@ Future<Nothing> FetcherProcess::_fetch(
                    const Option<Future<shared_ptr<Cache::Entry>>>& entry,
                    entries) {
         if (entry.isSome()) {
-          if (entry.get().isReady()) {
-            result[uri] = entry.get().get();
+          if (entry->isReady()) {
+            result[uri] = entry->get();
           } else {
             LOG(WARNING)
               << "Reverting to fetching directly into the sandbox for '"
               << uri.value()
               << "', due to failure to fetch through the cache, "
-              << "with error: " << entry.get().failure();
+              << "with error: " << entry->failure();
 
             result[uri] = None();
           }
@@ -568,6 +560,9 @@ Future<Nothing> FetcherProcess::__fetch(
   if (!flags.frameworks_home.empty()) {
     info.set_frameworks_home(flags.frameworks_home);
   }
+
+  info.mutable_stall_timeout()
+    ->set_nanoseconds(flags.fetcher_stall_timeout.ns());
 
   return run(containerId, sandboxDirectory, user, info)
     .repair(defer(self(), [=](const Future<Nothing>& future) {
@@ -666,10 +661,11 @@ Try<list<Path>> FetcherProcess::cacheFiles() const
                  flags.fetcher_cache_dir + "' with error: " + find.error());
   }
 
-  transform(find.get().begin(),
-            find.get().end(),
-            std::back_inserter(result),
-            [](const string& path) { return Path(path); });
+  transform(
+      find->begin(),
+      find->end(),
+      std::back_inserter(result),
+      [](const string& path) { return Path(path); });
 
   return result;
 }
@@ -814,7 +810,12 @@ Future<Nothing> FetcherProcess::run(
       return Nothing();
   }
 
+#ifdef __WINDOWS__
+  string fetcherPath = path::join(flags.launcher_dir, "mesos-fetcher.exe");
+#else
   string fetcherPath = path::join(flags.launcher_dir, "mesos-fetcher");
+#endif // __WINDOWS__
+
   Result<string> realpath = os::realpath(fetcherPath);
 
   if (!realpath.isSome()) {
@@ -888,19 +889,18 @@ Future<Nothing> FetcherProcess::run(
   // Remember this PID in case we need to kill the subprocess. See
   // FetcherProcess::kill(). This value gets removed after we wait on
   // the subprocess.
-  subprocessPids[containerId] = fetcherSubprocess.get().pid();
+  subprocessPids[containerId] = fetcherSubprocess->pid();
 
-  return fetcherSubprocess.get().status()
+  return fetcherSubprocess->status()
     .then(defer(self(), [=](const Option<int>& status) -> Future<Nothing> {
       if (status.isNone()) {
         return Failure("No status available from mesos-fetcher");
       }
 
-      if (status.get() != 0) {
+      if (!WSUCCEEDED(status.get())) {
         return Failure("Failed to fetch all URIs for container '" +
-                       stringify(containerId) +
-                       "' with exit status: " +
-                       stringify(status.get()));
+                       stringify(containerId) + "': " +
+                       WSTRINGIFY(status.get()));
       }
 
       return Nothing();

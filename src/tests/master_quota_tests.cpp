@@ -31,6 +31,7 @@
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 
+#include <stout/format.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
@@ -114,11 +115,11 @@ protected:
   // Creates a FrameworkInfo with the specified role.
   FrameworkInfo createFrameworkInfo(const string& role)
   {
-    FrameworkInfo info;
+    FrameworkInfo info = DEFAULT_FRAMEWORK_INFO;
     info.set_user("user");
     info.set_name("framework" + process::ID::generate());
     info.mutable_id()->set_value(info.name());
-    info.set_role(role);
+    info.set_roles(0, role);
 
     return info;
   }
@@ -159,7 +160,6 @@ protected:
 //   * Role is absent.
 //   * Role is an empty string.
 //   * Role is '*'?
-//   * Resources with the same name are present.
 
 // Verifies that a request for a non-existent role is rejected when
 // using an explicitly configured list of role names.
@@ -184,8 +184,7 @@ TEST_F(MasterQuotaTest, SetForNonExistentRole)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       createRequestBody("non-existent-role", quotaResources, FORCE));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-    << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
 }
 
 
@@ -216,8 +215,7 @@ TEST_F(MasterQuotaTest, InvalidSetRequest)
 
     Future<Response> response = postQuota(badRequest);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // Tests whether a quota request with missing 'role' field fails.
@@ -235,8 +233,7 @@ TEST_F(MasterQuotaTest, InvalidSetRequest)
 
     Future<Response> response = postQuota(badRequest);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // Tests whether a quota request with missing 'resource' field fails.
@@ -249,8 +246,7 @@ TEST_F(MasterQuotaTest, InvalidSetRequest)
 
     Future<Response> response = postQuota(badRequest);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // Tests whether a quota request with invalid resources fails.
@@ -265,8 +261,7 @@ TEST_F(MasterQuotaTest, InvalidSetRequest)
 
     Future<Response> response = postQuota(badRequest);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -299,8 +294,7 @@ TEST_F(MasterQuotaTest, SetRequestWithInvalidData)
 
     Future<Response> response = postQuota(ROLE1, quotaResources);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // A quota set request with a role set in any of the `Resource` objects
@@ -310,9 +304,36 @@ TEST_F(MasterQuotaTest, SetRequestWithInvalidData)
 
     Future<Response> response = postQuota(ROLE1, quotaResources);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
+
+  // A quota set request with a duplicate resource name should
+  // return '400 Bad Request'.
+  {
+    Resource cpusResource = Resources::parse("cpus", "1", "*").get();
+    cpusResource.clear_role();
+
+    // Manually construct a bad request because `Resources` class merges
+    // resources with same name so we cannot use it.
+    const string badRequest = strings::format(
+        "{\"role\": \"%s\", \"guarantee\":[%s, %s]}",
+        ROLE1,
+        stringify(JSON::protobuf(cpusResource)),
+        stringify(JSON::protobuf(cpusResource))).get();
+
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "quota",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        badRequest);
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
+    AWAIT_EXPECT_RESPONSE_BODY_EQ(
+        "Failed to validate set quota request:"
+        " QuotaInfo contains duplicate resource name 'cpus'",
+        response);
+  }
+
 
   // A quota set request with the `DiskInfo` field set should return
   // '400 Bad Request'.
@@ -325,8 +346,7 @@ TEST_F(MasterQuotaTest, SetRequestWithInvalidData)
 
     Future<Response> response = postQuota(ROLE1, quotaResources);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // A quota set request with the `RevocableInfo` field set should return
@@ -340,8 +360,7 @@ TEST_F(MasterQuotaTest, SetRequestWithInvalidData)
 
     Future<Response> response = postQuota(ROLE1, quotaResources);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // A quota set request with the `ReservationInfo` field set should return
@@ -358,8 +377,7 @@ TEST_F(MasterQuotaTest, SetRequestWithInvalidData)
 
     Future<Response> response = postQuota(ROLE1, quotaResources);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -385,8 +403,7 @@ TEST_F(MasterQuotaTest, SetExistingQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Try to set quota via post a second time.
@@ -397,8 +414,7 @@ TEST_F(MasterQuotaTest, SetExistingQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -430,16 +446,14 @@ TEST_F(MasterQuotaTest, RemoveSingleQuota)
   {
     Future<Response> response = removeQuota("quota/" + UNKNOWN_ROLE);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // Ensure that we can't remove quota for a role that has no quota set.
   {
     Future<Response> response = removeQuota("quota/" + ROLE1);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 
   // Ensure we can remove the quota we have requested before.
@@ -452,8 +466,7 @@ TEST_F(MasterQuotaTest, RemoveSingleQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     // Remove the previously requested quota.
     Future<Nothing> receivedRemoveRequest;
@@ -463,8 +476,7 @@ TEST_F(MasterQuotaTest, RemoveSingleQuota)
 
     response = removeQuota("quota/" + ROLE1);
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     // Ensure that the quota remove request has reached the allocator.
     AWAIT_READY(receivedRemoveRequest);
@@ -493,8 +505,7 @@ TEST_F(MasterQuotaTest, Status)
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     EXPECT_SOME_EQ(
         "application/json",
@@ -520,8 +531,7 @@ TEST_F(MasterQuotaTest, Status)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Query the master quota endpoint when quota is set for a single role.
@@ -532,8 +542,7 @@ TEST_F(MasterQuotaTest, Status)
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     EXPECT_SOME_EQ(
         "application/json",
@@ -545,14 +554,13 @@ TEST_F(MasterQuotaTest, Status)
     ASSERT_SOME(parse);
 
     // Convert JSON response to `QuotaStatus` protobuf.
-    const Try<QuotaStatus> status = ::protobuf::parse<QuotaStatus>(parse.get());
+    Try<QuotaStatus> status = ::protobuf::parse<QuotaStatus>(parse.get());
     ASSERT_FALSE(status.isError());
 
-    RepeatedPtrField<Resource> guarantee = status->infos(0).guarantee();
-    convertResourceFormat(&guarantee, POST_RESERVATION_REFINEMENT);
+    upgradeResources(&status.get());
 
     ASSERT_EQ(1, status->infos().size());
-    EXPECT_EQ(quotaResources, guarantee);
+    EXPECT_EQ(quotaResources, status->infos(0).guarantee());
   }
 }
 
@@ -618,8 +626,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesSingleAgent)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response);
   }
 
   // Force flag should override the `capacityHeuristic` check and make the
@@ -631,8 +638,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesSingleAgent)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, true));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -695,8 +701,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesMultipleAgents)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response);
   }
 
   // Force flag should override the `capacityHeuristic` check and make the
@@ -708,8 +713,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesMultipleAgents)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, true));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -753,7 +757,7 @@ TEST_F(MasterQuotaTest, AvailableResourcesSingleAgent)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       createRequestBody(ROLE1, quotaResources));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // Quota request is granted and reached the allocator. Make sure nothing
   // got lost in-between.
@@ -821,7 +825,7 @@ TEST_F(MasterQuotaTest, AvailableResourcesMultipleAgents)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       createRequestBody(ROLE1, quotaResources));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // Quota request is granted and reached the allocator. Make sure nothing
   // got lost in-between.
@@ -992,7 +996,7 @@ TEST_F(MasterQuotaTest, AvailableResourcesAfterRescinding)
   //   framework2 share = 0
   //   framework3 share = 0
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // The quota request is granted and reached the allocator. Make sure nothing
   // got lost in-between.
@@ -1069,8 +1073,7 @@ TEST_F(MasterQuotaTest, RecoverQuotaEmptyCluster)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   TestAllocator<> allocator;
@@ -1095,8 +1098,7 @@ TEST_F(MasterQuotaTest, RecoverQuotaEmptyCluster)
 
     // Quota request succeeds and reaches the allocator.
     AWAIT_READY(receivedRemoveRequest);
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -1143,8 +1145,7 @@ TEST_F(MasterQuotaTest, NoAuthenticationNoAuthorization)
 
     // Quota request succeeds and reaches the allocator.
     AWAIT_READY(receivedSetRequest);
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Check whether quota can be removed.
@@ -1162,8 +1163,7 @@ TEST_F(MasterQuotaTest, NoAuthenticationNoAuthorization)
 
     // Quota request succeeds and reaches the allocator.
     AWAIT_READY(receivedRemoveRequest);
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -1194,8 +1194,7 @@ TEST_F(MasterQuotaTest, UnauthenticatedQuotaRequest)
         createBasicAuthHeaders(credential),
         createRequestBody(ROLE1, quotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
   }
 
   // The absence of credentials leads to authentication failure as well.
@@ -1206,8 +1205,7 @@ TEST_F(MasterQuotaTest, UnauthenticatedQuotaRequest)
         None(),
         createRequestBody(ROLE1, quotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
   }
 }
 
@@ -1265,8 +1263,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL_2),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Forbidden().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Forbidden().status, response);
   }
 
   // Set quota using the default principal.
@@ -1287,8 +1284,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     AWAIT_READY(quota);
 
@@ -1312,8 +1308,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     EXPECT_SOME_EQ(
         "application/json",
@@ -1340,8 +1335,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     EXPECT_SOME_EQ(
         "application/json",
@@ -1369,8 +1363,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
         "quota/" + ROLE1,
         createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Forbidden().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Forbidden().status, response);
   }
 
   // Remove the previously requested quota using the default principal.
@@ -1385,8 +1378,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
         "quota/" + ROLE1,
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     AWAIT_READY(receivedRemoveRequest);
   }
@@ -1438,8 +1430,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequestsWithoutPrincipal)
         None(),
         createRequestBody(ROLE1, quotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Get the previously requested quota without providing authorization
@@ -1451,8 +1442,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequestsWithoutPrincipal)
         None(),
         None());
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     EXPECT_SOME_EQ(
         "application/json",
@@ -1479,8 +1469,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequestsWithoutPrincipal)
         "quota/" + ROLE1,
         None());
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -1511,7 +1500,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRole)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(PARENT_ROLE, parentQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Set quota for the child role.
@@ -1524,7 +1513,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRole)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE, childQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Query the configured quota.
@@ -1535,8 +1524,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRole)
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     EXPECT_SOME_EQ(
         "application/json",
@@ -1571,7 +1559,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRole)
         "quota/" + CHILD_ROLE,
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 
@@ -1601,8 +1589,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleWithNoParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE, childQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -1633,7 +1620,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleExceedsParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(PARENT_ROLE, parentQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Attempt to set quota for the child role. Because the child role's
@@ -1647,8 +1634,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleExceedsParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE, childQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -1681,7 +1667,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleSumExceedsParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(PARENT_ROLE, parentQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Set quota for the first child role. This should succeed.
@@ -1694,8 +1680,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleSumExceedsParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE1, childQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Attempt to set quota for the second child role. This should fail,
@@ -1708,8 +1693,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleSumExceedsParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE2, childQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -1741,7 +1725,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleDeleteParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(PARENT_ROLE, parentQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Set quota for the child role.
@@ -1754,8 +1738,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleDeleteParentQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE, childQuotaResources, FORCE));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Attempt to remove the quota for the parent role. This should not
@@ -1766,8 +1749,7 @@ TEST_F(MasterQuotaTest, DISABLED_ChildRoleDeleteParentQuota)
         "quota/" + PARENT_ROLE,
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(BadRequest().status, response);
   }
 }
 
@@ -1814,7 +1796,7 @@ TEST_F(MasterQuotaTest, DISABLED_ClusterCapacityWithNestedRoles)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(PARENT_ROLE1, parent1QuotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Set quota for the child role. This should succeed, even though
@@ -1829,7 +1811,7 @@ TEST_F(MasterQuotaTest, DISABLED_ClusterCapacityWithNestedRoles)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(CHILD_ROLE, childQuotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Set quota for the second parent role. This should succeed, even
@@ -1844,7 +1826,7 @@ TEST_F(MasterQuotaTest, DISABLED_ClusterCapacityWithNestedRoles)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         createRequestBody(PARENT_ROLE2, parent2QuotaResources));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response) << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 }
 

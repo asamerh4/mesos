@@ -16,6 +16,8 @@
 
 #include "master/validation.hpp"
 
+#include <algorithm>
+#include <iterator>
 #include <set>
 #include <string>
 #include <vector>
@@ -44,6 +46,7 @@
 
 using process::http::authentication::Principal;
 
+using std::pair;
 using std::set;
 using std::string;
 using std::vector;
@@ -119,6 +122,9 @@ Option<Error> validate(
       return None();
 
     case mesos::master::Call::GET_EXECUTORS:
+      return None();
+
+    case mesos::master::Call::GET_OPERATIONS:
       return None();
 
     case mesos::master::Call::GET_TASKS:
@@ -228,6 +234,12 @@ Option<Error> validate(
         return Error("Expecting 'teardown' to be present");
       }
       return None();
+
+    case mesos::master::Call::MARK_AGENT_GONE:
+      if (!call.has_mark_agent_gone()) {
+        return Error("Expecting 'mark_agent_gone' to be present");
+      }
+      return None();
   }
 
   UNREACHABLE();
@@ -255,23 +267,23 @@ static Option<Error> validateSlaveInfo(const SlaveInfo& slaveInfo)
 }
 
 
-Option<Error> registerSlave(
-    const SlaveInfo& slaveInfo,
-    const vector<Resource>& checkpointedResources)
+Option<Error> registerSlave(const RegisterSlaveMessage& message)
 {
+  const SlaveInfo& slaveInfo = message.slave();
+
   Option<Error> error = validateSlaveInfo(slaveInfo);
   if (error.isSome()) {
     return error.get();
   }
 
-  if (!checkpointedResources.empty()) {
+  if (!message.checkpointed_resources().empty()) {
     if (!slaveInfo.has_checkpoint() || !slaveInfo.checkpoint()) {
       return Error(
           "Checkpointed resources provided when checkpointing is not enabled");
     }
   }
 
-  foreach (const Resource& resource, checkpointedResources) {
+  foreach (const Resource& resource, message.checkpointed_resources()) {
     error = Resources::validate(resource);
     if (error.isSome()) {
       return error.get();
@@ -282,29 +294,25 @@ Option<Error> registerSlave(
 }
 
 
-Option<Error> reregisterSlave(
-    const SlaveInfo& slaveInfo,
-    const vector<Task>& tasks,
-    const vector<Resource>& resources,
-    const vector<ExecutorInfo>& executorInfos,
-    const vector<FrameworkInfo>& frameworkInfos)
+Option<Error> reregisterSlave(const ReregisterSlaveMessage& message)
 {
   hashset<FrameworkID> frameworkIDs;
-  hashset<ExecutorID> executorIDs;
+  hashset<pair<FrameworkID, ExecutorID>> executorIDs;
 
+  const SlaveInfo& slaveInfo = message.slave();
   Option<Error> error = validateSlaveInfo(slaveInfo);
   if (error.isSome()) {
     return error.get();
   }
 
-  foreach (const Resource& resource, resources) {
+  foreach (const Resource& resource, message.checkpointed_resources()) {
     Option<Error> error = Resources::validate(resource);
     if (error.isSome()) {
       return error.get();
     }
   }
 
-  foreach (const FrameworkInfo& framework, frameworkInfos) {
+  foreach (const FrameworkInfo& framework, message.frameworks()) {
     Option<Error> error = validation::framework::validate(framework);
     if (error.isSome()) {
       return error.get();
@@ -318,7 +326,7 @@ Option<Error> reregisterSlave(
     frameworkIDs.insert(framework.id());
   }
 
-  foreach (const ExecutorInfo& executor, executorInfos) {
+  foreach (const ExecutorInfo& executor, message.executor_infos()) {
     Option<Error> error = validation::executor::validate(executor);
     if (error.isSome()) {
       return error.get();
@@ -342,16 +350,18 @@ Option<Error> reregisterSlave(
     }
 
     if (executor.has_executor_id()) {
-      if (executorIDs.contains(executor.executor_id())) {
-        return Error("Executor has a duplicate ExecutorID '" +
+      auto id = std::make_pair(executor.framework_id(), executor.executor_id());
+      if (executorIDs.contains(id)) {
+        return Error("Framework '" + stringify(executor.framework_id()) +
+                     "' has a duplicate ExecutorID '" +
                      stringify(executor.executor_id()) + "'");
       }
 
-      executorIDs.insert(executor.executor_id());
+      executorIDs.insert(id);
     }
   }
 
-  foreach (const Task& task, tasks) {
+  foreach (const Task& task, message.tasks()) {
     Option<Error> error = common::validation::validateTaskID(task.task_id());
     if (error.isSome()) {
       return Error("Task has an invalid TaskID: " + error->message);
@@ -371,7 +381,8 @@ Option<Error> reregisterSlave(
     // is generated on the agent (see Slave::doReliableRegistration). Only
     // running tasks ought to have executors.
     if (task.has_executor_id() && task.state() == TASK_RUNNING) {
-      if (!executorIDs.contains(task.executor_id())) {
+      auto id = std::make_pair(task.framework_id(), task.executor_id());
+      if (!executorIDs.contains(id)) {
         return Error("Task has an invalid ExecutorID '" +
                      stringify(task.executor_id()) + "'");
       }
@@ -576,16 +587,50 @@ Option<Error> validate(
         return Error("Expecting 'acknowledge' to be present");
       }
 
-      Try<UUID> uuid = UUID::fromBytes(call.acknowledge().uuid());
+      Try<id::UUID> uuid = id::UUID::fromBytes(call.acknowledge().uuid());
       if (uuid.isError()) {
         return uuid.error();
       }
       return None();
     }
 
+    case mesos::scheduler::Call::ACKNOWLEDGE_OPERATION_STATUS: {
+      if (!call.has_acknowledge_operation_status()) {
+        return Error("Expecting 'acknowledge_operation_status' to be present");
+      }
+
+      const mesos::scheduler::Call::AcknowledgeOperationStatus& acknowledge =
+        call.acknowledge_operation_status();
+
+      Try<id::UUID> uuid = id::UUID::fromBytes(acknowledge.uuid());
+      if (uuid.isError()) {
+        return uuid.error();
+      }
+
+      // TODO(gkleiman): Revisit this once we introduce support for external
+      // resource providers.
+      if (!acknowledge.has_slave_id()) {
+        return Error("Expecting 'agent_id' to be present");
+      }
+
+      // TODO(gkleiman): Revisit this once agent supports sending status
+      // updates for operations affecting default resources (MESOS-8194).
+      if (!acknowledge.has_resource_provider_id()) {
+        return Error("Expecting 'resource_provider_id' to be present");
+      }
+
+      return None();
+    }
+
     case mesos::scheduler::Call::RECONCILE:
       if (!call.has_reconcile()) {
         return Error("Expecting 'reconcile' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::RECONCILE_OPERATIONS:
+      if (!call.has_reconcile_operations()) {
+        return Error("Expecting 'reconcile_operations' to be present");
       }
       return None();
 
@@ -613,19 +658,6 @@ Option<Error> validate(
 
 
 namespace resource {
-
-// Validates that the `gpus` resource is not fractional.
-// We rely on scalar resources only having 3 digits of precision.
-Option<Error> validateGpus(const RepeatedPtrField<Resource>& resources)
-{
-  double gpus = Resources(resources).gpus().getOrElse(0.0);
-  if (static_cast<long long>(gpus * 1000.0) % 1000 != 0) {
-    return Error("The 'gpus' resource must be an unsigned integer");
-  }
-
-  return None();
-}
-
 
 // Validates the ReservationInfos specified in the given resources (if
 // exist). Returns error if any ReservationInfo is found invalid or
@@ -787,27 +819,67 @@ Option<Error> validateAllocatedToSingleRole(const Resources& resources)
   return None();
 }
 
+namespace internal {
+
+// Validates that all the given resources are from the same resource
+// provider. Resources that do not have resource provider ID are
+// assumed to be from the agent (default resource provider).
+Option<Error> validateSingleResourceProvider(
+    const RepeatedPtrField<Resource>& resources)
+{
+  hashset<Option<ResourceProviderID>> resourceProviderIds;
+
+  foreach (const Resource& resource, resources) {
+    resourceProviderIds.insert(resource.has_provider_id()
+      ? resource.provider_id()
+      : Option<ResourceProviderID>::none());
+  }
+
+  if (resourceProviderIds.size() != 1) {
+    if (resourceProviderIds.contains(None())) {
+      return Error("Some resources have a resource provider and some do not");
+    }
+
+    vector<ResourceProviderID> ids;
+    std::transform(
+        resourceProviderIds.begin(),
+        resourceProviderIds.end(),
+        std::back_inserter(ids),
+        [](const Option<ResourceProviderID>& id) {
+          return id.get();
+        });
+
+    return Error(
+        "The resources have multiple resource providers: " +
+        strings::join(", ", ids));
+  }
+
+  return None();
+}
+
+} // namespace internal {
+
 
 Option<Error> validate(const RepeatedPtrField<Resource>& resources)
 {
   Option<Error> error = Resources::validate(resources);
   if (error.isSome()) {
-    return Error("Invalid resources: " + error.get().message);
+    return Error("Invalid resources: " + error->message);
   }
 
-  error = validateGpus(resources);
+  error = common::validation::validateGpus(resources);
   if (error.isSome()) {
-    return Error("Invalid 'gpus' resource: " + error.get().message);
+    return Error("Invalid 'gpus' resource: " + error->message);
   }
 
   error = validateDiskInfo(resources);
   if (error.isSome()) {
-    return Error("Invalid DiskInfo: " + error.get().message);
+    return Error("Invalid DiskInfo: " + error->message);
   }
 
   error = validateDynamicReservationInfo(resources);
   if (error.isSome()) {
-    return Error("Invalid ReservationInfo: " + error.get().message);
+    return Error("Invalid ReservationInfo: " + error->message);
   }
 
   return None();
@@ -888,7 +960,7 @@ Option<Error> validateCompatibleExecutorInfo(
   if (executorInfo.isSome() && executor != executorInfo.get()) {
     return Error(
         "ExecutorInfo is not compatible with existing ExecutorInfo"
-        " with same ExecutorID).\n"
+        " with same ExecutorID.\n"
         "------------------------------------------------------------\n"
         "Existing ExecutorInfo:\n" +
         stringify(executorInfo.get()) + "\n"
@@ -984,6 +1056,21 @@ Option<Error> validateCommandInfo(const ExecutorInfo& executor)
 }
 
 
+// Validates the `ContainerInfo` contained within a `ExecutorInfo`.
+Option<Error> validateContainerInfo(const ExecutorInfo& executor)
+{
+  if (executor.has_container()) {
+    Option<Error> error =
+      common::validation::validateContainerInfo(executor.container());
+    if (error.isSome()) {
+      return Error("Executor's `ContainerInfo` is invalid: " + error->message);
+    }
+  }
+
+  return None();
+}
+
+
 Option<Error> validate(
     const ExecutorInfo& executor,
     Framework* framework,
@@ -1024,6 +1111,7 @@ Option<Error> validate(const ExecutorInfo& executor)
     internal::validateExecutorID,
     internal::validateShutdownGracePeriod,
     internal::validateCommandInfo,
+    internal::validateContainerInfo
   };
 
   foreach (const auto& validator, executorValidators) {
@@ -1202,6 +1290,21 @@ Option<Error> validateCommandInfo(const TaskInfo& task)
 }
 
 
+// Validates the `ContainerInfo` contained within a `TaskInfo`.
+Option<Error> validateContainerInfo(const TaskInfo& task)
+{
+  if (task.has_container()) {
+    Option<Error> error =
+      common::validation::validateContainerInfo(task.container());
+    if (error.isSome()) {
+      return Error("Task's `ContainerInfo` is invalid: " + error->message);
+    }
+  }
+
+  return None();
+}
+
+
 // Validates task specific fields except its executor (if it exists).
 Option<Error> validateTask(
     const TaskInfo& task,
@@ -1221,7 +1324,8 @@ Option<Error> validateTask(
     lambda::bind(internal::validateCheck, task),
     lambda::bind(internal::validateHealthCheck, task),
     lambda::bind(internal::validateResources, task),
-    lambda::bind(internal::validateCommandInfo, task)
+    lambda::bind(internal::validateCommandInfo, task),
+    lambda::bind(internal::validateContainerInfo, task)
   };
 
   foreach (const lambda::function<Option<Error>()>& validator, validators) {
@@ -1313,7 +1417,7 @@ Option<Error> validateExecutor(
         << "Executor '" << task.executor().executor_id()
         << "' for task '" << task.task_id()
         << "' uses less memory ("
-        << (mem.isSome() ? stringify(mem.get().megabytes()) : "None")
+        << (mem.isSome() ? stringify(mem.get()) : "None")
         << ") than the minimum required (" << MIN_MEM
         << "). Please update your executor, as this will be mandatory "
         << "in future releases.";
@@ -1397,8 +1501,13 @@ Option<Error> validateTask(
   }
 
   if (task.has_container()) {
-    if (task.container().network_infos().size() > 0) {
-      return Error("NetworkInfos must not be set on the task");
+    if (!task.container().network_infos().empty()) {
+      if (task.has_health_check() &&
+          (task.health_check().type() == HealthCheck::HTTP ||
+           task.health_check().type() == HealthCheck::TCP)) {
+        return Error("HTTP and TCP health checks are not supported for "
+                     "nested containers not joining parent's network");
+      }
     }
 
     if (task.container().type() == ContainerInfo::DOCKER) {
@@ -1496,7 +1605,7 @@ Option<Error> validateExecutor(
     return Error(
       "Executor '" + stringify(executor.executor_id()) +
       "' uses less memory (" +
-      (mem.isSome() ? stringify(mem.get().megabytes()) : "None") +
+      (mem.isSome() ? stringify(mem.get()) : "None") +
       ") than the minimum required (" + stringify(MIN_MEM) + ")");
   }
 
@@ -1841,6 +1950,9 @@ Option<Error> validateInverseOffers(
 
 namespace operation {
 
+// TODO(jieyu): Validate that resources in an operation is not empty.
+
+
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
     const Option<Principal>& principal,
@@ -1850,7 +1962,13 @@ Option<Error> validate(
   // NOTE: this ensures the reservation is not being made to the "*" role.
   Option<Error> error = resource::validate(reserve.resources());
   if (error.isSome()) {
-    return Error("Invalid resources: " + error.get().message);
+    return Error("Invalid resources: " + error->message);
+  }
+
+  error =
+    resource::internal::validateSingleResourceProvider(reserve.resources());
+  if (error.isSome()) {
+    return Error("Invalid resources: " + error->message);
   }
 
   Option<hashset<string>> frameworkRoles;
@@ -1988,7 +2106,13 @@ Option<Error> validate(
 {
   Option<Error> error = resource::validate(unreserve.resources());
   if (error.isSome()) {
-    return Error("Invalid resources: " + error.get().message);
+    return Error("Invalid resources: " + error->message);
+  }
+
+  error =
+    resource::internal::validateSingleResourceProvider(unreserve.resources());
+  if (error.isSome()) {
+    return Error("Invalid resources: " + error->message);
   }
 
   // NOTE: We don't check that 'FrameworkInfo.principal' matches
@@ -2025,12 +2149,17 @@ Option<Error> validate(
 {
   Option<Error> error = resource::validate(create.volumes());
   if (error.isSome()) {
-    return Error("Invalid resources: " + error.get().message);
+    return Error("Invalid resources: " + error->message);
+  }
+
+  error = resource::internal::validateSingleResourceProvider(create.volumes());
+  if (error.isSome()) {
+    return Error("Invalid resources: " + error->message);
   }
 
   error = resource::validatePersistentVolume(create.volumes());
   if (error.isSome()) {
-    return Error("Not a persistent volume: " + error.get().message);
+    return Error("Not a persistent volume: " + error->message);
   }
 
   error = resource::validateUniquePersistenceID(
@@ -2051,7 +2180,7 @@ Option<Error> validate(
       return Error(
           "Create volume operation for '" + stringify(volume) +
           "' has been attempted by framework '" +
-          stringify(frameworkInfo.get().id()) +
+          stringify(frameworkInfo->id()) +
           "' with no SHARED_RESOURCES capability");
     }
 
@@ -2140,16 +2269,27 @@ Option<Error> validate(
 
   Option<Error> error = resource::validate(volumes);
   if (error.isSome()) {
-    return Error("Invalid resources: " + error.get().message);
+    return Error("Invalid resources: " + error->message);
+  }
+
+  error = resource::internal::validateSingleResourceProvider(volumes);
+  if (error.isSome()) {
+    return Error("Invalid resources: " + error->message);
   }
 
   error = resource::validatePersistentVolume(volumes);
   if (error.isSome()) {
-    return Error("Not a persistent volume: " + error.get().message);
+    return Error("Not a persistent volume: " + error->message);
   }
 
-  if (!checkpointedResources.contains(volumes)) {
-    return Error("Persistent volumes not found");
+  foreach (const Resource volume, volumes) {
+    if (Resources::hasResourceProvider(volume)) {
+      continue;
+    }
+
+    if (!checkpointedResources.contains(volume)) {
+      return Error("Persistent volumes not found");
+    }
   }
 
   // Ensure the volumes being destroyed are not in use currently.
@@ -2183,6 +2323,96 @@ Option<Error> validate(
         }
       }
     }
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(const Offer::Operation::CreateVolume& createVolume)
+{
+  const Resource& source = createVolume.source();
+
+  Option<Error> error = resource::validate(Resources(source));
+  if (error.isSome()) {
+    return Error("Invalid resource: " + error->message);
+  }
+
+  if (!Resources::hasResourceProvider(source)) {
+    return Error("Does not have a resource provider");
+  }
+
+  if (!Resources::isDisk(source, Resource::DiskInfo::Source::RAW)) {
+    return Error("'source' is not a RAW disk resource");
+  }
+
+  if (createVolume.target_type() != Resource::DiskInfo::Source::MOUNT &&
+      createVolume.target_type() != Resource::DiskInfo::Source::PATH) {
+    return Error("'target_type' is neither MOUNT or PATH");
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(const Offer::Operation::DestroyVolume& destroyVolume)
+{
+  const Resource& volume = destroyVolume.volume();
+
+  Option<Error> error = resource::validate(Resources(volume));
+  if (error.isSome()) {
+    return Error("Invalid resource: " + error->message);
+  }
+
+  if (!Resources::hasResourceProvider(volume)) {
+    return Error("Does not have a resource provider");
+  }
+
+  if (!Resources::isDisk(volume, Resource::DiskInfo::Source::MOUNT) &&
+      !Resources::isDisk(volume, Resource::DiskInfo::Source::PATH)) {
+    return Error("'volume' is neither a MOUTN or PATH disk resource");
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(const Offer::Operation::CreateBlock& createBlock)
+{
+  const Resource& source = createBlock.source();
+
+  Option<Error> error = resource::validate(Resources(source));
+  if (error.isSome()) {
+    return Error("Invalid resource: " + error->message);
+  }
+
+  if (!Resources::hasResourceProvider(source)) {
+    return Error("Does not have a resource provider");
+  }
+
+  if (!Resources::isDisk(source, Resource::DiskInfo::Source::RAW)) {
+    return Error("'source' is not a RAW disk resource");
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(const Offer::Operation::DestroyBlock& destroyBlock)
+{
+  const Resource& block = destroyBlock.block();
+
+  Option<Error> error = resource::validate(Resources(block));
+  if (error.isSome()) {
+    return Error("Invalid resource: " + error->message);
+  }
+
+  if (!Resources::hasResourceProvider(block)) {
+    return Error("Does not have a resource provider");
+  }
+
+  if (!Resources::isDisk(block, Resource::DiskInfo::Source::BLOCK)) {
+    return Error("'block' is not a BLOCK disk resource");
   }
 
   return None();

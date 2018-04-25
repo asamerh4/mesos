@@ -26,6 +26,7 @@ import atexit
 import json
 import linecache
 import os
+import pipes
 import platform
 import re
 import ssl
@@ -109,6 +110,8 @@ def review_chain(review_id):
     # Stop as soon as we stumble upon a submitted request.
     status = json_obj.get('review_request').get('status')
     if status == "submitted":
+        sys.stderr.write('Warning: Review {review} has already'
+                         ' been applied\n'.format(review=review_id))
         return []
 
     # Verify that the review has exactly one parent.
@@ -165,7 +168,9 @@ def ssl_create_default_context():
     Equivalent to `ssl.create_default_context` with default arguments and
     certificate/hostname verification disabled.
     See: https://github.com/python/cpython/blob/2.7/Lib/ssl.py#L410
+    This function requires Python >= 2.7.9.
     """
+    # pylint: disable=no-member
     context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
 
     # SSLv2 considered harmful.
@@ -185,7 +190,9 @@ def ssl_create_default_context():
 
 def fetch_patch(options):
     """Fetches a patch from Review Board or GitHub."""
+    # pylint: disable=unexpected-keyword-arg
     if platform.system() == 'Windows':
+        # This call requires Python >= 2.7.9.
         response = urllib2.urlopen(
             patch_url(options),
             context=ssl_create_default_context())
@@ -206,9 +213,9 @@ def fetch_patch(options):
                 review_id=patch_id(options),
                 url=patch_url(options))
 
-        # In case of github we always need to fetch the patch to extract username
-        # and email, so we ignore the dry_run option by setting the second parameter
-        # to False.
+        # In case of GitHub we always need to fetch the patch to extract
+        # username and email, so we ignore the dry_run option by setting the
+        # second parameter to False.
         if options['github']:
             shell(cmd, False)
         else:
@@ -252,18 +259,35 @@ def commit_patch(options):
     else:
         amend = '-e'
 
+    # Check whether we should skip the commit hooks.
+    if options['skip_hooks']:
+        verify = '-n'
+    else:
+        verify = ''
+
     # NOTE: Windows does not support multi-line commit messages via the shell.
     message_file = '%s.message' % patch_id(options)
     atexit.register(
         lambda: os.path.exists(message_file) and os.remove(message_file))
 
     with open(message_file, 'w') as message:
+        # Add a shell command creating the message file for dry-run mode.
+        if options["dry_run"]:
+            shell(
+                "printf {msg} > {file}".format(
+                    msg=pipes.quote(data['message']).replace('\n', '\\n'),
+                    file=message_file),
+                True)
         message.write(data['message'])
 
-    cmd = u'git commit --author \"{author}\" {_amend} -aF \"{message}\"'.format(
-        author=quote(data['author']),
-        _amend=amend,
-        message=message_file)
+    cmd = u'git commit' \
+          u' --author \"{author}\"' \
+          u' {amend} -aF \"{message}\"' \
+          u' {verify}'.format(
+              author=quote(data['author']),
+              amend=amend,
+              message=message_file,
+              verify=verify)
 
     shell(cmd, options['dry_run'])
 
@@ -325,13 +349,16 @@ def reviewboard_data(options):
     user = url_to_json(reviewboard_user_url(
         review.get('links').get('submitter').get('title'))).get('user')
 
+    # Only include a description if it is not identical to the summary.
+    message_data = [review.get('summary')]
+    if review.get('description') != review.get('summary'):
+        message_data.append(review.get('description'))
+    message_data.append('Review: {review_url}'.format(review_url=url))
+
     author = u'{author} <{email}>'.format(
         author=user.get('fullname'),
         email=user.get('email'))
-    message = '\n\n'.join([
-        review.get('summary'),
-        review.get('description'),
-        'Review: {review_url}'.format(review_url=url)])
+    message = '\n\n'.join(message_data)
 
     review_data = {
         "summary": review.get('summary'),
@@ -361,7 +388,9 @@ def parse_options():
     parser.add_argument('-c', '--chain',
                         action='store_true',
                         help='Recursively apply parent review chain.')
-
+    parser.add_argument('-s', '--skip-hooks',
+                        action='store_true',
+                        help='Skip the commit hooks (e.g., Mesos style check).')
     parser.add_argument('-3', '--3way',
                         dest='three_way',
                         action='store_true',
@@ -383,6 +412,7 @@ def parse_options():
     options['no_amend'] = args.no_amend
     options['github'] = args.github
     options['chain'] = args.chain
+    options['skip_hooks'] = args.skip_hooks
     options['3way'] = args.three_way
 
     return options

@@ -34,6 +34,7 @@
 #include <stout/option.hpp>
 #include <stout/path.hpp>
 #include <stout/protobuf.hpp>
+#include <stout/strings.hpp>
 #include <stout/try.hpp>
 #include <stout/unreachable.hpp>
 
@@ -41,13 +42,14 @@
 #include "common/parse.hpp"
 #include "common/protobuf_utils.hpp"
 
-using process::dispatch;
+using std::string;
+using std::vector;
+
 using process::Failure;
 using process::Future;
 using process::Owned;
 
-using std::string;
-using std::vector;
+using process::dispatch;
 
 namespace mesos {
 namespace internal {
@@ -396,13 +398,21 @@ public:
           }
 
           break;
+        case authorization::LAUNCH_STANDALONE_CONTAINER:
+        case authorization::KILL_STANDALONE_CONTAINER:
+        case authorization::WAIT_STANDALONE_CONTAINER:
+        case authorization::REMOVE_STANDALONE_CONTAINER:
+        case authorization::VIEW_STANDALONE_CONTAINER:
         case authorization::GET_MAINTENANCE_SCHEDULE:
         case authorization::GET_MAINTENANCE_STATUS:
+        case authorization::MARK_AGENT_GONE:
         case authorization::REGISTER_AGENT:
         case authorization::SET_LOG_LEVEL:
         case authorization::START_MAINTENANCE:
         case authorization::STOP_MAINTENANCE:
         case authorization::UPDATE_MAINTENANCE_SCHEDULE:
+        case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
+        case authorization::PRUNE_IMAGES:
           aclObject.set_type(ACL::Entity::ANY);
 
           break;
@@ -519,6 +529,28 @@ public:
 
 private:
   const ContainerID subject_;
+};
+
+
+class LocalImplicitResourceProviderObjectApprover : public ObjectApprover
+{
+public:
+  LocalImplicitResourceProviderObjectApprover(const string& subject)
+    : subject_(subject) {}
+
+  // Resource providers are permitted to perform an action when the
+  // ContainerID in the object is prefixed by the namespace extracted
+  // from the subject's claims.
+  virtual Try<bool> approved(
+      const Option<ObjectApprover::Object>& object) const noexcept override
+  {
+    return object.isSome() &&
+           object->container_id != nullptr &&
+           strings::startsWith(object->container_id->value(), subject_);
+  }
+
+private:
+  const string subject_;
 };
 
 
@@ -664,10 +696,15 @@ public:
         case authorization::GET_MAINTENANCE_SCHEDULE:
         case authorization::GET_MAINTENANCE_STATUS:
         case authorization::KILL_NESTED_CONTAINER:
+        case authorization::KILL_STANDALONE_CONTAINER:
         case authorization::LAUNCH_NESTED_CONTAINER:
         case authorization::LAUNCH_NESTED_CONTAINER_SESSION:
+        case authorization::LAUNCH_STANDALONE_CONTAINER:
+        case authorization::MARK_AGENT_GONE:
+        case authorization::PRUNE_IMAGES:
         case authorization::REGISTER_AGENT:
         case authorization::REMOVE_NESTED_CONTAINER:
+        case authorization::REMOVE_STANDALONE_CONTAINER:
         case authorization::RUN_TASK:
         case authorization::SET_LOG_LEVEL:
         case authorization::START_MAINTENANCE:
@@ -679,8 +716,11 @@ public:
         case authorization::VIEW_EXECUTOR:
         case authorization::VIEW_FLAGS:
         case authorization::VIEW_FRAMEWORK:
+        case authorization::VIEW_STANDALONE_CONTAINER:
         case authorization::VIEW_TASK:
         case authorization::WAIT_NESTED_CONTAINER:
+        case authorization::WAIT_STANDALONE_CONTAINER:
+        case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
         case authorization::UNKNOWN:
           UNREACHABLE();
       }
@@ -874,10 +914,15 @@ public:
       case authorization::GET_MAINTENANCE_SCHEDULE:
       case authorization::GET_MAINTENANCE_STATUS:
       case authorization::KILL_NESTED_CONTAINER:
+      case authorization::KILL_STANDALONE_CONTAINER:
       case authorization::LAUNCH_NESTED_CONTAINER:
       case authorization::LAUNCH_NESTED_CONTAINER_SESSION:
+      case authorization::LAUNCH_STANDALONE_CONTAINER:
+      case authorization::MARK_AGENT_GONE:
+      case authorization::PRUNE_IMAGES:
       case authorization::REGISTER_AGENT:
       case authorization::REMOVE_NESTED_CONTAINER:
+      case authorization::REMOVE_STANDALONE_CONTAINER:
       case authorization::RUN_TASK:
       case authorization::SET_LOG_LEVEL:
       case authorization::START_MAINTENANCE:
@@ -890,8 +935,11 @@ public:
       case authorization::VIEW_EXECUTOR:
       case authorization::VIEW_FLAGS:
       case authorization::VIEW_FRAMEWORK:
+      case authorization::VIEW_STANDALONE_CONTAINER:
       case authorization::VIEW_TASK:
       case authorization::WAIT_NESTED_CONTAINER:
+      case authorization::WAIT_STANDALONE_CONTAINER:
+      case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
         UNREACHABLE();
     }
 
@@ -990,24 +1038,66 @@ public:
         subjectContainerId.get()));
   }
 
+  Future<Owned<ObjectApprover>> getImplicitResourceProviderObjectApprover(
+      const Option<authorization::Subject>& subject,
+      const authorization::Action& action)
+  {
+    CHECK(subject.isSome() &&
+          subject->has_claims() &&
+          !subject->has_value() &&
+          (action == authorization::LAUNCH_STANDALONE_CONTAINER ||
+           action == authorization::WAIT_STANDALONE_CONTAINER ||
+           action == authorization::KILL_STANDALONE_CONTAINER ||
+           action == authorization::REMOVE_STANDALONE_CONTAINER));
+
+    Option<string> subjectPrefix;
+    foreach (const Label& claim, subject->claims().labels()) {
+      if (claim.key() == "cid_prefix" && claim.has_value()) {
+        subjectPrefix = claim.value();
+      }
+    }
+
+    if (subjectPrefix.isNone()) {
+      // If the subject's claims do not include a namespace string,
+      // we deny all objects.
+      return Owned<ObjectApprover>(new RejectingObjectApprover());
+    }
+
+    return Owned<ObjectApprover>(
+        new LocalImplicitResourceProviderObjectApprover(
+            subjectPrefix.get()));
+  }
+
   Future<Owned<ObjectApprover>> getObjectApprover(
       const Option<authorization::Subject>& subject,
       const authorization::Action& action)
   {
-    // We return the `LocalImplicitExecutorObjectApprover` only for subjects and
-    // actions which it knows how to handle. This means the subject should have
-    // claims but no value, and the action should be one of the actions used by
-    // the default executor.
+    // We return implicit object approvers only for subjects and actions
+    // which comes from either the default executor or a local resource
+    // provider. This means the subject should have claims but no value,
+    // and the action should be one of the actions used by them.
     if (subject.isSome() &&
         subject->has_claims() &&
-        !subject->has_value() &&
-        (action == authorization::LAUNCH_NESTED_CONTAINER ||
-         action == authorization::WAIT_NESTED_CONTAINER ||
-         action == authorization::KILL_NESTED_CONTAINER ||
-         action == authorization::LAUNCH_NESTED_CONTAINER_SESSION ||
-         action == authorization::REMOVE_NESTED_CONTAINER ||
-         action == authorization::ATTACH_CONTAINER_OUTPUT)) {
-      return getImplicitExecutorObjectApprover(subject, action);
+        !subject->has_value()) {
+      // The `LocalImplicitExecutorObjectApprover` is used to authorize
+      // requests from the default executor.
+      if (action == authorization::LAUNCH_NESTED_CONTAINER ||
+          action == authorization::WAIT_NESTED_CONTAINER ||
+          action == authorization::KILL_NESTED_CONTAINER ||
+          action == authorization::LAUNCH_NESTED_CONTAINER_SESSION ||
+          action == authorization::REMOVE_NESTED_CONTAINER ||
+          action == authorization::ATTACH_CONTAINER_OUTPUT) {
+        return getImplicitExecutorObjectApprover(subject, action);
+      }
+
+      // The `LocalImplicitResourceProviderObjectApprover` is used to
+      // authorize requests from a local resource provider.
+      if (action == authorization::LAUNCH_STANDALONE_CONTAINER ||
+          action == authorization::WAIT_STANDALONE_CONTAINER ||
+          action == authorization::KILL_STANDALONE_CONTAINER ||
+          action == authorization::REMOVE_STANDALONE_CONTAINER) {
+        return getImplicitResourceProviderObjectApprover(subject, action);
+      }
     }
 
     // Currently, implicit executor authorization is the only case which handles
@@ -1040,8 +1130,13 @@ public:
       case authorization::GET_MAINTENANCE_SCHEDULE:
       case authorization::GET_MAINTENANCE_STATUS:
       case authorization::KILL_NESTED_CONTAINER:
+      case authorization::KILL_STANDALONE_CONTAINER:
+      case authorization::LAUNCH_STANDALONE_CONTAINER:
+      case authorization::MARK_AGENT_GONE:
+      case authorization::PRUNE_IMAGES:
       case authorization::REGISTER_AGENT:
       case authorization::REMOVE_NESTED_CONTAINER:
+      case authorization::REMOVE_STANDALONE_CONTAINER:
       case authorization::RUN_TASK:
       case authorization::SET_LOG_LEVEL:
       case authorization::START_MAINTENANCE:
@@ -1053,8 +1148,11 @@ public:
       case authorization::VIEW_EXECUTOR:
       case authorization::VIEW_FLAGS:
       case authorization::VIEW_FRAMEWORK:
+      case authorization::VIEW_STANDALONE_CONTAINER:
       case authorization::VIEW_TASK:
       case authorization::WAIT_NESTED_CONTAINER:
+      case authorization::WAIT_STANDALONE_CONTAINER:
+      case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
       case authorization::UNKNOWN: {
         Result<vector<GenericACL>> genericACLs =
           createGenericACLs(action, acls);
@@ -1333,6 +1431,93 @@ private:
         }
 
         return acls_;
+      case authorization::MARK_AGENT_GONE:
+        foreach (const ACL::MarkAgentGone& acl,
+                 acls.mark_agents_gone()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.agents();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::LAUNCH_STANDALONE_CONTAINER:
+        foreach (const ACL::LaunchStandaloneContainer& acl,
+                 acls.launch_standalone_containers()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.users();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::KILL_STANDALONE_CONTAINER:
+        foreach (const ACL::KillStandaloneContainer& acl,
+            acls.kill_standalone_containers()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.users();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::WAIT_STANDALONE_CONTAINER:
+        foreach (const ACL::WaitStandaloneContainer& acl,
+            acls.wait_standalone_containers()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.users();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::REMOVE_STANDALONE_CONTAINER:
+        foreach (const ACL::RemoveStandaloneContainer& acl,
+            acls.remove_standalone_containers()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.users();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::VIEW_STANDALONE_CONTAINER:
+        foreach (const ACL::ViewStandaloneContainer& acl,
+            acls.view_standalone_containers()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.users();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::MODIFY_RESOURCE_PROVIDER_CONFIG:
+        foreach (const ACL::ModifyResourceProviderConfig& acl,
+                 acls.modify_resource_provider_configs()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.resource_providers();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+      case authorization::PRUNE_IMAGES:
+        foreach (const ACL::PruneImages& acl, acls.prune_images()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.images();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
       case authorization::REGISTER_FRAMEWORK:
       case authorization::CREATE_VOLUME:
       case authorization::RESERVE_RESOURCES:
@@ -1395,19 +1580,19 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
 {
   foreach (const ACL::AccessMesosLog& acl, acls.access_mesos_logs()) {
     if (acl.logs().type() == ACL::Entity::SOME) {
-      return Error("acls.access_mesos_logs type must be either NONE or ANY");
+      return Error("ACL.AccessMesosLog type must be either NONE or ANY");
     }
   }
 
   foreach (const ACL::ViewFlags& acl, acls.view_flags()) {
     if (acl.flags().type() == ACL::Entity::SOME) {
-      return Error("acls.view_flags type must be either NONE or ANY");
+      return Error("ACL.ViewFlags type must be either NONE or ANY");
     }
   }
 
   foreach (const ACL::SetLogLevel& acl, acls.set_log_level()) {
     if (acl.level().type() == ACL::Entity::SOME) {
-      return Error("acls.set_log_level type must be either NONE or ANY");
+      return Error("ACL.SetLogLevel type must be either NONE or ANY");
     }
   }
 
@@ -1424,7 +1609,7 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
   foreach (const ACL::RegisterAgent& acl, acls.register_agents()) {
     if (acl.agents().type() == ACL::Entity::SOME) {
       return Error(
-          "acls.register_agents type must be either NONE or ANY");
+          "ACL.RegisterAgent type must be either NONE or ANY");
     }
   }
 
@@ -1432,7 +1617,7 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
            acls.update_maintenance_schedules()) {
     if (acl.machines().type() == ACL::Entity::SOME) {
       return Error(
-          "acls.update_maintenance_schedule type must be either NONE or ANY");
+          "ACL.UpdateMaintenanceSchedule type must be either NONE or ANY");
     }
   }
 
@@ -1440,19 +1625,19 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
            acls.get_maintenance_schedules()) {
     if (acl.machines().type() == ACL::Entity::SOME) {
       return Error(
-          "acls.get_maintenance_schedule type must be either NONE or ANY");
+          "ACL.GetMaintenanceSchedule type must be either NONE or ANY");
     }
   }
 
   foreach (const ACL::StartMaintenance& acl, acls.start_maintenances()) {
     if (acl.machines().type() == ACL::Entity::SOME) {
-      return Error("acls.start_maintenance type must be either NONE or ANY");
+      return Error("ACL.StartMaintenance type must be either NONE or ANY");
     }
   }
 
   foreach (const ACL::StopMaintenance& acl, acls.stop_maintenances()) {
     if (acl.machines().type() == ACL::Entity::SOME) {
-      return Error("acls.stop_maintenance type must be either NONE or ANY");
+      return Error("ACL.StopMaintenance type must be either NONE or ANY");
     }
   }
 
@@ -1460,7 +1645,61 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
            acls.get_maintenance_statuses()) {
     if (acl.machines().type() == ACL::Entity::SOME) {
       return Error(
-          "acls.get_maintenance_status type must be either NONE or ANY");
+          "ACL.GetMaintenanceStatus type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::LaunchStandaloneContainer& acl,
+           acls.launch_standalone_containers()) {
+    if (acl.users().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.LaunchStandaloneContainer type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::KillStandaloneContainer& acl,
+           acls.kill_standalone_containers()) {
+    if (acl.users().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.KillStandaloneContainer type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::WaitStandaloneContainer& acl,
+           acls.wait_standalone_containers()) {
+    if (acl.users().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.WaitStandaloneContainer type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::RemoveStandaloneContainer& acl,
+           acls.remove_standalone_containers()) {
+    if (acl.users().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.RemoveStandaloneContainer type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::ViewStandaloneContainer& acl,
+           acls.view_standalone_containers()) {
+    if (acl.users().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.ViewStandaloneContainer type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::ModifyResourceProviderConfig& acl,
+           acls.modify_resource_provider_configs()) {
+    if (acl.resource_providers().type() == ACL::Entity::SOME) {
+      return Error(
+          "ACL.ModifyResourceProviderConfig type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::PruneImages& acl, acls.prune_images()) {
+    if (acl.images().type() == ACL::Entity::SOME) {
+      return Error("ACL.PruneImages type must be either NONE or ANY");
     }
   }
 

@@ -13,16 +13,13 @@
 #ifndef __STOUT_INTERNAL_WINDOWS_REPARSEPOINT_HPP__
 #define __STOUT_INTERNAL_WINDOWS_REPARSEPOINT_HPP__
 
-#include <mutex>
 #include <string>
 
 #include <stout/nothing.hpp>
-#include <stout/synchronized.hpp>
 #include <stout/try.hpp>
 #include <stout/windows.hpp>
 
 #include <stout/os/mkdir.hpp>
-#include <stout/os/realpath.hpp>
 
 #include <stout/internal/windows/attributes.hpp>
 #include <stout/internal/windows/longpath.hpp>
@@ -45,6 +42,9 @@ enum class FollowSymlink
 } // namespace os {
 
 
+namespace internal {
+namespace windows {
+
 // We pass this struct to `DeviceIoControl` to get information about a reparse
 // point (including things like whether it's a symlink). It is normally part of
 // the Device Driver Kit (DDK), specifically `nitfs.h`, but rather than taking
@@ -52,72 +52,47 @@ enum class FollowSymlink
 // well-worn path used by Boost FS[1], among others. See documentation
 // here[2][3].
 //
-// [1] http://www.boost.org/doc/libs/1_46_1/libs/filesystem/v3/src/operations.cpp
+// [1] http://www.boost.org/doc/libs/1_46_1/libs/filesystem/v3/src/operations.cpp // NOLINT(whitespace/line_length)
 // [2] https://msdn.microsoft.com/en-us/library/cc232007.aspx
 // [3] https://msdn.microsoft.com/en-us/library/cc232005.aspx
-//
-// We are declaring this structure (and the REPARSE_DATA_BUFFER_HEADER_SIZE
-// macro right below it in the global namespace, to be consistent with the
-// original Windows DDK declarations.
 typedef struct _REPARSE_DATA_BUFFER
 {
   // Describes, among other things, which type of reparse point this is (e.g.,
   // a symlink).
-  ULONG  ReparseTag;
+  ULONG ReparseTag;
   // Size in bytes of common portion of the `REPARSE_DATA_BUFFER`.
-  USHORT  ReparseDataLength;
+  USHORT ReparseDataLength;
   // Unused. Ignore.
-  USHORT  Reserved;
-  union
+  USHORT Reserved;
+  // Holds symlink data.
+  struct
   {
-    // Holds symlink data.
-    struct
-    {
-      // Byte offset in `PathBuffer` where the substitute name begins.
-      // Calculated as an offset from 0.
-      USHORT SubstituteNameOffset;
-      // Length in bytes of the substitute name.
-      USHORT SubstituteNameLength;
-      // Byte offset in `PathBuffer` where the print name begins. Calculated as
-      // an offset from 0.
-      USHORT PrintNameOffset;
-      // Length in bytes of the print name.
-      USHORT PrintNameLength;
-      // Indicates whether symlink is absolute or relative. If flags containing
-      // `SYMLINK_FLAG_RELATIVE`, then the substitute name is a relative
-      // symlink.
-      ULONG Flags;
-      // The first byte of the path string -- according to the documentation[1],
-      // this is followed in memory by the rest of the path string. The "path
-      // string" itself is a unicode char array containing both substitute name
-      // and print name. They can occur in any order. Use the offset and length
-      // of each in this struct to calculate where each starts and ends.
-      //
-      // [1] https://msdn.microsoft.com/en-us/library/windows/hardware/ff552012(v=vs.85).aspx
-      WCHAR PathBuffer[1];
-    } SymbolicLinkReparseBuffer;
-
-    // Unused: holds mount point data.
-    struct
-    {
-      USHORT SubstituteNameOffset;
-      USHORT SubstituteNameLength;
-      USHORT PrintNameOffset;
-      USHORT PrintNameLength;
-      WCHAR PathBuffer[1];
-    } MountPointReparseBuffer;
-    struct
-    {
-      UCHAR DataBuffer[1];
-    } GenericReparseBuffer;
-  };
+    // Byte offset in `PathBuffer` where the substitute name begins.
+    // Calculated as an offset from 0.
+    USHORT SubstituteNameOffset;
+    // Length in bytes of the substitute name.
+    USHORT SubstituteNameLength;
+    // Byte offset in `PathBuffer` where the print name begins. Calculated as
+    // an offset from 0.
+    USHORT PrintNameOffset;
+    // Length in bytes of the print name.
+    USHORT PrintNameLength;
+    // Indicates whether symlink is absolute or relative. If flags containing
+    // `SYMLINK_FLAG_RELATIVE`, then the substitute name is a relative
+    // symlink.
+    ULONG Flags;
+    // The path string; the Windows declaration is the first byte, but we
+    // declare a suitably sized array so we can use this struct more easily. The
+    // "path string" itself is a Unicode `wchar` array containing both
+    // substitute name and print name. They can occur in any order. Use the
+    // offset and length of each in this struct to calculate where each starts
+    // and ends.
+    //
+    // https://msdn.microsoft.com/en-us/library/windows/hardware/ff552012(v=vs.85).aspx // NOLINT(whitespace/line_length)
+    WCHAR PathBuffer[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+  } SymbolicLinkReparseBuffer;
 } REPARSE_DATA_BUFFER;
 
-#define REPARSE_DATA_BUFFER_HEADER_SIZE \
-  FIELD_OFFSET(REPARSE_DATA_BUFFER, GenericReparseBuffer)
-
-namespace internal {
-namespace windows {
 
 // Convenience struct for holding symlink data, meant purely for internal use.
 // We pass this around instead of the `REPARSE_DATA_BUFFER` struct, simply
@@ -174,13 +149,72 @@ inline Try<SymbolicLink> build_symbolic_link(const REPARSE_DATA_BUFFER& data)
 }
 
 
+// Attempts to get a file or folder handle for an absolute path, and follows
+// symlinks. That is, if the path points at a symlink, the handle will refer to
+// the file or folder the symlink points at, rather than the symlink itself.
+inline Try<SharedHandle> get_handle_follow(const std::string& absolute_path)
+{
+  const Try<DWORD> attributes = get_file_attributes(longpath(absolute_path));
+
+  if (attributes.isError()) {
+    return Error(attributes.error());
+  }
+
+  bool resolved_path_is_directory = attributes.get() & FILE_ATTRIBUTE_DIRECTORY;
+
+  // NOTE: The name of `CreateFile` is misleading: it is also used to retrieve
+  // handles to existing files or directories as if it were actually `OpenPath`
+  // (which does not exist). We use `OPEN_EXISTING` but not
+  // `FILE_FLAG_OPEN_REPARSE_POINT` to explicitily follow (resolve) symlinks in
+  // the path to the file or directory.
+  //
+  // Note also that `CreateFile` will appropriately generate a handle for
+  // either a folder or a file, as long as the appropriate flag is being set:
+  // `FILE_FLAG_BACKUP_SEMANTICS`.
+  //
+  // The `FILE_FLAG_BACKUP_SEMANTICS` flag is being set whenever the target is
+  // a directory. According to MSDN[1]: "You must set this flag to obtain a
+  // handle to a directory. A directory handle can be passed to some functions
+  // instead of a file handle". More `FILE_FLAG_BACKUP_SEMANTICS` documentation
+  // can be found in MSDN[2].
+  //
+  // The `GENERIC_READ` flag is being used because it's the most common way of
+  // opening a file for reading only. The `SHARE` flags allow other processes
+  // to read the file at the same time, as well as allow this process to read
+  // files that were also opened with these flags. MSDN[1] provides a more
+  // detailed explanation of these flags.
+  //
+  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363858(v=vs.85).aspx // NOLINT(whitespace/line_length)
+  // [2] https://msdn.microsoft.com/en-us/library/windows/desktop/aa364399(v=vs.85).aspx // NOLINT(whitespace/line_length)
+  const DWORD access_flags = resolved_path_is_directory
+    ? FILE_FLAG_BACKUP_SEMANTICS
+    : FILE_ATTRIBUTE_NORMAL;
+
+  const HANDLE handle = ::CreateFileW(
+      longpath(absolute_path).data(),
+      GENERIC_READ,     // Open the file for reading only.
+      // Must pass in all SHARE flags below, in case file is already open.
+      // Otherwise, we may get an access denied error.
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr,          // Ignored.
+      OPEN_EXISTING,    // Open existing file.
+      access_flags,     // Open file, not the symlink itself.
+      nullptr);         // Ignored.
+
+  if (handle == INVALID_HANDLE_VALUE) {
+    return WindowsError();
+  }
+
+  return SharedHandle(handle, ::CloseHandle);
+}
+
+
 // Attempts to get a file or folder handle for an absolute path, and does not
 // follow symlinks. That is, if the path points at a symlink, the handle will
 // refer to the symlink rather than the file or folder the symlink points at.
 inline Try<SharedHandle> get_handle_no_follow(const std::string& absolute_path)
 {
-  const Try<DWORD> attributes = ::internal::windows::get_file_attributes(
-      ::internal::windows::longpath(absolute_path));
+  const Try<DWORD> attributes = get_file_attributes(longpath(absolute_path));
 
   if (attributes.isError()) {
     return Error(attributes.error());
@@ -203,12 +237,13 @@ inline Try<SharedHandle> get_handle_no_follow(const std::string& absolute_path)
   // can be found in MSDN[2].
   //
   // The `GENERIC_READ` flag is being used because it's the most common way of
-  // opening a file for reading only. The `FILE_SHARE_READ` allows other
-  // processes to read the file at the same time. MSDN[1] provides a more
+  // opening a file for reading only. The `SHARE` flags allow other processes
+  // to read the file at the same time, as well as allow this process to read
+  // files that were also opened with these flags. MSDN[1] provides a more
   // detailed explanation of these flags.
   //
-  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363858(v=vs.85).aspx
-  // [2] https://msdn.microsoft.com/en-us/library/windows/desktop/aa364399(v=vs.85).aspx
+  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363858(v=vs.85).aspx // NOLINT(whitespace/line_length)
+  // [2] https://msdn.microsoft.com/en-us/library/windows/desktop/aa364399(v=vs.85).aspx // NOLINT(whitespace/line_length)
   const DWORD access_flags = resolved_path_is_directory
     ? (FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
     : FILE_FLAG_OPEN_REPARSE_POINT;
@@ -216,19 +251,19 @@ inline Try<SharedHandle> get_handle_no_follow(const std::string& absolute_path)
   const HANDLE handle = ::CreateFileW(
       longpath(absolute_path).data(),
       GENERIC_READ,     // Open the file for reading only.
-      FILE_SHARE_READ,  // Just reading this file, allow others to do the same.
+      // Must pass in all SHARE flags below, in case file is already open.
+      // Otherwise, we may get an access denied error.
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
       nullptr,          // Ignored.
       OPEN_EXISTING,    // Open existing symlink.
       access_flags,     // Open symlink, not the file it points to.
       nullptr);         // Ignored.
 
   if (handle == INVALID_HANDLE_VALUE) {
-    return WindowsError(
-        "'internal::windows::get_handle_no_follow': 'CreateFile' call failed "
-        "at path '" + absolute_path + "'");
+    return WindowsError();
   }
 
-  return SharedHandle(handle, CloseHandle);
+  return SharedHandle(handle, ::CloseHandle);
 }
 
 
@@ -251,14 +286,10 @@ inline Try<SymbolicLink> get_symbolic_link_data(const HANDLE handle)
   // Finally, for context, it may be worth looking at the MSDN
   // documentation[3] for `DeviceIoControl` itself.
   //
-  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa364571(v=vs.85).aspx
+  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa364571(v=vs.85).aspx // NOLINT(whitespace/line_length)
   // [2] https://svn.boost.org/trac/boost/ticket/4663
-  // [3] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363216(v=vs.85).aspx
-  const size_t reparse_point_data_size = MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
-  BYTE buffer[reparse_point_data_size];
-  REPARSE_DATA_BUFFER* reparse_point_data =
-    reinterpret_cast<REPARSE_DATA_BUFFER*>(buffer);
-
+  // [3] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363216(v=vs.85).aspx // NOLINT(whitespace/line_length)
+  REPARSE_DATA_BUFFER buffer;
   DWORD ignored = 0;
 
   // The semantics of this function are: get the reparse data associated with
@@ -269,8 +300,8 @@ inline Try<SymbolicLink> get_symbolic_link_data(const HANDLE handle)
       FSCTL_GET_REPARSE_POINT,  // Gets reparse point data for file/folder.
       nullptr,                  // Ignored.
       0,                        // Ignored.
-      reparse_point_data,
-      reparse_point_data_size,
+      &buffer,
+      sizeof(buffer),
       &ignored,                 // Ignored.
       nullptr);                 // Ignored.
 
@@ -280,91 +311,60 @@ inline Try<SymbolicLink> get_symbolic_link_data(const HANDLE handle)
         "failed");
   }
 
-  return build_symbolic_link(*reparse_point_data);
+  return build_symbolic_link(buffer);
 }
 
 
 // Creates a reparse point with the specified target. The target can be either
 // a file (in which case a junction is created), or a folder (in which case a
 // mount point is created).
-//
-// Calling this function results in a temporary elevation of the process token's
-// privileges (if those privileges are not already held), to allow for junction
-// or mount point creation. This operation is gated by a static mutex, which
-// makes it thread-safe.
 inline Try<Nothing> create_symbolic_link(
     const std::string& target,
     const std::string& reparse_point)
 {
-  // Normalize input paths.
-  const Result<std::string> real_reparse_point_path =
-    os::realpath(reparse_point);
-
-  const Result<std::string> real_target_path = os::realpath(target);
-
-  if (!real_reparse_point_path.isSome()) {
-    return Error(
-        "Failed to get realpath for '" +
-        reparse_point + "': " + (real_reparse_point_path.isError() ?
-        real_reparse_point_path.error() : "No such directory"));
-  }
-
-  if (!real_target_path.isSome()) {
-    return Error(
-        "Failed to get realpath for '" +
-        target + "': " + (real_target_path.isError() ?
-        real_target_path.error() : "No such directory"));
-  }
-
-  const std::string& absolute_target_path = real_target_path.get();
-
   // Determine if target is a folder or a file. This makes a difference
   // in the way we call `create_symbolic_link`.
-  const Try<DWORD> attributes = ::internal::windows::get_file_attributes(
-      ::internal::windows::longpath(absolute_target_path));
+  const Try<DWORD> attributes = get_file_attributes(longpath(target));
 
-  if (attributes.isError()) {
-    return Error(attributes.error());
+  bool target_is_folder = false;
+  if (attributes.isSome()) {
+    target_is_folder = attributes.get() & FILE_ATTRIBUTE_DIRECTORY;
   }
-
-  const bool target_is_folder = attributes.get() & FILE_ATTRIBUTE_DIRECTORY;
 
   // Bail out if target is already a reparse point.
-  Try<bool> attribute_set = reparse_point_attribute_set(
-      longpath(absolute_target_path));
-
-  if (!attribute_set.isSome()) {
-    return Error(
-        "Could not get reparse point attribute for '" + absolute_target_path +
-        "'" + (attribute_set.isError() ? ": " + attribute_set.error() : ""));
+  Try<bool> attribute_set = reparse_point_attribute_set(longpath(target));
+  if (attribute_set.isSome() && attribute_set.get()) {
+    return Error("Path '" + target + "' is already a reparse point");
   }
 
-  if (attribute_set.get()) {
-    return Error(
-        "Path '" + absolute_target_path + "' is already a reparse point");
+  DWORD flags = target_is_folder ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0;
+
+  // Lambda to create symlink with given flags.
+  auto link = [&reparse_point, &target](const DWORD flags) {
+    return ::CreateSymbolicLinkW(
+        // Path to link.
+        longpath(reparse_point).data(),
+        // Path to target.
+        longpath(target).data(),
+        flags);
+  };
+
+  // `CreateSymbolicLink` normally adjusts the process token's privileges to
+  // allow for symlink creation; however, we explicitly avoid this with the
+  // following flag to not require administrative privileges.
+  if (link(flags | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    return Nothing();
   }
 
-  // `CreateSymbolicLink` adjusts the process token's privileges to allow for
-  // symlink creation. MSDN[1] makes no guarantee when it comes to the thread
-  // safety of this operation, so we are making use of a mutex to prevent
-  // multiple concurrent calls.
-  //
-  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa363866(v=vs.85).aspx
-  static std::mutex adjust_privileges_mutex;
-  synchronized(adjust_privileges_mutex) {
-    if (!::CreateSymbolicLinkW(
-            // Path to link.
-            longpath(real_reparse_point_path.get()).data(),
-            // Path to target.
-            longpath(real_target_path.get()).data(),
-            target_is_folder ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0)) {
-      return WindowsError(
-          "'internal::windows::create_symbolic_link': 'CreateSymbolicLink' "
-          "call failed");
+  // If this failed because the non-symbolic link feature was not supported,
+  // try again without the feature. This is for legacy support.
+  if (::GetLastError() == ERROR_INVALID_PARAMETER) {
+    if (link(flags)) {
+      return Nothing();
     }
   }
 
-  return Nothing();
+  return WindowsError();
 }
 
 } // namespace windows {

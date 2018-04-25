@@ -31,7 +31,7 @@
 
 #ifdef __linux__
 #include "linux/fs.hpp"
-#endif
+#endif // __linux__
 
 #include "slave/containerizer/mesos/provisioner/constants.hpp"
 #include "slave/containerizer/mesos/provisioner/paths.hpp"
@@ -432,13 +432,19 @@ TEST_F(ProvisionerDockerTest, ROOT_LocalPullerSimpleCommand)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -462,8 +468,10 @@ INSTANTIATE_TEST_CASE_P(
     ::testing::ValuesIn(vector<string>({
         "alpine", // Verifies the normalization of the Docker repository name.
         "library/alpine",
-        "quay.io/coreos/alpine-sh",
-        "registry.cn-hangzhou.aliyuncs.com/acs-sample/alpine"})));
+        // TODO(alexr): The registry below is unreliable and hence disabled.
+        // Consider re-enabling shall it become more stable.
+        // "registry.cn-hangzhou.aliyuncs.com/acs-sample/alpine",
+        "quay.io/coreos/alpine-sh"})));
 
 
 // TODO(jieyu): This is a ROOT test because of MESOS-4757. Remove the
@@ -526,15 +534,21 @@ TEST_P(ProvisionerDockerTest, ROOT_INTERNET_CURL_SimpleCommand)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY_FOR(statusRunning, Minutes(10));
+  AWAIT_READY_FOR(statusStarting, Minutes(10));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
+  AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -600,13 +614,19 @@ TEST_F(ProvisionerDockerTest, ROOT_INTERNET_CURL_ScratchImage)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -654,7 +674,7 @@ INSTANTIATE_TEST_CASE_P(
 
 // This test verifies that a docker image containing whiteout files
 // will be processed correctly by copy, aufs and overlay backends.
-TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Whiteout)
+TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_DTYPE_Whiteout)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -712,15 +732,21 @@ TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Whiteout)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
+  AWAIT_READY(statusRunning);
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -736,7 +762,7 @@ TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Whiteout)
 // This test verifies that the provisioner correctly overwrites a
 // directory in underlying layers with a with a regular file or symbolic
 // link of the same name in an upper layer, and vice versa.
-TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Overwrite)
+TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_DTYPE_Overwrite)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -798,9 +824,11 @@ TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Overwrite)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
@@ -815,6 +843,10 @@ TEST_P(ProvisionerDockerBackendTest, ROOT_INTERNET_CURL_Overwrite)
   ASSERT_SOME(os::shell("test -s " + hostFile));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -894,13 +926,19 @@ TEST_F(ProvisionerDockerTest, ROOT_INTERNET_CURL_ImageDigest)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -979,13 +1017,19 @@ TEST_F(ProvisionerDockerTest, ROOT_INTERNET_CURL_CommandTaskUser)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -1022,11 +1066,11 @@ TEST_F(ProvisionerDockerTest, ROOT_RecoverNestedOnReboot)
   ASSERT_SOME(provisioner);
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ContainerID nestedContainerId;
   nestedContainerId.mutable_parent()->CopyFrom(containerId);
-  nestedContainerId.set_value(UUID::random().toString());
+  nestedContainerId.set_value(id::UUID::random().toString());
 
   Image image;
   image.set_type(Image::DOCKER);
@@ -1045,7 +1089,7 @@ TEST_F(ProvisionerDockerTest, ROOT_RecoverNestedOnReboot)
   EXPECT_FALSE(os::exists(containerDir));
 }
 
-#endif
+#endif // __linux__
 
 } // namespace tests {
 } // namespace internal {

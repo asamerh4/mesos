@@ -14,7 +14,7 @@
 #define __PROCESS_DISPATCH_HPP__
 
 #include <functional>
-#include <memory> // TODO(benh): Replace shared_ptr with unique_ptr.
+#include <memory>
 #include <string>
 
 #include <process/process.hpp>
@@ -60,11 +60,10 @@ namespace internal {
 // this routine does not expect anything in particular about the
 // specified function (second argument). The semantics are simple: the
 // function gets applied/invoked with the process as its first
-// argument. Currently we wrap the function in a shared_ptr but this
-// will probably change in the future to unique_ptr (or a variant).
+// argument.
 void dispatch(
     const UPID& pid,
-    const std::shared_ptr<std::function<void(ProcessBase*)>>& f,
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f,
     const Option<const std::type_info*>& functionType = None());
 
 
@@ -84,13 +83,16 @@ struct Dispatch<void>
   template <typename F>
   void operator()(const UPID& pid, F&& f)
   {
-    std::shared_ptr<std::function<void(ProcessBase*)>> f_(
-        new std::function<void(ProcessBase*)>(
-            [=](ProcessBase*) {
-              f();
-            }));
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f_(
+        new lambda::CallableOnce<void(ProcessBase*)>(
+            lambda::partial(
+                [](typename std::decay<F>::type&& f, ProcessBase*) {
+                  std::move(f)();
+                },
+                std::forward<F>(f),
+                lambda::_1)));
 
-    internal::dispatch(pid, f_);
+    internal::dispatch(pid, std::move(f_));
   }
 };
 
@@ -105,17 +107,24 @@ struct Dispatch<Future<R>>
   template <typename F>
   Future<R> operator()(const UPID& pid, F&& f)
   {
-    std::shared_ptr<Promise<R>> promise(new Promise<R>());
+    std::unique_ptr<Promise<R>> promise(new Promise<R>());
+    Future<R> future = promise->future();
 
-    std::shared_ptr<std::function<void(ProcessBase*)>> f_(
-        new std::function<void(ProcessBase*)>(
-            [=](ProcessBase*) {
-              promise->associate(f());
-            }));
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f_(
+        new lambda::CallableOnce<void(ProcessBase*)>(
+            lambda::partial(
+                [](std::unique_ptr<Promise<R>> promise,
+                   typename std::decay<F>::type&& f,
+                   ProcessBase*) {
+                  promise->associate(std::move(f)());
+                },
+                std::move(promise),
+                std::forward<F>(f),
+                lambda::_1)));
 
-    internal::dispatch(pid, f_);
+    internal::dispatch(pid, std::move(f_));
 
-    return promise->future();
+    return future;
   }
 };
 
@@ -129,17 +138,24 @@ struct Dispatch
   template <typename F>
   Future<R> operator()(const UPID& pid, F&& f)
   {
-    std::shared_ptr<Promise<R>> promise(new Promise<R>());
+    std::unique_ptr<Promise<R>> promise(new Promise<R>());
+    Future<R> future = promise->future();
 
-    std::shared_ptr<std::function<void(ProcessBase*)>> f_(
-        new std::function<void(ProcessBase*)>(
-            [=](ProcessBase*) {
-              promise->set(f());
-            }));
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f_(
+        new lambda::CallableOnce<void(ProcessBase*)>(
+            lambda::partial(
+                [](std::unique_ptr<Promise<R>> promise,
+                   typename std::decay<F>::type&& f,
+                   ProcessBase*) {
+                  promise->set(std::move(f)());
+                },
+                std::move(promise),
+                std::forward<F>(f),
+                lambda::_1)));
 
-    internal::dispatch(pid, f_);
+    internal::dispatch(pid, std::move(f_));
 
-    return promise->future();
+    return future;
   }
 };
 
@@ -157,8 +173,8 @@ struct Dispatch
 template <typename T>
 void dispatch(const PID<T>& pid, void (T::*method)())
 {
-  std::shared_ptr<std::function<void(ProcessBase*)>> f(
-      new std::function<void(ProcessBase*)>(
+  std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f(
+      new lambda::CallableOnce<void(ProcessBase*)>(
           [=](ProcessBase* process) {
             assert(process != nullptr);
             T* t = dynamic_cast<T*>(process);
@@ -166,7 +182,7 @@ void dispatch(const PID<T>& pid, void (T::*method)())
             (t->*method)();
           }));
 
-  internal::dispatch(pid, f, &typeid(method));
+  internal::dispatch(pid, std::move(f), &typeid(method));
 }
 
 template <typename T>
@@ -187,7 +203,8 @@ void dispatch(const Process<T>* process, void (T::*method)())
 
 // The following assumes base names for type and variable are `A` and `a`.
 #define FORWARD(Z, N, DATA) std::forward<A ## N>(a ## N)
-#define DECL(Z, N, DATA) typename std::decay<A ## N>::type& a ## N
+#define MOVE(Z, N, DATA) std::move(a ## N)
+#define DECL(Z, N, DATA) typename std::decay<A ## N>::type&& a ## N
 
 #define TEMPLATE(Z, N, DATA)                                            \
   template <typename T,                                                 \
@@ -198,19 +215,19 @@ void dispatch(const Process<T>* process, void (T::*method)())
       void (T::*method)(ENUM_PARAMS(N, P)),                             \
       ENUM_BINARY_PARAMS(N, A, &&a))                                    \
   {                                                                     \
-    std::shared_ptr<std::function<void(ProcessBase*)>> f(               \
-        new std::function<void(ProcessBase*)>(                          \
-            std::bind([method](ENUM(N, DECL, _),                        \
-                               ProcessBase* process) {                  \
-                        assert(process != nullptr);                     \
-                        T* t = dynamic_cast<T*>(process);               \
-                        assert(t != nullptr);                           \
-                        (t->*method)(ENUM_PARAMS(N, a));                \
-                      },                                                \
-                      ENUM(N, FORWARD, _),                              \
-                      lambda::_1)));                                    \
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f(        \
+        new lambda::CallableOnce<void(ProcessBase*)>(                   \
+            lambda::partial(                                            \
+                [method](ENUM(N, DECL, _), ProcessBase* process) {      \
+                  assert(process != nullptr);                           \
+                  T* t = dynamic_cast<T*>(process);                     \
+                  assert(t != nullptr);                                 \
+                  (t->*method)(ENUM(N, MOVE, _));                       \
+                },                                                      \
+                ENUM(N, FORWARD, _),                                    \
+                lambda::_1)));                                          \
                                                                         \
-    internal::dispatch(pid, f, &typeid(method));                        \
+    internal::dispatch(pid, std::move(f), &typeid(method));             \
   }                                                                     \
                                                                         \
   template <typename T,                                                 \
@@ -235,7 +252,7 @@ void dispatch(const Process<T>* process, void (T::*method)())
     dispatch(process->self(), method, ENUM(N, FORWARD, _));             \
   }
 
-  REPEAT_FROM_TO(1, 12, TEMPLATE, _) // Args A0 -> A10.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
 
 
@@ -244,20 +261,24 @@ void dispatch(const Process<T>* process, void (T::*method)())
 template <typename R, typename T>
 Future<R> dispatch(const PID<T>& pid, Future<R> (T::*method)())
 {
-  std::shared_ptr<Promise<R>> promise(new Promise<R>());
+  std::unique_ptr<Promise<R>> promise(new Promise<R>());
+  Future<R> future = promise->future();
 
-  std::shared_ptr<std::function<void(ProcessBase*)>> f(
-      new std::function<void(ProcessBase*)>(
-          [=](ProcessBase* process) {
-            assert(process != nullptr);
-            T* t = dynamic_cast<T*>(process);
-            assert(t != nullptr);
-            promise->associate((t->*method)());
-          }));
+  std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f(
+      new lambda::CallableOnce<void(ProcessBase*)>(
+          lambda::partial(
+              [=](std::unique_ptr<Promise<R>> promise, ProcessBase* process) {
+                assert(process != nullptr);
+                T* t = dynamic_cast<T*>(process);
+                assert(t != nullptr);
+                promise->associate((t->*method)());
+              },
+              std::move(promise),
+              lambda::_1)));
 
-  internal::dispatch(pid, f, &typeid(method));
+  internal::dispatch(pid, std::move(f), &typeid(method));
 
-  return promise->future();
+  return future;
 }
 
 template <typename R, typename T>
@@ -282,24 +303,28 @@ Future<R> dispatch(const Process<T>* process, Future<R> (T::*method)())
       Future<R> (T::*method)(ENUM_PARAMS(N, P)),                        \
       ENUM_BINARY_PARAMS(N, A, &&a))                                    \
   {                                                                     \
-    std::shared_ptr<Promise<R>> promise(new Promise<R>());              \
+    std::unique_ptr<Promise<R>> promise(new Promise<R>());              \
+    Future<R> future = promise->future();                               \
                                                                         \
-    std::shared_ptr<std::function<void(ProcessBase*)>> f(               \
-        new std::function<void(ProcessBase*)>(                          \
-            std::bind([promise, method](ENUM(N, DECL, _),               \
-                                        ProcessBase* process) {         \
-                        assert(process != nullptr);                     \
-                        T* t = dynamic_cast<T*>(process);               \
-                        assert(t != nullptr);                           \
-                        promise->associate(                             \
-                            (t->*method)(ENUM_PARAMS(N, a)));           \
-                      },                                                \
-                      ENUM(N, FORWARD, _),                              \
-                      lambda::_1)));                                    \
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f(        \
+        new lambda::CallableOnce<void(ProcessBase*)>(                   \
+            lambda::partial(                                            \
+                [method](std::unique_ptr<Promise<R>> promise,           \
+                         ENUM(N, DECL, _),                              \
+                         ProcessBase* process) {                        \
+                  assert(process != nullptr);                           \
+                  T* t = dynamic_cast<T*>(process);                     \
+                  assert(t != nullptr);                                 \
+                  promise->associate(                                   \
+                      (t->*method)(ENUM(N, MOVE, _)));                  \
+                },                                                      \
+                std::move(promise),                                     \
+                ENUM(N, FORWARD, _),                                    \
+                lambda::_1)));                                          \
                                                                         \
-    internal::dispatch(pid, f, &typeid(method));                        \
+    internal::dispatch(pid, std::move(f), &typeid(method));             \
                                                                         \
-    return promise->future();                                           \
+    return future;                                                      \
   }                                                                     \
                                                                         \
   template <typename R,                                                 \
@@ -326,7 +351,7 @@ Future<R> dispatch(const Process<T>* process, Future<R> (T::*method)())
     return dispatch(process->self(), method, ENUM(N, FORWARD, _));      \
   }
 
-  REPEAT_FROM_TO(1, 12, TEMPLATE, _) // Args A0 -> A10.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
 
 
@@ -335,20 +360,24 @@ Future<R> dispatch(const Process<T>* process, Future<R> (T::*method)())
 template <typename R, typename T>
 Future<R> dispatch(const PID<T>& pid, R (T::*method)())
 {
-  std::shared_ptr<Promise<R>> promise(new Promise<R>());
+  std::unique_ptr<Promise<R>> promise(new Promise<R>());
+  Future<R> future = promise->future();
 
-  std::shared_ptr<std::function<void(ProcessBase*)>> f(
-      new std::function<void(ProcessBase*)>(
-          [=](ProcessBase* process) {
-            assert(process != nullptr);
-            T* t = dynamic_cast<T*>(process);
-            assert(t != nullptr);
-            promise->set((t->*method)());
-          }));
+  std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f(
+      new lambda::CallableOnce<void(ProcessBase*)>(
+          lambda::partial(
+              [=](std::unique_ptr<Promise<R>> promise, ProcessBase* process) {
+                assert(process != nullptr);
+                T* t = dynamic_cast<T*>(process);
+                assert(t != nullptr);
+                promise->set((t->*method)());
+              },
+              std::move(promise),
+              lambda::_1)));
 
-  internal::dispatch(pid, f, &typeid(method));
+  internal::dispatch(pid, std::move(f), &typeid(method));
 
-  return promise->future();
+  return future;
 }
 
 template <typename R, typename T>
@@ -373,23 +402,27 @@ Future<R> dispatch(const Process<T>* process, R (T::*method)())
       R (T::*method)(ENUM_PARAMS(N, P)),                                \
       ENUM_BINARY_PARAMS(N, A, &&a))                                    \
   {                                                                     \
-    std::shared_ptr<Promise<R>> promise(new Promise<R>());              \
+    std::unique_ptr<Promise<R>> promise(new Promise<R>());              \
+    Future<R> future = promise->future();                               \
                                                                         \
-    std::shared_ptr<std::function<void(ProcessBase*)>> f(               \
-        new std::function<void(ProcessBase*)>(                          \
-            std::bind([promise, method](ENUM(N, DECL, _),               \
-                                        ProcessBase* process) {         \
-                        assert(process != nullptr);                     \
-                        T* t = dynamic_cast<T*>(process);               \
-                        assert(t != nullptr);                           \
-                        promise->set((t->*method)(ENUM_PARAMS(N, a)));  \
-                      },                                                \
-                      ENUM(N, FORWARD, _),                              \
-                      lambda::_1)));                                    \
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f(        \
+        new lambda::CallableOnce<void(ProcessBase*)>(                   \
+            lambda::partial(                                            \
+                [method](std::unique_ptr<Promise<R>> promise,           \
+                         ENUM(N, DECL, _),                              \
+                         ProcessBase* process) {                        \
+                  assert(process != nullptr);                           \
+                  T* t = dynamic_cast<T*>(process);                     \
+                  assert(t != nullptr);                                 \
+                  promise->set((t->*method)(ENUM(N, MOVE, _)));         \
+                },                                                      \
+                std::move(promise),                                     \
+                ENUM(N, FORWARD, _),                                    \
+                lambda::_1)));                                          \
                                                                         \
-    internal::dispatch(pid, f, &typeid(method));                        \
+    internal::dispatch(pid, std::move(f), &typeid(method));             \
                                                                         \
-    return promise->future();                                           \
+    return future;                                                      \
   }                                                                     \
                                                                         \
   template <typename R,                                                 \
@@ -416,10 +449,11 @@ Future<R> dispatch(const Process<T>* process, R (T::*method)())
     return dispatch(process->self(), method, ENUM(N, FORWARD, _));      \
   }
 
-  REPEAT_FROM_TO(1, 12, TEMPLATE, _) // Args A0 -> A10.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
 
 #undef DECL
+#undef MOVE
 #undef FORWARD
 
 // We use partial specialization of

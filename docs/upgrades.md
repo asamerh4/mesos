@@ -43,6 +43,49 @@ We categorize the changes as follows:
   </thead>
 <tr>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
+  1.5.x
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
+    <ul style="padding-left:10px;">
+      <li>C <a href="#1-5-x-task-starting">Built-in executors send a TASK_STARTING update</a></li>
+      <li>A <a href="#1-5-x-network-ports-isolator">Network ports isolator</a></li>
+      <li>C <a href="#1-5-x-relative-disk-source-root-path">Relative source root paths for disk resources</a></li>
+      <li>A <a href="#1-5-x-reconfiguration-policy">Agent state recovery after resource changes</a></li>
+      <li>C <a href="#1-5-x-protobuf-requirement">Requirement for Protobuf library</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-5-x-network-ports-isolator">container_ports_watch_interval</a></li>
+      <li>A <a href="#1-5-x-network-ports-isolator">check_agent_port_range_only</a></li>
+      <li>D <a href="#1-5-x-executor-secret-key">executor_secret_key</a></li>
+      <li>A <a href="#1-5-x-reconfiguration-policy">reconfiguration_policy</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-5-x-task-resource-limitation">Added the TaskStatus.limitation message</a></li>
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
+    <ul style="padding-left:10px;">
+    </ul>
+  </td>
+
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <ul style="padding-left:10px;">
+      <li>A <a href="#1-5-x-get-containers">Allowed to view nested/standalone containers</a></li>
+    </ul>
+  </td>
+
+</tr>
+
+<tr>
+  <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
   1.4.x
   </td>
 
@@ -67,12 +110,13 @@ We categorize the changes as follows:
     <ul style="padding-left:10px;">
       <li>A <a href="#1-4-x-bounding-capabilities">Support for explicit setting bounding capabilities</a></li>
       <li>D <a href="#1-4-x-linuxinfo-capabilities">LinuxInfo.effective_capabilities deprecates LinuxInfo.capabilities</a></li>
+      <li>C <a href="#1-4-x-mesos-library">`Resources` class in the internal Mesos C++ library only supports post-`RESERVATION_REFINEMENT` format</a></li>
     </ul>
   </td>
 
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
     <ul style="padding-left:10px;">
-      <li>C <a href="1-4-x-allocator-update-slave">Changed semantics of Allocator::updateSlave</a></li>
+      <li>C <a href="#1-4-x-allocator-update-slave">Changed semantics of Allocator::updateSlave</a></li>
     </ul>
   </td>
 
@@ -316,6 +360,58 @@ We categorize the changes as follows:
 </tr>
 </table>
 
+## Upgrading from 1.4.x to 1.5.x ##
+
+<a name="1-5-x-task-starting"></a>
+
+* The built-in executors will now send a `TASK_STARTING` status update for
+  every task they've successfully received and are about to start.
+  The possibility of any executor sending this update has been documented since
+  the beginning of Mesos, but prior to this version the built-in executors did
+  not actually send it. This means that all schedulers using one of the built-in
+  executors must be upgraded to expect `TASK_STARTING` updates before upgrading
+  Mesos itself.
+
+<a name="1-5-x-task-resource-limitation"></a>
+
+* A new field, `limitation`, was added to the `TaskStatus` message. This
+  field is a `TaskResourceLimitation` message that describes the resources
+  that caused a task to fail with a resource limitation reason.
+
+<a name="1-5-x-network-ports-isolator"></a>
+
+* A new [`network/ports`](isolators/network-ports.md) isolator has been added. The isolator supports the following new agent flags:
+  * `--container_ports_watch_interval` specifies the interval at which the isolator reconciles port assignments.
+  * `--check_agent_port_range_only` excludes ports outside the agent's range from port reconcilation.
+
+<a name="1-5-x-executor-secret-key"></a>
+
+* Agent flag `--executor_secret_key` has been deprecated. Operators should use `--jwt_secret_key` instead.
+
+<a name="1-5-x-relative-disk-source-root-path"></a>
+
+* The fields `Resource.disk.source.path.root` and `Resource.disk.source.mount.root` can now be set to relative paths to an agent's work directory. The containerizers will interpret the paths based on the `--work_dir` flag on an agent.
+
+<a name="1-5-x-get-containers"></a>
+
+* The agent operator API call `GET_CONTAINERS` has been updated to support listing nested or standalone containers. One can specify the following fields in the request:
+  * `show_nested`: Whether to show nested containers.
+  * `show_standalone`: Whether to show standalone containers.
+
+<a name="1-5-x-reconfiguration-policy"></a>
+
+* A new agent flag `--reconfiguration_policy` has been added. By setting the value of this flag to `additive`,
+  operators can allow the agent to be restarted with increased resources without requiring the agent ID to be
+  changed. Note that if this feature is used, the master version is required to be >= 1.5 as well.
+
+<a name="1-5-x-protobuf-requirement"></a>
+
+* Protobuf version 3+ is required to build Mesos. Please upgrade your Protobuf library if you are using an unbundled one.
+
+<a name="1-5-x-log-reader-catchup"></a>
+
+* A new `catchup()` method has been added to the replicated log reader API. The method allows to catch-up positions missing in the local non-leading replica to allow safe eventually consistent reads from it. Note about backwards compatibility: In order for the feature to work correctly in presence of log truncations all log replicas need to be updated.
+
 ## Upgrading from 1.3.x to 1.4.x ##
 
 <a name="1-4-x-ambient-capabilities"></a>
@@ -350,6 +446,10 @@ We categorize the changes as follows:
 <a name="1-4-x-xfs-no-enforce"></a>
 
 * The XFS Disk Isolator now supports the `--no-enforce_container_disk_quota` option to efficiently measure disk resource usage without enforcing any usage limits.
+
+<a name="1-4-x-mesos-library"></a>
+
+* The `Resources` class in the internal Mesos C++ library changed its behavior to only support post-`RESERVATION_REFINEMENT` format. If a framework is using this internal utility, it is likely to break if the `RESERVATION_REFINEMENT` capability is not enabled.
 
 ## Upgrading from 1.2.x to 1.3.x ##
 
@@ -485,7 +585,7 @@ In order to upgrade a running cluster:
 
 <a name="1-0-x-executor-environment-variables"></a>
 
-* By default, executors will no longer inherit environment variables from the agent. The operator can still use the `--executor-environment-variables` flag on the agent to explicitly specify what environment variables the executors will get. Mesos generated environment variables (i.e., `$MESOS_`, `$LIBPROCESS_`) will not be affected. If `$PATH` is not specified for an executor, a default value `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` will be used.
+* By default, executors will no longer inherit environment variables from the agent. The operator can still use the `--executor_environment_variables` flag on the agent to explicitly specify what environment variables the executors will get. Mesos generated environment variables (i.e., `$MESOS_`, `$LIBPROCESS_`) will not be affected. If `$PATH` is not specified for an executor, a default value `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` will be used.
 
 <a name="1-0-x-allocator-metrics"></a>
 

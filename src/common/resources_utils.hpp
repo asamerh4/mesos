@@ -24,6 +24,9 @@
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 
+#include <mesos/v1/mesos.hpp>
+#include <mesos/v1/resources.hpp>
+
 #include <stout/error.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
@@ -44,6 +47,37 @@ bool needCheckpointing(const Resource& resource);
 Try<Resources> applyCheckpointedResources(
     const Resources& resources,
     const Resources& checkpointedResources);
+
+
+// Returns the resource provider ID associated with the given
+// operation. Returns None() if the operation is for agent default
+// resources. We assume the given operation is validated. Therefore,
+// the specified operation should not contain resources from more than
+// one resource provider.
+Result<ResourceProviderID> getResourceProviderId(
+    const Offer::Operation& operation);
+
+
+// Returns the ID of the resource provider affected by a resource
+// conversion. Returns None() if the conversion is on agent default
+// resources. We assume a single conversion only being applied on
+// resources from a single resource provider.
+Result<ResourceProviderID> getResourceProviderId(
+    const ResourceConversion& conversion);
+
+
+// Returns the resource conversions from the given offer operation.
+// This helper assumes that the given operation has already been
+// validated.
+Try<std::vector<ResourceConversion>> getResourceConversions(
+    const Offer::Operation& operation);
+
+
+// Returns the resource conversions from the given offer operation.
+// This helper assumes that the given operation has already been
+// validated.
+Try<std::vector<v1::ResourceConversion>> getResourceConversions(
+    const v1::Offer::Operation& operation);
 
 
 // Resource format options to be used with the `convertResourceFormat` function.
@@ -132,6 +166,20 @@ void convertResourceFormat(
     ResourceFormat format);
 
 
+// Convert any resources contained in the given message(s)
+// to the "post-reservation-refinement" format.
+void upgradeResource(Resource* resource);
+
+
+void upgradeResources(google::protobuf::RepeatedPtrField<Resource>* resources);
+
+
+void upgradeResources(std::vector<Resource>* resources);
+
+
+void upgradeResources(google::protobuf::Message* message);
+
+
 // Convert the resources in the given `Operation` to the
 // "post-reservation-refinement" format from any format
 // ("pre-", "post-" or "endpoint") if all of the resources are valid.
@@ -140,15 +188,34 @@ void convertResourceFormat(
 // NOTE: The validate and upgrade steps are bundled because currently
 // it would be an error to validate but not upgrade or to upgrade
 // without validating.
-Option<Error> validateAndNormalizeResources(Offer::Operation* operation);
+Option<Error> validateAndUpgradeResources(Offer::Operation* operation);
 
 
-// Convert the given resources to the "pre-reservation-refinement" format
-// if none of the resources have refined reservations. Returns an `Error`
-// if there are any refined reservations present; in this case, the resources
-// are left in the "post-reservation-refinement" format.
+// Convert any resources contained in the given message(s)
+// to the "pre-reservation-refinement" format, if possible.
+//
+// These functions do not provide "all-or-nothing" semantics.
+// The resources are downgraded to "pre-" format until either
+//   (1) there are no more resources, or
+//   (2) a non-downgradable resource is encountered.
+//
+// For (1), `Nothing` is returned.
+// For (2), `Error` is returned, and the rest of the resources are untouched.
+//
+// This implies that components that have refined resources created cannot
+// be downgraded to a version that does not support reservation refinement.
+Try<Nothing> downgradeResource(Resource* resource);
+
+
 Try<Nothing> downgradeResources(
     google::protobuf::RepeatedPtrField<Resource>* resources);
+
+
+Try<Nothing> downgradeResources(std::vector<Resource>* resources);
+
+
+Try<Nothing> downgradeResources(google::protobuf::Message* message);
+
 
 } // namespace mesos {
 

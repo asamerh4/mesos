@@ -29,6 +29,8 @@
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include <stout/tests/utils.hpp>
 
 #include <mesos/appc/spec.hpp>
@@ -373,8 +375,8 @@ TEST_F(ProvisionerAppcTest, ROOT_ProvisionNestedContainer)
   ContainerID parent;
   ContainerID child;
 
-  parent.set_value(UUID::random().toString());
-  child.set_value(UUID::random().toString());
+  parent.set_value(id::UUID::random().toString());
+  child.set_value(id::UUID::random().toString());
   child.mutable_parent()->CopyFrom(parent);
 
   Future<slave::ProvisionInfo> provisionInfo =
@@ -441,7 +443,7 @@ TEST_F(ProvisionerAppcTest, Recover)
   image.mutable_appc()->CopyFrom(getTestImage());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Future<slave::ProvisionInfo> provisionInfo =
     provisioner.get()->provision(containerId, image);
@@ -514,8 +516,8 @@ TEST_F(ProvisionerAppcTest, RecoverNestedContainer)
   ContainerID parent;
   ContainerID child;
 
-  parent.set_value(UUID::random().toString());
-  child.set_value(UUID::random().toString());
+  parent.set_value(id::UUID::random().toString());
+  child.set_value(id::UUID::random().toString());
   child.mutable_parent()->CopyFrom(parent);
 
   AWAIT_READY(provisioner.get()->provision(parent, image));
@@ -583,8 +585,8 @@ TEST_F(ProvisionerAppcTest, RecoverNestedContainerNoParentImage)
   ContainerID parent;
   ContainerID child;
 
-  parent.set_value(UUID::random().toString());
-  child.set_value(UUID::random().toString());
+  parent.set_value(id::UUID::random().toString());
+  child.set_value(id::UUID::random().toString());
   child.mutable_parent()->CopyFrom(parent);
 
   AWAIT_READY(provisioner.get()->provision(child, image));
@@ -1018,14 +1020,20 @@ TEST_F(AppcProvisionerIntegrationTest, ROOT_SimpleLinuxImageTest)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(120));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(120));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());

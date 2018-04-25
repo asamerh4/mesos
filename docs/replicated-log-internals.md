@@ -40,7 +40,7 @@ Each replica keeps an array of log entries. The array index is the log position.
 
 ### Reaching consensus for a single log entry
 
-A Paxos round can help all replicas reach consensus on a single log entry's value. It has two phases: a promise phase and a write phase. Note that we are using slightly different terminology from the [original Paxos paper](https://research.microsoft.com/en-us/um/people/lamport/pubs/paxes-simple.pdf). In our implementation, the _prepare_ and _accept_ phases in the original paper are referred to as the _promise_ and _write_ phases, respectively. Consequently, a prepare request (response) is referred to as a promise request (response), and an accept request (response) is referred to as a write request (response).
+A Paxos round can help all replicas reach consensus on a single log entry's value. It has two phases: a promise phase and a write phase. Note that we are using slightly different terminology from the [original Paxos paper](https://research.microsoft.com/en-us/um/people/lamport/pubs/paxos-simple.pdf). In our implementation, the _prepare_ and _accept_ phases in the original paper are referred to as the _promise_ and _write_ phases, respectively. Consequently, a prepare request (response) is referred to as a promise request (response), and an accept request (response) is referred to as a write request (response).
 
 To append value _X_ to the log at position _p_, the coordinator first broadcasts a promise request to all replicas with proposal number _n_, asking replicas to promise that they will not respond to any request (promise/write request) with a proposal number lower than _n_. We assume that _n_ is higher than any other previously used proposal number, and will explain how we do this later.
 
@@ -107,11 +107,19 @@ Here is our correctness argument. For a log entry at position _e_ where _e_ is l
 
 ### Auto initialization
 
-Since we don't allow an empty replica (a replica in EMPTY status) to respond to requests from coordinators, that raises a question for bootstrapping because initially, each replica is empty. The replicated log provides two choices here. One choice is to use a tool (`mesos-log) to explicitly initialize the log on each replica by setting the replica's status to VOTING, but that requires an extra step when setting up an application.
+Since we don't allow an empty replica (a replica in EMPTY status) to respond to requests from coordinators, that raises a question for bootstrapping because initially, each replica is empty. The replicated log provides two choices here. One choice is to use a tool (`mesos-log`) to explicitly initialize the log on each replica by setting the replica's status to VOTING, but that requires an extra step when setting up an application.
 
 The other choice is to do automatic initialization. Our idea is: we allow a replica in EMPTY status to become VOTING immediately if it finds all replicas are in EMPTY status. This is based on the assumption that the only time _all_ replicas are in EMPTY status is during start-up. This may not be true if a catastrophic failure causes all replicas to lose their durable state, and that's exactly the reason we allow conservative users to disable auto-initialization.
 
 To do auto-initialization, if we use a single-phase protocol and allow a replica to directly transit from EMPTY status to VOTING status, we may run into a state where we cannot make progress even if all replicas are in EMPTY status initially. For example, say the quorum size is 2. All replicas are in EMPTY status initially. One replica will first set its status to VOTING because if finds all replicas are in EMPTY status. After that, neither the VOTING replica nor the EMPTY replicas can make progress. To solve this problem, we use a two-phase protocol and introduce an intermediate transient status (STARTING) between EMPTY and VOTING status. A replica in EMPTY status can transit to STARTING status if it finds all replicas are in either EMPTY or STARTING status. A replica in STARTING status can transit to VOTING status if it finds all replicas are in either STARTING or VOTING status. In that way, in our previous example, all replicas will be in STARTING status before any of them can transit to VOTING status.
+
+## Non-leading VOTING replica catch-up
+
+Starting with Mesos 1.5.0 it is possible to perform eventually consistent reads from a non-leading VOTING log replica. This makes possible to do additional work on non-leading framework replicas, e.g. offload some reading from a leader to standbys reduce failover time by keeping in-memory storage represented by the replicated log "hot".
+
+To serve eventually consistent reads a replica needs to perform _catch-up_ to recover the latest log state in a manner similar to how it is done during [EMPTY replica recovery](#catch-up). After that the recovered positions can be replayed without fear of seeing "holes".
+
+A truncation can take place during the non-leading replica catch-up. The replica may try to fill the truncated position if truncation happens after the replica has recovered _begin_ and _end_ positions, which may lead to producing inconsistent data during log replay. In order to protect against it we use a special tombstone flag that signals to the replica that the position was truncated and _begin_ needs to be adjusted. The replica is not blocked from truncations during or after catching-up, which means that the user may need to retry the catch-up procedure if positions that were recovered became truncated during log replay.
 
 ## Future work
 

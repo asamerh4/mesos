@@ -54,7 +54,7 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
 
-  virtual process::Future<bool> launch(
+  virtual process::Future<Containerizer::LaunchResult> launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -76,7 +76,8 @@ public:
   virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual process::Future<bool> destroy(const ContainerID& containerId);
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> destroy(
+      const ContainerID& containerId);
 
   virtual process::Future<bool> kill(
       const ContainerID& containerId,
@@ -85,6 +86,9 @@ public:
   virtual process::Future<hashset<ContainerID>> containers();
 
   virtual process::Future<Nothing> remove(const ContainerID& containerId);
+
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& excludedImages);
 
 private:
   ComposingContainerizerProcess* process;

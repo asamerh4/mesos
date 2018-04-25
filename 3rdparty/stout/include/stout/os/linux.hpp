@@ -18,6 +18,7 @@
 #error "stout/os/linux.hpp is only available on Linux systems."
 #endif // __linux__
 
+#include <sys/mman.h>
 #include <sys/types.h> // For pid_t.
 
 #include <list>
@@ -33,7 +34,6 @@
 #include <stout/result.hpp>
 #include <stout/try.hpp>
 
-#include <stout/os/pagesize.hpp>
 #include <stout/os/process.hpp>
 
 namespace os {
@@ -57,53 +57,79 @@ public:
   // 8 MiB is the default for "ulimit -s" on OSX and Linux.
   static constexpr size_t DEFAULT_SIZE = 8 * 1024 * 1024;
 
-  // Allocate a stack.
+  // Allocate a stack. Note that this is NOT async signal safe, nor
+  // safe to call between fork and exec.
   static Try<Stack> create(size_t size)
   {
     Stack stack(size);
 
-    // Allocate and align the memory to 16 bytes.
-    // x86, x64, and AArch64/ARM64 all expect a 16 byte aligned stack.
-    // ARM64/aarch64 enforces the alignment where x86/x64 does not.
-    // Without this alignment Mesos will crash with a SIGBUS on ARM64/aarch64.
-    int err = ::posix_memalign(
-                reinterpret_cast<void**>(&stack.address),
-                os::pagesize(),
-                stack.size);
-    if (err) {
-      return ErrnoError("Failed to allocate and align stack");
+    if (!stack.allocate()) {
+      return ErrnoError();
     }
 
     return stack;
+  }
+
+  explicit Stack(size_t size_) : size(size_) {}
+
+  // Allocate the stack using mmap. We avoid malloc because we want
+  // this to be safe to use between fork and exec where malloc might
+  // deadlock. Returns false and sets `errno` on failure.
+  bool allocate()
+  {
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+
+#if defined(MAP_STACK)
+    flags |= MAP_STACK;
+#endif
+
+    address = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (address == MAP_FAILED) {
+      return false;
+    }
+
+    return true;
   }
 
   // Explicitly free the stack.
   // The destructor won't free the allocated stack.
   void deallocate()
   {
-    ::free(address);
-    address = nullptr;
-    size = 0;
+    PCHECK(::munmap(address, size) == 0);
+    address = MAP_FAILED;
   }
 
   // Stack grows down, return the first usable address.
-  char* start()
+  char* start() const
   {
-    return address + size;
+    return address == MAP_FAILED
+      ? nullptr
+      : (static_cast<char*>(address) + size);
   }
 
 private:
-  explicit Stack(size_t size_) : size(size_) {}
-
   size_t size;
-  char* address;
+  void* address = MAP_FAILED;
 };
+
+
+namespace signal_safe {
+
+
+inline pid_t clone(
+    const Stack& stack,
+    int flags,
+    const lambda::function<int()>& func)
+{
+  return ::clone(childMain, stack.start(), flags, (void*) &func);
+}
+
+} // namespace signal_safe {
 
 
 inline pid_t clone(
     const lambda::function<int()>& func,
-    int flags,
-    Option<Stack> stack = None())
+    int flags)
 {
   // Stack for the child.
   //
@@ -111,18 +137,16 @@ inline pid_t clone(
   // glibc's 'clone' will modify the stack passed to it, therefore the
   // stack must NOT be shared as multiple 'clone's can be invoked
   // simultaneously.
+  Stack stack(Stack::DEFAULT_SIZE);
 
-  bool cleanup = false;
-  if (stack.isNone()) {
-    Try<Stack> _stack = Stack::create(Stack::DEFAULT_SIZE);
-    if (_stack.isError()) {
-        return -1;
-    }
-    stack = _stack.get();
-    cleanup = true;
+  if (!stack.allocate()) {
+    // TODO(jpeach): In MESOS-8155, we will return an
+    // ErrnoError() here, but for now keep the interface
+    // compatible.
+    return -1;
   }
 
-  pid_t pid = ::clone(childMain, stack->start(), flags, (void*) &func);
+  pid_t pid = signal_safe::clone(stack, flags, func);
 
   // Given we allocated the stack ourselves, there are two
   // circumstances where we need to delete the allocated stack to
@@ -135,8 +159,10 @@ inline pid_t clone(
   //     calling process. If CLONE_VM is set ::clone will create a
   //     thread which runs in the same memory space with the calling
   //     process, in which case we don't want to call delete!
-  if (cleanup && (pid < 0 || !(flags & CLONE_VM))) {
-    stack->deallocate();
+  //
+  // TODO(jpeach): In case (2) we will leak the stack memory.
+  if (pid < 0 || !(flags & CLONE_VM)) {
+    stack.deallocate();
   }
 
   return pid;
@@ -173,23 +199,24 @@ inline Result<Process> process(pid_t pid)
   // These are similar reports:
   // http://lkml.indiana.edu/hypermail/linux/kernel/1207.1/01388.html
   // https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1023214
-  Try<Duration> utime = Duration::create(status.get().utime / (double) ticks);
-  Try<Duration> stime = Duration::create(status.get().stime / (double) ticks);
+  Try<Duration> utime = Duration::create(status->utime / (double)ticks);
+  Try<Duration> stime = Duration::create(status->stime / (double)ticks);
 
-  // The command line from 'status.get().comm' is only "arg0" from
-  // "argv" (i.e., the canonical executable name). To get the entire
-  // command line we grab '/proc/[pid]/cmdline'.
+  // The command line from 'status->comm' is only "arg0" from "argv"
+  // (i.e., the canonical executable name). To get the entire command
+  // line we grab '/proc/[pid]/cmdline'.
   Result<std::string> cmdline = proc::cmdline(pid);
 
-  return Process(status.get().pid,
-                 status.get().ppid,
-                 status.get().pgrp,
-                 status.get().session,
-                 Bytes(status.get().rss * pageSize),
-                 utime.isSome() ? utime.get() : Option<Duration>::none(),
-                 stime.isSome() ? stime.get() : Option<Duration>::none(),
-                 cmdline.isSome() ? cmdline.get() : status.get().comm,
-                 status.get().state == 'Z');
+  return Process(
+      status->pid,
+      status->ppid,
+      status->pgrp,
+      status->session,
+      Bytes(status->rss * pageSize),
+      utime.isSome() ? utime.get() : Option<Duration>::none(),
+      stime.isSome() ? stime.get() : Option<Duration>::none(),
+      cmdline.isSome() ? cmdline.get() : status->comm,
+      status->state == 'Z');
 }
 
 

@@ -13,12 +13,17 @@
 #ifndef __STOUT_OS_WINDOWS_SOCKET_HPP__
 #define __STOUT_OS_WINDOWS_SOCKET_HPP__
 
-#include <winsock.h>
-
 #include <glog/logging.h>
 
 #include <stout/abort.hpp>
+#include <stout/try.hpp>
+#include <stout/error.hpp>
+#include <stout/windows.hpp> // For `WinSock2.h`.
+
+#include <stout/os/int_fd.hpp>
+
 #include <stout/os/windows/fd.hpp>
+
 
 namespace net {
 
@@ -106,6 +111,24 @@ inline bool is_retryable_error(int error) { return (error == WSAEWOULDBLOCK); }
 inline bool is_inprogress_error(int error) { return (error == WSAEWOULDBLOCK); }
 
 
+// Returns a socket file descriptor for the specified options.
+//
+// NOTE: We default to no inheritance because we never inherit sockets.
+// Overlapped I/O is enabled to match the default behavior of `::socket`.
+inline Try<int_fd> socket(
+    int family,
+    int type,
+    int protocol,
+    DWORD flags = WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT)
+{
+  SOCKET s = ::WSASocketW(family, type, protocol, nullptr, 0, flags);
+  if (s == INVALID_SOCKET) {
+    return WindowsSocketError();
+  }
+
+  return s;
+}
+
 // NOTE: The below wrappers are used to silence some implicit
 // type-casting warnings.
 
@@ -115,6 +138,10 @@ inline os::WindowsFD accept(
   return ::accept(fd, addr, reinterpret_cast<int*>(addrlen));
 }
 
+
+// NOTE: If `::bind` or `::connect` fail, they return `SOCKET_ERROR`, which is
+// defined to be `-1`. Therefore, the error checking logic of `result < 0` used
+// on POSIX will also work on Windows.
 
 inline int bind(
     const os::WindowsFD& fd, const sockaddr* addr, socklen_t addrlen)

@@ -51,10 +51,14 @@ class CpuIsolatorTest
 
 // These tests are parameterized by the isolation flag.
 static vector<string>* isolators = new vector<string>({
+#ifndef __WINDOWS__
   "posix/cpu",
 #ifdef __linux__
   "cgroups/cpu",
 #endif // __linux__
+#else
+  "windows/cpu",
+#endif // __WINDOWS__
 });
 
 
@@ -106,19 +110,29 @@ TEST_P(CpuIsolatorTest, ROOT_UserCpuUsage)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // Max out a single core in userspace. This will run for at most one
   // second.
   TaskInfo task = createTask(
       offers.get()[0],
-      "while true ; do true ; done & sleep 60");
+#ifdef __WINDOWS__
+      "powershell -c \"while ($true) {}\""
+#else
+      "while true ; do true ; done & sleep 60"
+#endif // __WINDOWS__
+    );
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -155,7 +169,10 @@ TEST_P(CpuIsolatorTest, ROOT_UserCpuUsage)
 }
 
 
-TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
+// TODO(andschwa): Enable this test when a command can be found that does not
+// cause a flaky test. As it is, it is difficult to consume kernel time on
+// Windows consistently.
+TEST_P_TEMP_DISABLED_ON_WINDOWS(CpuIsolatorTest, ROOT_SystemCpuUsage)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -197,20 +214,32 @@ TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
-  // Generating random numbers is done by the kernel and will max out
-  // a single core and run almost exclusively in the kernel, i.e.,
-  // system time.
   TaskInfo task = createTask(
       offers.get()[0],
-      "cat /dev/urandom > /dev/null & sleep 60");
+#ifdef __WINDOWS__
+      // Enumerating processes will at least cause some kernel time.
+      "powershell -NoProfile -Command "
+      "\"while ($true) { Get-Process | Out-Null }\""
+#else
+      // Generating random numbers is done by the kernel and will max out
+      // a single core and run almost exclusively in the kernel, i.e.,
+      // system time.
+      "cat /dev/urandom > /dev/null & sleep 60"
+#endif // __WINDOWS__
+    );
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -221,8 +250,8 @@ TEST_P(CpuIsolatorTest, ROOT_SystemCpuUsage)
 
   ContainerID containerId = *(containers->begin());
 
-  // Wait up to 1 second for the child process to induce 1/8 of a
-  // second of user cpu time.
+  // Wait up to 1 seconds for the child process to induce 1/8 of a
+  // second of system cpu time.
   ResourceStatistics statistics;
   Duration waited = Duration::zero();
   do {

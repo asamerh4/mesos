@@ -13,6 +13,23 @@
 #ifndef __STOUT_WINDOWS_HPP__
 #define __STOUT_WINDOWS_HPP__
 
+// We include `WinSock2.h` before `Windows.h` explicitly to avoid symbol
+// re-definitions. This is a documented pattern, because `Windows.h` will
+// otherwise include `winsock.h` for "historical reasons". Note that
+// `winsock.h` is for Windows Sockets 1.1, last used in Windows 2000.
+//
+// NOTE: The capitalization of these headers is based on the files
+// included in the SDK, rather than MSDN documentation.
+//
+// https://msdn.microsoft.com/en-us/library/windows/desktop/ms738562(v=vs.85).aspx
+// NOLINT(whitespace/line_length)
+#include <WinSock2.h> // For Windows Sockets 2.
+#include <WS2tcpip.h> // For `getaddrinfo` etc.
+#include <iphlpapi.h> // For `GetAdaptersInfo`.
+#include <MSWSock.h>  // For `TransmitFile`.
+#include <winioctl.h> // For `DeviceIoControl`
+#include <Windows.h>  // For everything else.
+
 #include <direct.h>   // For `_mkdir`.
 #include <errno.h>    // For `_set_errno`.
 #include <fcntl.h>    // For file access flags like `_O_CREAT`.
@@ -22,14 +39,7 @@
 
 #include <sys/stat.h> // For permissions flags.
 
-#include <BaseTsd.h>  // For `SSIZE_T`.
-// We include `Winsock2.h` before `Windows.h` explicitly to avoid symbold
-// re-definitions. This is a known pattern in the windows community.
-#include <WS2tcpip.h>
-#include <Winsock2.h>
-#include <mswsock.h>
-#include <winioctl.h>
-#include <Windows.h>
+#include <basetsd.h>  // For `SSIZE_T`.
 
 #include <memory>
 
@@ -154,14 +164,6 @@ inline BOOL GetMessage(
 #define W_OK 0x2
 #define X_OK 0x0 // No such permission on Windows.
 #define F_OK 0x0
-
-#define O_RDONLY _O_RDONLY
-#define O_WRONLY _O_WRONLY
-#define O_RDWR _O_RDWR
-#define O_CREAT _O_CREAT
-#define O_TRUNC _O_TRUNC
-#define O_APPEND _O_APPEND
-#define O_CLOEXEC _O_NOINHERIT
 
 #define MAXHOSTNAMELEN NI_MAXHOST
 
@@ -338,12 +340,10 @@ const mode_t S_ISVTX = 0x02000000;        // No-op.
 const mode_t O_SYNC     = 0x00000000;     // No-op.
 const mode_t O_NONBLOCK = 0x00000000;     // No-op.
 
-// Linux signal flags not used in Windows. We define them per
-// `Linux sys/signal.h` to branch properly for Windows
-//  processes' stop, resume and kill.
-const mode_t SIGCONT = 0x00000009;     // Signal Cont.
-const mode_t SIGSTOP = 0x00000011;     // Signal Stop.
-const mode_t SIGKILL = 0x00000013;     // Signal Kill.
+// Even though SIGKILL doesn't exist on Windows, we define
+// it here, because Docker defines it. So, the docker
+// executor needs this signal value to properly kill containers.
+const mode_t SIGKILL = 0x00000009;     // Signal Kill.
 
 inline auto strerror_r(int errnum, char* buffer, size_t length) ->
 decltype(strerror_s(buffer, length, errnum))
@@ -364,50 +364,33 @@ inline const char* strsignal(int signum)
 
 #define SIGPIPE 100
 
-// `os::system` returns -1 if the processor cannot be started
-// therefore any return value indicates the process has been started
+// On Windows, the exit code, unlike Linux, is simply a 32 bit unsigned integer
+// with no special encoding. Since the `status` value from `waitpid` returns a
+// 32 bit integer, we can't use it to determine if the process exited normally,
+// because all the possibilities could be valid exit codes. So, we assume that
+// if we get an exit code, the process exited normally.
 #ifndef WIFEXITED
-#define WIFEXITED(x) ((x) != -1)
+#define WIFEXITED(x) true
 #endif // WIFEXITED
 
 // Returns the exit status of the child.
+// On Windows, they are a 32 bit unsigned integer.
 #ifndef WEXITSTATUS
-#define WEXITSTATUS(x) (x & 0xFF)
+#define WEXITSTATUS(x) static_cast<DWORD>(x)
 #endif // WEXITSTATUS
 
+// A signaled Windows process always exits with status code 3, but it's
+// impossible to distinguish that from a process that exits normally with
+// status code 3. Since signals aren't really used on Windows, we will
+// assume that the process is not signaled.
 #ifndef WIFSIGNALED
-#define WIFSIGNALED(x) ((x) != -1)
+#define WIFSIGNALED(x) false
 #endif // WIFSIGNALED
-
-// Returns the number of the signal that caused the child process to
-// terminate, only be used if WIFSIGNALED is true.
-#ifndef WTERMSIG
-#define WTERMSIG(x) 0
-#endif // WTERMSIG
-
-// Whether the child produced a core dump, only be used if WIFSIGNALED is true.
-#ifndef WCOREDUMP
-#define WCOREDUMP(x) false
-#endif // WCOREDUMP
-
-// Whether the child was stopped by delivery of a signal.
-#ifndef WIFSTOPPED
-#define WIFSTOPPED(x) false
-#endif // WIFSTOPPED
-
-// Whether the child was stopped by delivery of a signal.
-#ifndef WSTOPSIG
-#define WSTOPSIG(x) 0
-#endif // WSTOPSIG
 
 // Specifies that `::waitpid` should return immediately rather than
 // blocking and waiting for child to notify of state change.
 #ifndef WNOHANG
 #define WNOHANG 1
 #endif // WNOHANG
-
-#ifndef WUNTRACED
-#define WUNTRACED   2 // Tell about stopped, untraced children.
-#endif // WUNTRACED
 
 #endif // __STOUT_WINDOWS_HPP__

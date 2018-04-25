@@ -13,6 +13,7 @@
 #include <glog/logging.h>
 
 #include <list>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@
 #include <stout/os.hpp>
 
 using std::list;
+using std::map;
 using std::string;
 using std::vector;
 
@@ -84,7 +86,7 @@ MetricsProcess* MetricsProcess::create(
           << "Failed to parse LIBPROCESS_METRICS_SNAPSHOT_ENDPOINT_RATE_LIMIT "
           << "'" << limit.get() << "'"
           << " (format is <number of requests>/<interval duration>)"
-          << (reason.isSome() ? ": " + reason.get().message : "");
+          << (reason.isSome() ? ": " + reason->message : "");
     }
   }
 
@@ -94,18 +96,10 @@ MetricsProcess* MetricsProcess::create(
 
 void MetricsProcess::initialize()
 {
-  if (authenticationRealm.isSome()) {
-    route("/snapshot",
-          authenticationRealm.get(),
-          help(),
-          &MetricsProcess::_snapshot);
-  } else {
-    route("/snapshot",
-          help(),
-          [this](const http::Request& request) {
-            return _snapshot(request, None());
-          });
-  }
+  route("/snapshot",
+        authenticationRealm,
+        help(),
+        &MetricsProcess::_snapshot);
 }
 
 
@@ -149,7 +143,7 @@ Future<Nothing> MetricsProcess::remove(const string& name)
 }
 
 
-Future<hashmap<string, double>> MetricsProcess::snapshot(
+Future<map<string, double>> MetricsProcess::snapshot(
     const Option<Duration>& timeout)
 {
   hashmap<string, Future<double>> futures;
@@ -200,7 +194,7 @@ Future<http::Response> MetricsProcess::_snapshot(
   }
 
   return acquire.then(defer(self(), &Self::snapshot, timeout))
-      .then([request](const hashmap<string, double>& metrics)
+      .then([request](const map<string, double>& metrics)
             -> http::Response {
         return http::OK(jsonify(metrics), request.url.query.get("jsonp"));
       });
@@ -216,12 +210,12 @@ list<Future<double>> MetricsProcess::_snapshotTimeout(
 }
 
 
-Future<hashmap<string, double>> MetricsProcess::__snapshot(
+Future<map<string, double>> MetricsProcess::__snapshot(
     const Option<Duration>& timeout,
     const hashmap<string, Future<double>>& metrics,
     const hashmap<string, Option<Statistics<double>>>& statistics)
 {
-  hashmap<string, double> snapshot;
+  map<string, double> snapshot;
 
   foreachpair (const string& key, const Future<double>& value, metrics) {
     // TODO(dhamon): Maybe add the failure message for this metric to the
@@ -237,15 +231,15 @@ Future<hashmap<string, double>> MetricsProcess::__snapshot(
     Option<Statistics<double>> statistics_ = statistics.get(key).get();
 
     if (statistics_.isSome()) {
-      snapshot[key + "/count"] = static_cast<double>(statistics_.get().count);
-      snapshot[key + "/min"] = statistics_.get().min;
-      snapshot[key + "/max"] = statistics_.get().max;
-      snapshot[key + "/p50"] = statistics_.get().p50;
-      snapshot[key + "/p90"] = statistics_.get().p90;
-      snapshot[key + "/p95"] = statistics_.get().p95;
-      snapshot[key + "/p99"] = statistics_.get().p99;
-      snapshot[key + "/p999"] = statistics_.get().p999;
-      snapshot[key + "/p9999"] = statistics_.get().p9999;
+      snapshot[key + "/count"] = static_cast<double>(statistics_->count);
+      snapshot[key + "/min"] = statistics_->min;
+      snapshot[key + "/max"] = statistics_->max;
+      snapshot[key + "/p50"] = statistics_->p50;
+      snapshot[key + "/p90"] = statistics_->p90;
+      snapshot[key + "/p95"] = statistics_->p95;
+      snapshot[key + "/p99"] = statistics_->p99;
+      snapshot[key + "/p999"] = statistics_->p999;
+      snapshot[key + "/p9999"] = statistics_->p9999;
     }
   }
 

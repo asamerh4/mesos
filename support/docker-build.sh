@@ -11,6 +11,7 @@ set -xe
 : ${COMPILER:?"Environment variable 'COMPILER' must be set (e.g., COMPILER=gcc)"}
 : ${CONFIGURATION:?"Environment variable 'CONFIGURATION' must be set (e.g., CONFIGURATION='--enable-libevent --enable-ssl')"}
 : ${ENVIRONMENT:?"Environment variable 'ENVIRONMENT' must be set (e.g., ENVIRONMENT='GLOG_v=1 MESOS_VERBOSE=1')"}
+: ${JOBS:=6}
 
 # Change to the root of Mesos repo for docker build context.
 MESOS_DIRECTORY=$( cd "$( dirname "$0" )/.." && pwd )
@@ -42,7 +43,7 @@ case $OS in
     append_dockerfile "RUN yum install -y which"
     append_dockerfile "RUN yum groupinstall -y 'Development Tools'"
     append_dockerfile "RUN yum install -y epel-release" # Needed for clang.
-    append_dockerfile "RUN yum install -y clang git maven cmake"
+    append_dockerfile "RUN yum install -y clang git maven"
     append_dockerfile "RUN yum install -y java-1.8.0-openjdk-devel python-devel python-six zlib-devel libcurl-devel openssl-devel cyrus-sasl-devel cyrus-sasl-md5 apr-devel subversion-devel apr-utils-devel libevent-devel libev-devel"
 
     # Add an unprivileged user.
@@ -62,9 +63,21 @@ case $OS in
     # IBM Power only supports Ubuntu 14.04 and gcc compiler.
     [ "$(uname -m)" = "x86_64" ] && CLANG_PKG=clang-3.5 || CLANG_PKG=
     append_dockerfile "RUN apt-get update"
-    append_dockerfile "RUN apt-get -y install build-essential $CLANG_PKG git maven autoconf libtool cmake"
-    append_dockerfile "RUN apt-get -y install openjdk-7-jdk python-dev python-six libcurl4-nss-dev libsasl2-dev libapr1-dev libsvn-dev libevent-dev libev-dev"
-    append_dockerfile "RUN apt-get -y install wget curl sed"
+    append_dockerfile "RUN apt-get install -y build-essential $CLANG_PKG git maven autoconf libtool"
+    append_dockerfile "RUN apt-get install -y python-dev python-six libcurl4-nss-dev libsasl2-dev libapr1-dev libsvn-dev libevent-dev libev-dev"
+    append_dockerfile "RUN apt-get install -y wget curl sed"
+
+    case $OS in
+      *16.04*)
+        echo "Install Ubuntu 16.04 LTS (Xenial Xerus) specific packages"
+        append_dockerfile "RUN apt-get install -y openjdk-8-jdk zlib1g-dev"
+        # Install ping required by OsTest.Which
+        append_dockerfile "RUN apt-get install -y iputils-ping"
+       ;;
+      *)
+        append_dockerfile "RUN apt-get install -y openjdk-7-jdk"
+       ;;
+    esac
 
     # Add an unpriviliged user.
     append_dockerfile "RUN adduser --disabled-password --gecos '' mesos"
@@ -74,6 +87,16 @@ case $OS in
     exit 1
     ;;
 esac
+
+# Install a more recent version of CMake than can be installed via packages.
+#
+# NOTE: We call `sync` before launching the script to workaround the docker bug.
+# See https://github.com/moby/moby/issues/9547
+#
+# TODO(abudnik): Skip this step, when a newer version of CMake package is
+# available in OS repository.
+append_dockerfile "RUN curl -sSL https://cmake.org/files/v3.8/cmake-3.8.2-Linux-x86_64.sh -o /tmp/install-cmake.sh"
+append_dockerfile "RUN chmod u+x /tmp/install-cmake.sh && sync && /tmp/install-cmake.sh --skip-license --prefix=/usr/local"
 
 case $COMPILER in
   gcc)
@@ -131,12 +154,12 @@ if [ -n "$COVERITY_TOKEN" ]
     append_dockerfile "ENV MESOS_VERSION $(grep "AC_INIT" configure.ac | sed 's/AC_INIT[(]\[mesos\], \[\(.*\)\][)]/\1/')"
     append_dockerfile "RUN wget https://scan.coverity.com/download/linux64  --post-data \"token=$COVERITY_TOKEN&project=Mesos\" -O coverity_tool.tgz"
     append_dockerfile "RUN tar xvf coverity_tool.tgz; mv cov-analysis-linux* cov-analysis"
-    append_dockerfile "CMD ./bootstrap && ./configure $CONFIGURATION &&  cov-analysis/bin/cov-build -dir cov-int make -j6 && tar czcf mesos.tgz cov-int && tail cov-int/build-log.txt && curl --form \"token=$COVERITY_TOKEN\" --form \"email=dev@mesos.apache.org\"  --form \"file=@mesos.tgz\" --form \"version=$MESOS_VERSION\" --form \"description='Continious Coverity Build'\"   https://scan.coverity.com/builds?project=Mesos"
+    append_dockerfile "CMD ./bootstrap && ./configure $CONFIGURATION &&  cov-analysis/bin/cov-build -dir cov-int make -j$JOBS && tar czcf mesos.tgz cov-int && tail cov-int/build-log.txt && curl --form \"token=$COVERITY_TOKEN\" --form \"email=dev@mesos.apache.org\"  --form \"file=@mesos.tgz\" --form \"version=$MESOS_VERSION\" --form \"description='Continious Coverity Build'\"   https://scan.coverity.com/builds?project=Mesos"
 else
     # Build and check Mesos.
     case $BUILDTOOL in
       autotools)
-	append_dockerfile "CMD ./bootstrap && ./configure $CONFIGURATION && make -j6 distcheck 2>&1"
+	append_dockerfile "CMD ./bootstrap && ./configure $CONFIGURATION && make -j$JOBS distcheck 2>&1"
 	;;
       cmake)
 	# Transform autotools-like parameters to cmake-like.
@@ -160,7 +183,7 @@ else
 
 	# MESOS-5433: `distcheck` is not supported.
 	# MESOS-5624: In source build is not supported.
-	append_dockerfile "CMD mkdir build && cd build && cmake $CONFIGURATION .. && make -j6 check"
+	append_dockerfile "CMD mkdir build && cd build && cmake $CONFIGURATION .. && make -j$JOBS check"
 	;;
       *)
 	echo "Unknown build tool $BUILDTOOL"
@@ -178,7 +201,7 @@ TAG=mesos-`date +%s`-$RANDOM
 docker build --no-cache=true -t $TAG .
 
 # Set a trap to delete the image on exit.
-trap "docker rmi $TAG" EXIT
+trap "docker rmi --force $TAG" EXIT
 
 # Uncomment below to print kernel log incase of failures.
 # trap "dmesg" ERR

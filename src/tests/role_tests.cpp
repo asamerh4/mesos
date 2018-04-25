@@ -70,7 +70,7 @@ class RoleTest : public MesosTest {};
 TEST_F(RoleTest, BadRegister)
 {
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("invalid");
+  frameworkInfo.set_roles(0, "invalid");
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.roles = "foo,bar";
@@ -115,7 +115,7 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("new-role-name");
+  frameworkInfo.set_roles(0, "new-role-name");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -129,7 +129,7 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   Resources unreserved = Resources::parse("disk:1024").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), frameworkInfo.principal()));
+        frameworkInfo.roles(0), frameworkInfo.principal()));
 
   // We use this to capture offers from `resourceOffers`.
   Future<vector<Offer>> offers;
@@ -149,9 +149,9 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(unreserved, frameworkInfo.role())));
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
   EXPECT_FALSE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
 
   // The expectation for the next offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -167,13 +167,13 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
   EXPECT_FALSE(Resources(offer.resources()).contains(
-      allocatedResources(unreserved, frameworkInfo.role())));
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
 
   Resources volume = createPersistentVolume(
       Megabytes(64),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "path1",
       frameworkInfo.principal(),
@@ -193,11 +193,11 @@ TEST_F(RoleTest, ImplicitRoleRegister)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
   EXPECT_FALSE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
   EXPECT_FALSE(Resources(offer.resources()).contains(
-      allocatedResources(unreserved, frameworkInfo.role())));
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
 
   driver.stop();
   driver.join();
@@ -227,7 +227,7 @@ TEST_F(RoleTest, ImplicitRoleStaticReservation)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role");
+  frameworkInfo.set_roles(0, "role");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -258,7 +258,7 @@ TEST_F(RoleTest, ImplicitRoleStaticReservation)
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(staticallyReserved, frameworkInfo.role())));
+      allocatedResources(staticallyReserved, frameworkInfo.roles(0))));
 
   // Create a task to launch with the resources of `staticallyReserved`.
   TaskInfo taskInfo =
@@ -296,8 +296,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointEmpty)
       None(),
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
@@ -332,8 +331,7 @@ TEST_F(RoleTest, EndpointNoFrameworks)
       None(),
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
@@ -408,8 +406,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, RolesEndpointContainsQuota)
         createBasicAuthHeaders(DEFAULT_CREDENTIAL),
         stringify(JSON::protobuf(request)));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
   }
 
   // Query the master roles endpoint and check it contains quota.
@@ -420,8 +417,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, RolesEndpointContainsQuota)
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
     ASSERT_SOME(parse);
@@ -467,7 +463,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointImplicitRolesWeights)
   ASSERT_SOME(master);
 
   FrameworkInfo frameworkInfo1 = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo1.set_role("roleX");
+  frameworkInfo1.set_roles(0, "roleX");
 
   MockScheduler sched1;
   MesosSchedulerDriver driver1(
@@ -480,7 +476,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointImplicitRolesWeights)
   driver1.start();
 
   FrameworkInfo frameworkInfo2 = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo2.set_role("roleZ");
+  frameworkInfo2.set_roles(0, "roleZ");
 
   MockScheduler sched2;
   MesosSchedulerDriver driver2(
@@ -501,8 +497,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, EndpointImplicitRolesWeights)
       None(),
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response->body;
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
@@ -673,10 +668,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   ASSERT_SOME(master);
 
   FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
-  framework.add_roles("role1");
+  framework.set_roles(0, "role1");
   framework.add_roles("role2");
-  framework.add_capabilities()->set_type(
-      FrameworkInfo::Capability::MULTI_ROLE);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -698,8 +691,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     Try<JSON::Value> parse = JSON::parse(response->body);
     ASSERT_SOME(parse);
@@ -758,8 +750,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
         None(),
         createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-      << response->body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
     Try<JSON::Value> parse = JSON::parse(response->body);
     ASSERT_SOME(parse);
@@ -934,7 +925,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, VolumesInOverlappingHierarchies)
   auto runTask = [&master, &PATH](
       const string& role, const string& id) {
     FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-    frameworkInfo.set_role(role);
+    frameworkInfo.set_roles(0, role);
 
     MockScheduler sched;
     MesosSchedulerDriver driver(
@@ -986,9 +977,10 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, VolumesInOverlappingHierarchies)
         taskResources,
         "! (ls -Av path | grep -q .)");
 
-    // We expect two status updates for the task.
-    Future<TaskStatus> status1, status2;
+    // We expect three status updates for the task.
+    Future<TaskStatus> status0, status1, status2;
     EXPECT_CALL(sched, statusUpdate(&driver, _))
+      .WillOnce(FutureArg<1>(&status0))
       .WillOnce(FutureArg<1>(&status1))
       .WillOnce(FutureArg<1>(&status2));
 
@@ -996,6 +988,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(RoleTest, VolumesInOverlappingHierarchies)
     driver.acceptOffers(
         {offer.id()},
         {RESERVE(reservedDisk), CREATE(volume), LAUNCH({task})});
+
+    AWAIT_READY(status0);
+
+    EXPECT_EQ(task.task_id(), status0->task_id());
+    EXPECT_EQ(TASK_STARTING, status0->state());
 
     AWAIT_READY(status1);
 

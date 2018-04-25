@@ -106,7 +106,7 @@ class FaultToleranceTest : public MesosTest {};
 // This test ensures that a framework connecting with a
 // failed over master gets a registered callback.
 // Note that this behavior might change in the future and
-// the scheduler might receive a re-registered callback.
+// the scheduler might receive a reregistered callback.
 TEST_F_TEMP_DISABLED_ON_WINDOWS(FaultToleranceTest, MasterFailover)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -221,7 +221,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   AWAIT_READY(frameworkId);
   EXPECT_NE("", frameworkId->value());
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // Step 3. Create/launch a task.
   TaskInfo task =
@@ -499,7 +499,7 @@ TEST_F(FaultToleranceTest, SchedulerFailover)
 }
 
 
-// This test verifies that a framework attempting to re-register
+// This test verifies that a framework attempting to reregister
 // after its failover timeout has elapsed is disallowed.
 TEST_F(FaultToleranceTest, SchedulerReregisterAfterFailoverTimeout)
 {
@@ -588,7 +588,7 @@ TEST_F(FaultToleranceTest, SchedulerReregisterAfterFailoverTimeout)
 }
 
 
-// This test verifies that a framework attempting to re-register
+// This test verifies that a framework attempting to reregister
 // after it is unregistered is disallowed.
 TEST_F(FaultToleranceTest, SchedulerReregisterAfterUnregistration)
 {
@@ -785,7 +785,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 }
 
 
-// This test ensures framework re-registers with master after failover.
+// This test ensures framework reregisters with master after failover.
 // Previous offers are rescinded and re-offered to the framework after
 // re-registration.
 TEST_F_TEMP_DISABLED_ON_WINDOWS(FaultToleranceTest, FrameworkReregister)
@@ -871,7 +871,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FaultToleranceTest, FrameworkReregister)
   Clock::advance(masterFlags.allocation_interval);
   Clock::resume();
 
-  // The re-registered framework should get offers.
+  // The reregistered framework should get offers.
   AWAIT_READY(resourceOffers2);
 
   // Check that the framework is displayed correctly in the "/state" endpoint.
@@ -912,7 +912,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FaultToleranceTest, FrameworkReregister)
       framework.values["registered_time"].as<JSON::Number>().as<double>(),
       1);
 
-  ASSERT_NE(0, framework.values.count("reregistered_time"));
+  ASSERT_NE(0u, framework.values.count("reregistered_time"));
   EXPECT_NEAR(
       reregisterTime.secs(),
       framework.values["reregistered_time"].as<JSON::Number>().as<double>(),
@@ -951,7 +951,7 @@ TEST_F(FaultToleranceTest, DisconnectedSchedulerLaunchLost)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   AWAIT_READY(message);
 
@@ -1014,7 +1014,7 @@ TEST_F(FaultToleranceTest, DisconnectedSchedulerLaunchDropped)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   AWAIT_READY(message);
 
@@ -1076,7 +1076,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverStatusUpdate)
   driver1.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // Launch a task.
   TaskInfo task;
@@ -1228,7 +1228,7 @@ TEST_F(FaultToleranceTest, ReregisterFrameworkExitedExecutor)
 
   slaveDetector.appoint(master.get()->pid);
 
-  // Wait for the slave to re-register.
+  // Wait for the slave to reregister.
   AWAIT_READY(slaveReregisteredMessage);
 
   // Allow the executor exited message and drop the status update,
@@ -1286,7 +1286,7 @@ TEST_F(FaultToleranceTest, ForwardStatusUpdateUnknownExecutor)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   TaskInfo task;
@@ -1325,7 +1325,7 @@ TEST_F(FaultToleranceTest, ForwardStatusUpdateUnknownExecutor)
       taskId,
       TASK_RUNNING,
       TaskStatus::SOURCE_SLAVE,
-      UUID::random(),
+      id::UUID::random(),
       "Dummy update");
 
   process::dispatch(
@@ -1375,7 +1375,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverExecutorToFrameworkMessage)
   driver1.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -1475,7 +1475,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkToExecutorMessage)
   driver1.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Future<TaskStatus> status;
   EXPECT_CALL(sched1, statusUpdate(&driver1, _))
@@ -1549,7 +1549,7 @@ TEST_F(FaultToleranceTest, SchedulerFailoverFrameworkToExecutorMessage)
 
 // This test verifies that a partitioned framework that still
 // thinks it is registered with the master cannot kill a task because
-// the master has re-registered another instance of the framework.
+// the master has reregistered another instance of the framework.
 // What this test does:
 // 1. Launch a master, slave and scheduler.
 // 2. Scheduler launches a task.
@@ -1702,7 +1702,7 @@ TEST_F(FaultToleranceTest, SchedulerExit)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   AWAIT_READY(offers);
 
@@ -1988,7 +1988,7 @@ TEST_F(FaultToleranceTest, SplitBrainMasters)
       runningStatus->task_id(),
       TASK_LOST,
       TaskStatus::SOURCE_SLAVE,
-      UUID::random()));
+      id::UUID::random()));
 
   // Spoof a message from a random master; this should be dropped by
   // the scheduler driver. Since this is delivered locally, it is
@@ -2017,7 +2017,7 @@ TEST_F(FaultToleranceTest, SplitBrainMasters)
 }
 
 
-// This test verifies that when a framework re-registers with updated
+// This test verifies that when a framework reregisters with updated
 // FrameworkInfo, it gets updated in the master. The steps involved
 // are:
 //   1. Launch a master, slave and scheduler.
@@ -2040,10 +2040,8 @@ TEST_F(FaultToleranceTest, UpdateFrameworkInfoOnSchedulerFailover)
   // scheduler with updated information.
 
   FrameworkInfo finfo1 = DEFAULT_FRAMEWORK_INFO;
-
-  // TODO(mpark): Remove this once `RESERVATION_REFINEMENT`
-  // is removed from `DEFAULT_FRAMEWORK_INFO`.
   finfo1.clear_capabilities();
+  finfo1.clear_roles();
 
   finfo1.set_name("Framework 1");
   finfo1.set_failover_timeout(1000);
@@ -2069,11 +2067,7 @@ TEST_F(FaultToleranceTest, UpdateFrameworkInfoOnSchedulerFailover)
   // updated FrameworkInfo and wait until it gets a registered
   // callback.
 
-  FrameworkInfo finfo2 = DEFAULT_FRAMEWORK_INFO;
-
-  // TODO(mpark): Remove this once `RESERVATION_REFINEMENT`
-  // is removed from `DEFAULT_FRAMEWORK_INFO`.
-  finfo2.clear_capabilities();
+  FrameworkInfo finfo2 = finfo1;
 
   finfo2.mutable_id()->MergeFrom(frameworkId.get());
   auto capabilityType = FrameworkInfo::Capability::REVOCABLE_RESOURCES;
@@ -2082,6 +2076,7 @@ TEST_F(FaultToleranceTest, UpdateFrameworkInfoOnSchedulerFailover)
   finfo2.set_webui_url("http://localhost:8080/");
   finfo2.set_failover_timeout(100);
   finfo2.set_hostname("myHostname");
+  finfo2.clear_labels();
   finfo2.mutable_labels()->add_labels()->CopyFrom(createLabel("baz", "qux"));
 
   MockScheduler sched2;
@@ -2167,7 +2162,7 @@ TEST_F(FaultToleranceTest, UpdateFrameworkInfoOnSchedulerFailover)
 }
 
 
-// This test verifies that when a framework re-registers after master
+// This test verifies that when a framework reregisters after master
 // failover with an updated FrameworkInfo, the updated FrameworkInfo
 // is reflected in the master.
 TEST_F_TEMP_DISABLED_ON_WINDOWS(
@@ -2209,14 +2204,20 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   TaskInfo task = createTask(offer, "sleep 60");
 
+  Future<TaskStatus> startingStatus;
   Future<TaskStatus> runningStatus;
   EXPECT_CALL(sched1, statusUpdate(&driver1, _))
+    .WillOnce(FutureArg<1>(&startingStatus))
     .WillOnce(FutureArg<1>(&runningStatus));
 
   Future<Nothing> statusUpdateAck = FUTURE_DISPATCH(
       slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   driver1.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
 
   AWAIT_READY(runningStatus);
   EXPECT_EQ(TASK_RUNNING, runningStatus->state());
@@ -2231,9 +2232,9 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   driver1.stop();
   driver1.join();
 
-  // Restart master; ensure the agent re-registers before the second
+  // Restart master; ensure the agent reregisters before the second
   // scheduler connects. This ensures the first framework's
-  // FrameworkInfo is recovered from the re-registering agent.
+  // FrameworkInfo is recovered from the reregistering agent.
   Future<SlaveReregisteredMessage> slaveReregistered = FUTURE_PROTOBUF(
       SlaveReregisteredMessage(), _, slave.get()->pid);
 

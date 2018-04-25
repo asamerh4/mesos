@@ -19,21 +19,43 @@ VERSION=${1}
 CANDIDATE=${2}
 TAG="${VERSION}-rc${CANDIDATE}"
 
-echo "${GREEN}Voting for mesos-${VERSION} candidate ${CANDIDATE}${NORMAL}"
+if ! git rev-parse "$TAG" > /dev/null 2>&1; then
+  echo "Tag $TAG doesn't exist. Please create one using:"
+  echo "  git tag -a $TAG -m \"Tagging Mesos $TAG.\""
+  exit 1
+fi
+
+if [ "$(git cat-file -t $TAG)" != "tag" ]; then
+  echo "Tag $TAG is not annotated. First delete the existing tag using:"
+  echo "  git tag -d $TAG"
+  echo "Then create an annotated tag using:"
+  echo "  git tag -a $TAG -m \"Tagging Mesos $TAG.\""
+  exit 1;
+fi
+
+# Releases are signed with `sha512sum` which is installed as
+# `gsha512sum` from Homebrew's `coreutils` package.
+echo "Checking for sha512sum or gsha512sum"
+SHA512SUM=$(command -v sha512sum || command -v gsha512sum)
+
+echo "${GREEN}Tagging and Voting for mesos-${VERSION} candidate ${CANDIDATE}${NORMAL}"
 
 read -p "Hit enter to continue ... "
 
 MESOS_GIT_URL="https://git-wip-us.apache.org/repos/asf/mesos.git"
 
-WORK_DIR=`mktemp -d /tmp/mesos-vote-XXXX`
+# Get the absolute path of the local git clone.
+MESOS_GIT_LOCAL=$(cd "$(dirname $0)"/..; pwd)
+
+WORK_DIR=`mktemp -d /tmp/mesos-tag-vote-XXXX`
 atexit "rm -rf ${WORK_DIR}"
 
 pushd ${WORK_DIR}
 
 echo "${GREEN}Checking out ${TAG}${NORMAL}"
 
-# First checkout the release tag.
-git clone --depth 1 --branch ${TAG} ${MESOS_GIT_URL}
+# Make a shallow clone from the local git repository.
+git clone --shared ${MESOS_GIT_LOCAL} --branch ${TAG} mesos
 
 pushd mesos
 
@@ -64,6 +86,9 @@ while [ -z ${MAVEN_REPO} ]; do
   read  -p "Please *close* the staging repository and provide its URL here: " MAVEN_REPO
 done
 
+echo "${GREEN}Pushing the git tag to the repository...${NORMAL}"
+git push ${MESOS_GIT_URL} refs/tags/${TAG}
+
 # Build the distribution.
 echo "${GREEN}Building the distribution ...${NORMAL}"
 make -j3 dist
@@ -75,10 +100,10 @@ echo "${GREEN}Signing the distribution ...${NORMAL}"
 # Sign the tarball.
 gpg --armor --output ${TARBALL}.asc --detach-sig ${TARBALL}
 
-echo "${GREEN}Creating a MD5 checksum...${NORMAL}"
+echo "${GREEN}Creating a SHA512 checksum ...${NORMAL}"
 
-# Create MD5 checksum.
-gpg --print-md MD5 ${TARBALL} > ${TARBALL}.md5
+# Create SHA512 checksum.
+"${SHA512SUM}" ${TARBALL} > ${TARBALL}.sha512
 
 SVN_DEV_REPO="https://dist.apache.org/repos/dist/dev/mesos"
 SVN_DEV_LOCAL="${WORK_DIR}/dev"
@@ -90,11 +115,11 @@ echo "${GREEN}Checking out svn dev repo ...${NORMAL}"
 svn co --depth=empty ${SVN_DEV_REPO} ${SVN_DEV_LOCAL}
 
 echo "${GREEN}Uploading the artifacts (the distribution," \
-  "signature, and MD5) ...${NORMAL}"
+  "signature, and checksum) ...${NORMAL}"
 
 RELEASE_DIRECTORY="${SVN_DEV_LOCAL}/${TAG}"
 mkdir ${RELEASE_DIRECTORY}
-mv ${TARBALL} ${TARBALL}.asc ${TARBALL}.md5 ${RELEASE_DIRECTORY}
+mv ${TARBALL} ${TARBALL}.asc ${TARBALL}.sha512 ${RELEASE_DIRECTORY}
 
 popd # build
 popd # mesos
@@ -135,8 +160,8 @@ ${SVN_DEV_REPO}/${TAG}/${TARBALL}
 The tag to be voted on is ${TAG}:
 https://git-wip-us.apache.org/repos/asf?p=mesos.git;a=commit;h=${TAG}
 
-The MD5 checksum of the tarball can be found at:
-${SVN_DEV_REPO}/${TAG}/${TARBALL}.md5
+The SHA512 checksum of the tarball can be found at:
+${SVN_DEV_REPO}/${TAG}/${TARBALL}.sha512
 
 The signature of the tarball can be found at:
 ${SVN_DEV_REPO}/${TAG}/${TARBALL}.asc
@@ -144,7 +169,7 @@ ${SVN_DEV_REPO}/${TAG}/${TARBALL}.asc
 The PGP key used to sign the release is here:
 https://dist.apache.org/repos/dist/release/mesos/KEYS
 
-The JAR is up in Maven in a staging repository here:
+The JAR is in a staging repository here:
 ${MAVEN_REPO}
 
 Please vote on releasing this package as Apache Mesos ${VERSION}!

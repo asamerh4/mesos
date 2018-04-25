@@ -6,13 +6,43 @@ layout: documentation
 # Video and Slides of Mesos Presentations
 _(Listed in date descending order)_
 
-## MesosCon Europe 2015
- [Video playlist](https://www.youtube.com/watch?v=K-x7yOy8Ymk&list=PLGeM09tlguZS6MhlSZDbf-gANWdKgje0I)
- [Slides](http://events.linuxfoundation.org/events/archive/2015/mesoscon-europe/program/slides)
+## MesosCon Europe 2017
+[Video playlist](https://www.youtube.com/playlist?list=PLbzoR-pLrL6rSBqPhTh_lmeMmxn6AOSjf)
 
-## MesosCon Seattle 2015
- [Video playlist](https://www.youtube.com/watch?v=aV6pdWveN7s&list=PLVjgeV_avap2arug3vIz8c6l72rvh9poV)
- [Slides](http://events.linuxfoundation.org/events/archive/2015/mesoscon/program/slides)
+[Slides](http://events17.linuxfoundation.org/events/archive/2017/mesoscon-europe/program/slides)
+
+## MesosCon North America 2017
+[Video playlist](https://www.youtube.com/playlist?list=PLbzoR-pLrL6qAEnkhkh5tGI6oX_xXD3X4)
+
+[Slides](http://events17.linuxfoundation.org/events/archive/2017/mesoscon-north-america/program/slides)
+
+## MesosCon Asia 2017
+[Video playlist](https://www.youtube.com/playlist?list=PLbzoR-pLrL6rZfzCL_b-W9yxcJQhZ0RUg)
+
+[Slides](http://events17.linuxfoundation.org/events/archive/2017/mesoscon-asia/program/slides)
+
+## MesosCon Asia 2016
+[Video playlist](https://www.youtube.com/playlist?list=PLbzoR-pLrL6pLSHrXSg7IYgzSlkOh132K)
+
+[Slides](http://events17.linuxfoundation.org/events/archive/2016/mesoscon-asia/program/slides)
+
+## MesosCon Europe 2016
+[Slides](http://events17.linuxfoundation.org/events/archive/2016/mesoscon-europe/program/slides)
+
+## MesosCon North America 2016
+[Video playlist](https://www.youtube.com/playlist?list=PLGeM09tlguZQVL7ZsfNMffX9h1rGNVqnC)
+
+[Slides](http://events17.linuxfoundation.org/events/archive/2016/mesoscon-north-america/program/slides)
+
+## MesosCon Europe 2015
+[Video playlist](https://www.youtube.com/watch?v=K-x7yOy8Ymk&list=PLGeM09tlguZS6MhlSZDbf-gANWdKgje0I)
+
+[Slides](http://events17.linuxfoundation.org/events/archive/2015/mesoscon-europe/program/slides)
+
+## MesosCon North America 2015
+[Video playlist](https://www.youtube.com/watch?v=aV6pdWveN7s&list=PLVjgeV_avap2arug3vIz8c6l72rvh9poV)
+
+[Slides](http://events17.linuxfoundation.org/events/archive/2015/mesoscon-north-america/program/slides)
 
 ## Building and Deploying Applications to Apache Mesos
 ([Slides](https://www.slideshare.net/charmalloc/buildingdeployingapplicationsmesos))
@@ -99,3 +129,10 @@ Presented November 8, 2010 at [LinkedIn](http://linkedin.com)
 ### Mesos: A Resource Management Platform for Hadoop and Big Data Clusters ([Video](http://www.youtube.com/watch?v=lE3jR6nM3bw))
 Matei Zaharia
 Presented Summer 2010 at [Yahoo](http://yahoo.com)
+
+# Apache Mesos - Training
+_(Listed in date descending order)_
+
+## Automated Machine Learning Pipeline with Mesos ([Video](https://www.packtpub.com/big-data-and-business-intelligence/automated-machine-learning-pipeline-mesos-integrated-course))
+Karl Whitford
+Packt (November 2017)

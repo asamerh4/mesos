@@ -39,6 +39,7 @@
 #include <process/owned.hpp>
 #include <process/reap.hpp>
 
+#include <stout/exit.hpp>
 #include <stout/gtest.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/numify.hpp>
@@ -486,12 +487,8 @@ TEST_F(CgroupsAnyHierarchyTest, ROOT_CGROUPS_Write)
     // In child process, wait for kill signal.
     while (true) { sleep(1); }
 
-    // Should not reach here.
-    const char* message = "Error, child should be killed before reaching here";
-    while (write(STDERR_FILENO, message, strlen(message)) == -1 &&
-           errno == EINTR);
-
-    _exit(EXIT_FAILURE);
+    SAFE_EXIT(
+        EXIT_FAILURE, "Error, child should be killed before reaching here");
   }
 
   // In parent process.
@@ -1090,7 +1087,8 @@ protected:
 };
 
 
-TEST_F(CgroupsAnyHierarchyMemoryPressureTest, ROOT_IncreaseRSS)
+// TODO(alexr): Enable after MESOS-3160 is resolved.
+TEST_F(CgroupsAnyHierarchyMemoryPressureTest, DISABLED_ROOT_IncreaseRSS)
 {
   Try<os::Memory> memory = os::memory();
   ASSERT_SOME(memory);

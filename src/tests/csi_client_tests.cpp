@@ -28,9 +28,11 @@
 
 using std::string;
 
-using mesos::csi::Client;
+using mesos::csi::v0::Client;
 
 using process::Future;
+
+using process::grpc::Channel;
 
 using process::grpc::client::Runtime;
 
@@ -55,13 +57,13 @@ struct RPCParam
   template <typename Request, typename Response>
   RPCParam(const string& _name, Future<Response>(Client::*rpc)(const Request&))
     : name(_name),
-      call([=](const string& address, const Runtime runtime) {
-        return (Client(address, runtime).*rpc)(Request())
+      call([=](const Channel& channel, const Runtime runtime) {
+        return (Client(channel, runtime).*rpc)(Request())
           .then([] { return Nothing(); });
       }) {}
 
   string name;
-  lambda::function<Future<Nothing>(const string&, const Runtime&)> call;
+  lambda::function<Future<Nothing>(const Channel&, const Runtime&)> call;
 };
 
 
@@ -74,7 +76,10 @@ protected:
   {
     TemporaryDirectoryTest::SetUp();
 
-    ASSERT_SOME(plugin.Startup(GetPluginAddress()));
+    Try<Channel> _channel = plugin.startup();
+    ASSERT_SOME(_channel);
+
+    channel = _channel.get();
   }
 
   virtual void TearDown() override
@@ -82,18 +87,11 @@ protected:
     runtime.terminate();
     AWAIT_ASSERT_READY(runtime.wait());
 
-    ASSERT_SOME(plugin.Shutdown());
-  }
-
-  string GetPluginAddress()
-  {
-    // TODO(chhsiao): Use in-process tranport instead of a Unix domain
-    // socket once gRPC supports it for Windows support.
-    // https://github.com/grpc/grpc/pull/11145
-    return "unix://" + path::join(sandbox.get(), "socket");
+    ASSERT_SOME(plugin.shutdown());
   }
 
   MockCSIPlugin plugin;
+  Option<process::grpc::Channel> channel;
   process::grpc::client::Runtime runtime;
 };
 
@@ -106,8 +104,9 @@ INSTANTIATE_TEST_CASE_P(
     Identity,
     CSIClientTest,
     Values(
-        RPC_PARAM(Client::GetSupportedVersions),
-        RPC_PARAM(Client::GetPluginInfo)),
+        RPC_PARAM(Client::GetPluginInfo),
+        RPC_PARAM(Client::GetPluginCapabilities),
+        RPC_PARAM(Client::Probe)),
     RPCParam::Printer());
 
 INSTANTIATE_TEST_CASE_P(
@@ -128,10 +127,11 @@ INSTANTIATE_TEST_CASE_P(
     Node,
     CSIClientTest,
     Values(
+        RPC_PARAM(Client::NodeStageVolume),
+        RPC_PARAM(Client::NodeUnstageVolume),
         RPC_PARAM(Client::NodePublishVolume),
         RPC_PARAM(Client::NodeUnpublishVolume),
-        RPC_PARAM(Client::GetNodeID),
-        RPC_PARAM(Client::ProbeNode),
+        RPC_PARAM(Client::NodeGetId),
         RPC_PARAM(Client::NodeGetCapabilities)),
     RPCParam::Printer());
 
@@ -139,7 +139,7 @@ INSTANTIATE_TEST_CASE_P(
 // This test verifies that the all methods of CSI clients work.
 TEST_P(CSIClientTest, Call)
 {
-  Future<Nothing> call = GetParam().call(GetPluginAddress(), runtime);
+  Future<Nothing> call = GetParam().call(channel.get(), runtime);
   AWAIT_EXPECT_READY(call);
 }
 

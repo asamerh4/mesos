@@ -37,6 +37,7 @@
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
+#include <stout/uri.hpp>
 
 #include <stout/os/permissions.hpp>
 
@@ -96,7 +97,7 @@ public:
 };
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, FileURI)
+TEST_F(FetcherTest, FileURI)
 {
   string fromDir = path::join(os::getcwd(), "from");
   ASSERT_SOME(os::mkdir(fromDir));
@@ -110,11 +111,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, FileURI)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value("file://" + testFile);
+  uri->set_value(uri::from_path(testFile));
 
   Fetcher fetcher(flags);
 
@@ -128,11 +129,100 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, FileURI)
 }
 
 
-// TODO(hausdorff): `os::getuid` does not exist on Windows.
+TEST_F(FetcherTest, LogSuccessToStderr)
+{
+  // Valid test file with data.
+  string fromDir = path::join(os::getcwd(), "from");
+  ASSERT_SOME(os::mkdir(fromDir));
+  string testFile = path::join(fromDir, "test");
+  EXPECT_SOME(os::write(testFile, "data"));
+
+  string localFile = path::join(os::getcwd(), "test");
+  EXPECT_FALSE(os::exists(localFile));
+
+  // Fetcher stderr file.
+  string stderrFile = path::join(os::getcwd(), "stderr");
+  EXPECT_FALSE(os::exists(stderrFile));
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(uri::from_path(testFile));
+
+  Fetcher fetcher(flags);
+
+  Future<Nothing> fetch =
+    fetcher.fetch(containerId, commandInfo, os::getcwd(), None());
+  AWAIT_READY(fetch);
+
+  EXPECT_TRUE(os::exists(localFile));
+
+  // Fetcher created log file.
+  EXPECT_TRUE(os::exists(stderrFile));
+
+  // Fetcher logged success to stderr.
+  const Try<string> stderrContent = os::read(stderrFile);
+  EXPECT_SOME(stderrContent);
+  EXPECT_TRUE(strings::contains(
+      stderrContent.get(), "Fetching directly into the sandbox directory"));
+  EXPECT_TRUE(strings::contains(
+      stderrContent.get(), "Successfully fetched all URIs into"));
+}
+
+
+TEST_F(FetcherTest, LogFailureToStderr)
+{
+  // Purposefully invalid file to fetch.
+  string testFile = path::join(os::getcwd(), "test");
+  EXPECT_FALSE(os::exists(testFile));
+
+  string localFile = path::join(os::getcwd(), "test");
+  EXPECT_FALSE(os::exists(localFile));
+
+  // Fetcher stderr file.
+  string stderrFile = path::join(os::getcwd(), "stderr");
+  EXPECT_FALSE(os::exists(stderrFile));
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(uri::from_path(testFile));
+
+  Fetcher fetcher(flags);
+
+  Future<Nothing> fetch =
+    fetcher.fetch(containerId, commandInfo, os::getcwd(), None());
+  AWAIT_FAILED(fetch);
+
+  // Failed to fetch.
+  EXPECT_FALSE(os::exists(localFile));
+
+  // Fetcher created log file.
+  EXPECT_TRUE(os::exists(stderrFile));
+
+  // Fetcher logged failure to stderr.
+  Try<string> stderrContent = os::read(stderrFile);
+  EXPECT_SOME(stderrContent);
+  EXPECT_TRUE(strings::contains(stderrContent.get(), "Failed to fetch"));
+}
+
+
+// TODO(coffler): Test uses os::getuid(), which does not exist on Windows.
+//     Disable test until privilege model is worked out on Windows.
 #ifndef __WINDOWS__
 // Tests that non-root users are unable to fetch root-protected files on the
 // local filesystem.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, ROOT_RootProtectedFileURI)
+TEST_F(FetcherTest, ROOT_RootProtectedFileURI)
 {
   const string user = "nobody";
   ASSERT_SOME(os::getuid(user));
@@ -147,13 +237,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, ROOT_RootProtectedFileURI)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   commandInfo.set_user(user);
 
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value("file://" + testFile);
+  uri->set_value(uri::from_path(testFile));
 
   Fetcher fetcher(flags);
 
@@ -166,12 +256,12 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, ROOT_RootProtectedFileURI)
 #endif // __WINDOWS__
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, CustomOutputFileSubdirectory)
+TEST_F(FetcherTest, CustomOutputFileSubdirectory)
 {
   string testFile = path::join(os::getcwd(), "test");
   EXPECT_SOME(os::write(testFile, "data"));
 
-  string customOutputFile = "subdir/custom.txt";
+  string customOutputFile = path::join("subdir", "custom.txt");
   string localFile = path::join(os::getcwd(), customOutputFile);
   EXPECT_FALSE(os::exists(localFile));
 
@@ -179,11 +269,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, CustomOutputFileSubdirectory)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value("file://" + testFile);
+  uri->set_value(uri::from_path(testFile));
   uri->set_output_file(customOutputFile);
 
   Fetcher fetcher(flags);
@@ -201,7 +291,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, CustomOutputFileSubdirectory)
 // Negative test: invalid custom URI output file. If the user specifies a
 // path for the file saved in the sandbox that has a directory component,
 // it must be a relative path.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, AbsoluteCustomSubdirectoryFails)
+TEST_F(FetcherTest, AbsoluteCustomSubdirectoryFails)
 {
   string fromDir = path::join(os::getcwd(), "from");
   ASSERT_SOME(os::mkdir(fromDir));
@@ -216,11 +306,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, AbsoluteCustomSubdirectoryFails)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value("file://" + testFile);
+  uri->set_value(uri::from_path(testFile));
   uri->set_output_file(customOutputFile);
 
   Fetcher fetcher(flags);
@@ -238,6 +328,9 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, AbsoluteCustomSubdirectoryFails)
 // Negative test: invalid user name. Copied from FileTest, so this
 // normally would succeed, but here a bogus user name is specified.
 // So we check for fetch failure.
+//
+// This won't work on Windows because file ownership and permissions
+// support isn't implemented, see MESOS-3176.
 TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, InvalidUser)
 {
   string fromDir = path::join(os::getcwd(), "from");
@@ -253,13 +346,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, InvalidUser)
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
-  commandInfo.set_user(UUID::random().toString());
+  commandInfo.set_user(id::UUID::random().toString());
 
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value("file://" + testFile);
+  uri->set_value(uri::from_path(testFile));
 
   Fetcher fetcher(flags);
 
@@ -279,7 +372,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, InvalidUser)
 
 // Negative test: URI leading to non-existing file. Copied from FileTest,
 // but here the resource is missing. So we check for fetch failure.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NonExistingFile)
+TEST_F(FetcherTest, NonExistingFile)
 {
   string fromDir = path::join(os::getcwd(), "from");
   ASSERT_SOME(os::mkdir(fromDir));
@@ -290,11 +383,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NonExistingFile)
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value("file://" + testFile);
+  uri->set_value(uri::from_path(testFile));
 
   Fetcher fetcher(flags);
 
@@ -317,7 +410,7 @@ TEST_F(FetcherTest, MalformedURI)
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -336,7 +429,7 @@ TEST_F(FetcherTest, MalformedURI)
 }
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, AbsoluteFilePath)
+TEST_F(FetcherTest, AbsoluteFilePath)
 {
   string fromDir = path::join(os::getcwd(), "from");
   ASSERT_SOME(os::mkdir(fromDir));
@@ -350,11 +443,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, AbsoluteFilePath)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(testPath);
+  uri->set_value(uri::from_path(testPath));
 
   Fetcher fetcher(flags);
 
@@ -368,7 +461,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, AbsoluteFilePath)
 }
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, RelativeFilePath)
+TEST_F(FetcherTest, RelativeFilePath)
 {
   string fromDir = path::join(os::getcwd(), "from");
   ASSERT_SOME(os::mkdir(fromDir));
@@ -382,7 +475,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, RelativeFilePath)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -455,7 +548,7 @@ public:
 };
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriTest)
+TEST_F(FetcherTest, OSNetUriTest)
 {
   Http http;
 
@@ -465,7 +558,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriTest)
       "http",
       address.ip,
       address.port,
-      path::join(http.process->self().id, "test"));
+      strings::join("/", http.process->self().id, "test"));
 
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
@@ -475,7 +568,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriTest)
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -501,7 +594,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriTest)
 // characters. This was added as a verification for MESOS-2862.
 //
 // TODO(hartem): This test case should be merged with the previous one.
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriSpaceTest)
+TEST_F(FetcherTest, OSNetUriSpaceTest)
 {
   Http http;
 
@@ -511,7 +604,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriSpaceTest)
       "http",
       address.ip,
       address.port,
-      path::join(http.process->self().id, "test"));
+      strings::join("/", http.process->self().id, "test"));
 
   string localFile = path::join(os::getcwd(), "test");
   EXPECT_FALSE(os::exists(localFile));
@@ -521,7 +614,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriSpaceTest)
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -546,7 +639,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, OSNetUriSpaceTest)
 }
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, FileLocalhostURI)
+TEST_F(FetcherTest, FileLocalhostURI)
 {
   string fromDir = path::join(os::getcwd(), "from");
   ASSERT_SOME(os::mkdir(fromDir));
@@ -560,11 +653,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, FileLocalhostURI)
   flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(path::join("file://localhost", testFile));
+  uri->set_value(uri::from_path(testFile));
 
   Fetcher fetcher(flags);
 
@@ -578,6 +671,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, FileLocalhostURI)
 }
 
 
+// Test disabled on Windows until permissions handling is worked out,
+// see MESOS-3176.
 TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractNotExecutable)
 {
   // First construct a temporary file that can be fetched.
@@ -588,7 +683,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractNotExecutable)
   ASSERT_SOME(path);
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -618,6 +713,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractNotExecutable)
 }
 
 
+// Test disabled on Windows until permissions handling is worked out,
+// see MESOS-3176.
 TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractExecutable)
 {
   // First construct a temporary file that can be fetched.
@@ -628,7 +725,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractExecutable)
   ASSERT_SOME(path);
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -660,6 +757,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, NoExtractExecutable)
 
 
 // NOTE: This is disabled on Windows because `os::shell()` is deleted.
+// Also, permissions handling needs to be worked out, see MESOS-3176.
 #ifndef __WINDOWS__
 TEST_F(FetcherTest, ExtractNotExecutable)
 {
@@ -682,7 +780,7 @@ TEST_F(FetcherTest, ExtractNotExecutable)
       "tar cf '" + path.get() + ".tar.gz' '" + path.get() + "' 2>&1"));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -718,6 +816,10 @@ TEST_F(FetcherTest, ExtractNotExecutable)
 
 // Tests extracting tar file with extension .tar.
 // NOTE: This is disabled on Windows because `os::shell()` is deleted.
+//
+// Won't be supported on Windows for now; long term thoughts are to perhaps
+// use a code library to provide 'tar' functionality programmatically,
+// see MESOS-8064.
 #ifndef __WINDOWS__
 TEST_F(FetcherTest, ExtractTar)
 {
@@ -739,11 +841,11 @@ TEST_F(FetcherTest, ExtractTar)
       "tar cf '" + path.get() + ".tar' '" + path.get() + "' 2>&1"));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(path.get() + ".tar");
+  uri->set_value(uri::from_path(path.get() + ".tar"));
   uri->set_extract(true);
 
   slave::Flags flags;
@@ -766,6 +868,10 @@ TEST_F(FetcherTest, ExtractTar)
 
 
 // NOTE: This is disabled on Windows because `os::shell()` is deleted.
+//
+// Won't be supported on Windows for now; long term thoughts are to perhaps
+// use a code library to provide 'gzip' functionality programmatically,
+// see MESOS-8064.
 #ifndef __WINDOWS__
 TEST_F(FetcherTest, ExtractGzipFile)
 {
@@ -781,7 +887,7 @@ TEST_F(FetcherTest, ExtractGzipFile)
   ASSERT_SOME(os::shell("gzip " + path.get()));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -808,7 +914,7 @@ TEST_F(FetcherTest, ExtractGzipFile)
 #endif // __WINDOWS__
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UNZIP_ExtractFile)
+TEST_F(FetcherTest, UNZIP_ExtractFile)
 {
   // Construct a tmp file that can be fetched and archived with zip.
   string fromDir = path::join(os::getcwd(), "from");
@@ -831,11 +937,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UNZIP_ExtractFile)
   ASSERT_SOME(os::rename(path.get(), path.get() + ".zip"));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(path.get() + ".zip");
+  uri->set_value(uri::from_path(path.get() + ".zip"));
   uri->set_extract(true);
 
   slave::Flags flags;
@@ -860,7 +966,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UNZIP_ExtractFile)
 }
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UNZIP_ExtractInvalidFile)
+TEST_F(FetcherTest, UNZIP_ExtractInvalidFile)
 {
   // Construct a tmp file that can be filled with broken zip.
   string fromDir = path::join(os::getcwd(), "from");
@@ -884,11 +990,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UNZIP_ExtractInvalidFile)
   ASSERT_SOME(os::rename(path.get(), path.get() + ".zip"));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(path.get() + ".zip");
+  uri->set_value(uri::from_path(path.get() + ".zip"));
   uri->set_extract(true);
 
   slave::Flags flags;
@@ -902,20 +1008,37 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UNZIP_ExtractInvalidFile)
       os::getcwd(),
       None());
 
+#ifdef __WINDOWS__
+  // On Windows, PowerShell doesn't consider a CRC error to be an error,
+  // so it succeeds, whereas the zip utility errors.
+  //
+  // TODO(coffler): When we move to programmatically dealing with various
+  // data files (tar, gzip, zip, etc), we should be able to resolve this.
+  // See MESOS-7740 for further details.
+  AWAIT_READY(fetch);
+#else
   AWAIT_FAILED(fetch);
+#endif // __WINDOWS__
 
   string extractedFile = path::join(os::getcwd(), "world");
   ASSERT_TRUE(os::exists(extractedFile));
 
   ASSERT_SOME_EQ("hello hello\n", os::read(extractedFile));
 
+#ifdef __WINDOWS__
+  // TODO(coffler): Eliminate with programmatic decoding of container files.
+  // See MESOS-7740 for further details.
+  //
+  // On Windows, PowerShell doesn't consider a CRC error to be an error.
+  // Adjust metrics appropriately to not expect an error back.
+  verifyMetrics(1, 0);
+#else
   verifyMetrics(0, 1);
+#endif // __WINDOWS__
 }
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(
-    FetcherTest,
-    UNZIP_ExtractFileWithDuplicatedEntries)
+TEST_F(FetcherTest, UNZIP_ExtractFileWithDuplicatedEntries)
 {
   // Construct a tmp file that can be filled with zip containing
   // duplicates.
@@ -941,11 +1064,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   ASSERT_SOME(os::rename(path.get(), path.get() + ".zip"));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(path.get() + ".zip");
+  uri->set_value(uri::from_path(path.get() + ".zip"));
   uri->set_extract(true);
 
   slave::Flags flags;
@@ -970,7 +1093,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 }
 
 
-TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UseCustomOutputFile)
+TEST_F(FetcherTest, UseCustomOutputFile)
 {
   // First construct a temporary file that can be fetched.
   Try<string> dir = os::mkdtemp(path::join(os::getcwd(), "XXXXXX"));
@@ -982,12 +1105,12 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, UseCustomOutputFile)
   ASSERT_SOME(os::write(path.get(), "hello renamed file"));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   const string customOutputFile = "custom.txt";
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
-  uri->set_value(path.get());
+  uri->set_value(uri::from_path(path.get()));
   uri->set_extract(true);
   uri->set_output_file(customOutputFile);
 
@@ -1025,7 +1148,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(FetcherTest, CustomGzipOutputFile)
   ASSERT_SOME(os::shell("gzip " + path.get()));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   const string customOutputFile = "custom";
   CommandInfo commandInfo;
@@ -1124,7 +1247,7 @@ TEST_F(FetcherTest, HdfsURI)
   flags.hadoop_home = hadoopPath;
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();
@@ -1178,7 +1301,7 @@ TEST_F(FetcherTest, SSLEnvironmentSpillover)
   ASSERT_SOME(os::shell("gzip " + path.get()));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   CommandInfo commandInfo;
   CommandInfo::URI* uri = commandInfo.add_uris();

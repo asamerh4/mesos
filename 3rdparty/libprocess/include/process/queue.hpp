@@ -31,6 +31,7 @@ class Queue
 public:
   Queue() : data(new Data()) {}
 
+  // TODO(bmahler): Take a T&& here instead.
   void put(const T& t)
   {
     // NOTE: We need to grab the promise 'date->promises.front()' but
@@ -58,13 +59,38 @@ public:
 
     synchronized (data->lock) {
       if (data->elements.empty()) {
-        data->promises.push_back(Owned<Promise<T>>(new Promise<T>()));
+        data->promises.emplace_back(new Promise<T>());
         future = data->promises.back()->future();
       } else {
-        future = Future<T>(data->elements.front());
+        T t = std::move(data->elements.front());
         data->elements.pop();
+        return Future<T>(std::move(t));
       }
     }
+
+    // If there were no items available, we set up a discard
+    // handler. This is done here to minimize the amount of
+    // work done within the critical section above.
+    auto weak_data = std::weak_ptr<Data>(data);
+
+    future.onDiscard([weak_data, future]() {
+      auto data = weak_data.lock();
+      if (!data) {
+        return;
+      }
+
+      synchronized (data->lock) {
+        for (auto it = data->promises.begin();
+             it != data->promises.end();
+             ++it) {
+          if ((*it)->future() == future) {
+            (*it)->discard();
+            data->promises.erase(it);
+            break;
+          }
+        }
+      }
+    });
 
     return future;
   }

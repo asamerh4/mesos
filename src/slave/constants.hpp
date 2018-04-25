@@ -35,11 +35,11 @@ namespace slave {
 constexpr Duration EXECUTOR_REGISTRATION_TIMEOUT = Minutes(1);
 constexpr Duration EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(2);
 
-// The maximum timeout within which an executor can re-register.
+// The maximum timeout within which an executor can reregister.
 // Note that this value has to be << 'MIN_AGENT_REREGISTER_TIMEOUT'
 // declared in 'master/constants.hpp'; since agent recovery will only
 // complete after this timeout has elapsed, this ensures that the
-// agent can re-register with the master before it is marked
+// agent can reregister with the master before it is marked
 // unreachable and its tasks are transitioned to TASK_UNREACHABLE or
 // TASK_LOST.
 constexpr Duration MAX_EXECUTOR_REREGISTRATION_TIMEOUT = Seconds(15);
@@ -50,6 +50,8 @@ constexpr Duration DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD = Seconds(5);
 
 constexpr Duration RECOVERY_TIMEOUT = Minutes(15);
 
+// TODO(gkleiman): Move this to a different file once `TaskStatusUpdateManager`
+// uses `StatusUpdateManagerProcess`. See MESOS-8296.
 constexpr Duration STATUS_UPDATE_RETRY_INTERVAL_MIN = Seconds(10);
 constexpr Duration STATUS_UPDATE_RETRY_INTERVAL_MAX = Minutes(10);
 
@@ -84,6 +86,14 @@ constexpr size_t MAX_COMPLETED_FRAMEWORKS = 50;
 constexpr size_t DEFAULT_MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK = 150;
 
 // Maximum number of completed tasks per executor to store in memory.
+//
+// NOTE: This should be greater than zero because the agent looks
+// for completed tasks to determine (with false positives) whether
+// an executor ever received tasks. See MESOS-8411.
+//
+// TODO(mzhu): Remove this note once we can determine whether an
+// executor ever received tasks without looking through the
+// completed tasks.
 constexpr size_t MAX_COMPLETED_TASKS_PER_EXECUTOR = 200;
 
 // Default cpus offered by the slave.
@@ -125,6 +135,9 @@ constexpr Duration DOCKER_REMOVE_DELAY = Hours(6);
 // container.
 constexpr Duration DOCKER_INSPECT_DELAY = Seconds(1);
 
+// Default duration to wait for `inspect` command completion.
+constexpr Duration DOCKER_INSPECT_TIMEOUT = Seconds(5);
+
 // Default maximum number of docker inspect calls docker ps will invoke
 // in parallel to prevent hitting system's open file descriptor limit.
 constexpr size_t DOCKER_PS_MAX_INSPECT_CALLS = 100;
@@ -157,12 +170,22 @@ constexpr char EXECUTOR_HTTP_AUTHENTICATION_REALM[] = "mesos-agent-executor";
 // Default maximum storage space to be used by the fetcher cache.
 constexpr Bytes DEFAULT_FETCHER_CACHE_SIZE = Gigabytes(2);
 
+// Default timeout for the fetcher to wait when a net download stalls.
+constexpr Duration DEFAULT_FETCHER_STALL_TIMEOUT = Minutes(1);
+
 // If no pings received within this timeout, then the slave will
 // trigger a re-detection of the master to cause a re-registration.
 Duration DEFAULT_MASTER_PING_TIMEOUT();
 
 // Name of the executable for default executor.
+#ifdef __WINDOWS__
+constexpr char MESOS_DEFAULT_EXECUTOR[] = "mesos-default-executor.exe";
+#else
 constexpr char MESOS_DEFAULT_EXECUTOR[] = "mesos-default-executor";
+#endif // __WINDOWS__
+
+// Virtual path on which agent logs are mounted in `/files/` endpoint.
+constexpr char AGENT_LOG_VIRTUAL_PATH[] = "/slave/log";
 
 std::vector<SlaveInfo::Capability> AGENT_CAPABILITIES();
 

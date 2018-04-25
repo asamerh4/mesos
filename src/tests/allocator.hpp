@@ -99,7 +99,13 @@ ACTION_P(InvokeRemoveSlave, allocator)
 
 ACTION_P(InvokeUpdateSlave, allocator)
 {
-  allocator->real->updateSlave(arg0, arg1, arg2);
+  allocator->real->updateSlave(arg0, arg1, arg2, arg3);
+}
+
+
+ACTION_P(InvokeAddResourceProvider, allocator)
+{
+  allocator->real->addResourceProvider(arg0, arg1, arg2);
 }
 
 
@@ -274,9 +280,14 @@ public:
     EXPECT_CALL(*this, removeSlave(_))
       .WillRepeatedly(DoDefault());
 
-    ON_CALL(*this, updateSlave(_, _, _))
+    ON_CALL(*this, updateSlave(_, _, _, _))
       .WillByDefault(InvokeUpdateSlave(this));
-    EXPECT_CALL(*this, updateSlave(_, _, _))
+    EXPECT_CALL(*this, updateSlave(_, _, _, _))
+      .WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, addResourceProvider(_, _, _))
+      .WillByDefault(InvokeAddResourceProvider(this));
+    EXPECT_CALL(*this, addResourceProvider(_, _, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, activateSlave(_))
@@ -405,10 +416,16 @@ public:
   MOCK_METHOD1(removeSlave, void(
       const SlaveID&));
 
-  MOCK_METHOD3(updateSlave, void(
+  MOCK_METHOD4(updateSlave, void(
       const SlaveID&,
+      const SlaveInfo&,
       const Option<Resources>&,
       const Option<std::vector<SlaveInfo::Capability>>&));
+
+  MOCK_METHOD3(addResourceProvider, void(
+      const SlaveID&,
+      const Resources&,
+      const hashmap<FrameworkID, Resources>&));
 
   MOCK_METHOD1(activateSlave, void(
       const SlaveID&));
@@ -427,7 +444,7 @@ public:
       const FrameworkID&,
       const SlaveID&,
       const Resources&,
-      const std::vector<Offer::Operation>&));
+      const std::vector<ResourceConversion>&));
 
   MOCK_METHOD2(updateAvailable, process::Future<Nothing>(
       const SlaveID&,

@@ -86,7 +86,7 @@ public:
 
   MOCK_METHOD4(
       launch,
-      process::Future<bool>(
+      process::Future<slave::Containerizer::LaunchResult>(
           const ContainerID&,
           const mesos::slave::ContainerConfig&,
           const std::map<std::string, std::string>&,
@@ -116,15 +116,20 @@ public:
 
   MOCK_METHOD1(
       destroy,
-      process::Future<bool>(const ContainerID&));
+      process::Future<Option<mesos::slave::ContainerTermination>>(
+          const ContainerID&));
 
   MOCK_METHOD2(
       kill,
       process::Future<bool>(const ContainerID&, int));
 
+  MOCK_METHOD1(
+      pruneImages,
+      process::Future<Nothing>(const std::vector<Image>&));
+
   // Additional destroy method for testing because we won't know the
   // ContainerID created for each container.
-  process::Future<bool> destroy(
+  process::Future<Option<mesos::slave::ContainerTermination>> destroy(
       const FrameworkID& frameworkId,
       const ExecutorID& executorId);
 
@@ -138,7 +143,7 @@ private:
   process::Future<Nothing> _recover(
       const Option<slave::state::SlaveState>& state);
 
-  process::Future<bool> _launch(
+  process::Future<slave::Containerizer::LaunchResult> _launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -160,12 +165,15 @@ private:
   process::Future<Option<mesos::slave::ContainerTermination>> _wait(
       const ContainerID& containerId);
 
-  process::Future<bool> _destroy(
+  process::Future<Option<mesos::slave::ContainerTermination>> _destroy(
       const ContainerID& containerId);
 
   process::Future<bool> _kill(
       const ContainerID& containerId,
       int status);
+
+  process::Future<Nothing> _pruneImages(
+      const std::vector<Image>& excludedImages);
 
   process::Owned<TestContainerizerProcess> process;
 };

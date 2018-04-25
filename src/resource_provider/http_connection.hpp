@@ -162,17 +162,17 @@ public:
               lambda::_1));
   }
 
+  void start()
+  {
+    detection = detector->detect(None())
+      .onAny(defer(self(), &Self::detected, lambda::_1));
+  }
+
 protected:
   // Because we're deriving from a templated base class, we have
   // to explicitly bring these hidden base class names into scope.
   using process::Process<HttpConnectionProcess<Call, Event>>::self;
   typedef HttpConnectionProcess<Call, Event> Self;
-
-  void initialize() override
-  {
-    detection = detector->detect(None())
-      .onAny(defer(self(), &Self::detected, lambda::_1));
-  }
 
   void finalize() override
   {
@@ -216,11 +216,11 @@ protected:
 
       endpoint = None();
     } else {
-      endpoint = future.get().get();
+      endpoint = future->get();
 
       LOG(INFO) << "New endpoint detected at " << endpoint.get();
 
-      connectionId = UUID::random();
+      connectionId = id::UUID::random();
 
       dispatch(self(), &Self::connect, connectionId.get());
     }
@@ -229,7 +229,7 @@ protected:
       .onAny(defer(self(), &Self::detected, lambda::_1));
   }
 
-  void connect(const UUID& _connectionId)
+  void connect(const id::UUID& _connectionId)
   {
     // It is possible that a new endpoint was detected while we were
     // waiting to establish a connection with the old master.
@@ -253,7 +253,7 @@ protected:
   }
 
   void connected(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const process::Future<std::tuple<
         process::http::Connection, process::http::Connection>>& _connections)
   {
@@ -322,9 +322,10 @@ protected:
     subscribed = None();
     endpoint = None();
     connectionId = None();
+    detection.discard();
   }
 
-  void disconnected(const UUID& _connectionId, const std::string& failure)
+  void disconnected(const id::UUID& _connectionId, const std::string& failure)
   {
     // Ignore if the disconnection happened from an old stale connection.
     if (connectionId != _connectionId) {
@@ -339,7 +340,7 @@ protected:
   }
 
   process::Future<Nothing> _send(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const Call& call,
       const process::http::Response& response)
   {
@@ -372,8 +373,8 @@ protected:
       subscribed = SubscribedResponse(reader, std::move(decoder));
 
       if (response.headers.contains("Mesos-Stream-Id")) {
-        Try<UUID> uuid =
-          UUID::fromString(response.headers.at("Mesos-Stream-Id"));
+        Try<id::UUID> uuid =
+          id::UUID::fromString(response.headers.at("Mesos-Stream-Id"));
 
         CHECK_SOME(uuid);
 
@@ -451,7 +452,7 @@ protected:
     if (event->isError()) {
       LOG(ERROR) << "Failed to de-serialize event: " << event->error();
     } else {
-      receive(event.get().get());
+      receive(event->get());
     }
 
     read();
@@ -553,8 +554,8 @@ private:
   // while an attempt was in progress). This helps us in uniquely
   // identifying the current connection instance and ignoring the
   // stale instance.
-  Option<UUID> connectionId;
-  Option<UUID> streamId;
+  Option<id::UUID> connectionId;
+  Option<id::UUID> streamId;
 
   process::Future<Option<process::http::URL>> detection;
 };

@@ -46,11 +46,15 @@
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
+#include <process/http.hpp>
+#include <process/io.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/process.hpp>
 #include <process/queue.hpp>
+#include <process/subprocess.hpp>
 
+#include <process/ssl/flags.hpp>
 #include <process/ssl/gtest.hpp>
 
 #include <stout/bytes.hpp>
@@ -61,6 +65,7 @@
 #include <stout/option.hpp>
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 #include <stout/uuid.hpp>
 
 #include "common/http.hpp"
@@ -101,7 +106,7 @@ namespace tests {
 constexpr char READONLY_HTTP_AUTHENTICATION_REALM[] = "test-readonly-realm";
 constexpr char READWRITE_HTTP_AUTHENTICATION_REALM[] = "test-readwrite-realm";
 constexpr char DEFAULT_TEST_ROLE[] = "default-role";
-constexpr char DEFAULT_EXECUTOR_SECRET_KEY[] =
+constexpr char DEFAULT_JWT_SECRET_KEY[] =
   "72kUKUFtghAjNbIOvLzfF2RxNBfeM64Bri8g9WhpyaunwqRB/yozHAqSnyHbddAV"
   "PcWRQlrJAt871oWgSH+n52vMZ3aVI+AFMzXSo8+sUfMk83IGp0WJefhzeQsjDlGH"
   "GYQgCAuGim0BE2X5U+lEue8s697uQpAO8L/FFRuDH2s";
@@ -171,19 +176,22 @@ protected:
   // Starts a slave with the specified detector and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
       mesos::master::detector::MasterDetector* detector,
-      const Option<slave::Flags>& flags = None());
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
 
   // Starts a slave with the specified detector, containerizer, and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
       mesos::master::detector::MasterDetector* detector,
       slave::Containerizer* containerizer,
-      const Option<slave::Flags>& flags = None());
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
 
   // Starts a slave with the specified detector, id, and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
       mesos::master::detector::MasterDetector* detector,
       const std::string& id,
-      const Option<slave::Flags>& flags = None());
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
 
   // Starts a slave with the specified detector, containerizer, id, and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
@@ -196,7 +204,8 @@ protected:
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
       mesos::master::detector::MasterDetector* detector,
       slave::GarbageCollector* gc,
-      const Option<slave::Flags>& flags = None());
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
 
   // Starts a slave with the specified detector, resource estimator, and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
@@ -224,13 +233,15 @@ protected:
       mesos::master::detector::MasterDetector* detector,
       slave::Containerizer* containerizer,
       mesos::slave::QoSController* qosController,
-      const Option<slave::Flags>& flags = None());
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
 
   // Starts a slave with the specified detector, authorizer, and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
       mesos::master::detector::MasterDetector* detector,
       mesos::Authorizer* authorizer,
-      const Option<slave::Flags>& flags = None());
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
 
   // Starts a slave with the specified detector, containerizer, authorizer,
   // and flags.
@@ -238,12 +249,54 @@ protected:
       mesos::master::detector::MasterDetector* detector,
       slave::Containerizer* containerizer,
       mesos::Authorizer* authorizer,
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
+
+  // Starts a slave with the specified detector, containerizer,
+  // secretGenerator, authorizer and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
+      mesos::master::detector::MasterDetector* detector,
+      slave::Containerizer* containerizer,
+      mesos::SecretGenerator* secretGenerator,
+      const Option<mesos::Authorizer*>& authorizer = None(),
+      const Option<slave::Flags>& flags = None(),
+      bool mock = false);
+
+  // Starts a slave with the specified detector, secretGenerator,
+  // and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
+      mesos::master::detector::MasterDetector* detector,
+      mesos::SecretGenerator* secretGenerator,
       const Option<slave::Flags>& flags = None());
 
   Option<zookeeper::URL> zookeeperUrl;
 
+  // NOTE: On Windows, most tasks are run under PowerShell, which uses ~150 MB
+  // of memory per-instance due to loading .NET. Realistically, PowerShell can
+  // be called more than once in a task, so 512 MB is the safe minimum.
+  // Furthermore, because the Windows `cpu` isolator is a hard-cap, 0.1 CPUs
+  // will cause the task (or even a check command) to timeout, so 1 CPU is the
+  // safe minimum.
+  //
+  // Because multiple tasks can be run, the default agent resources needs to be
+  // at least a multiple of the default task resources: four times seems safe.
+  //
+  // On platforms where the shell is, e.g. Bash, the minimum is much lower.
   const std::string defaultAgentResourcesString{
-    "cpus:2;gpus:0;mem:1024;disk:1024;ports:[31000-32000]"};
+#ifdef __WINDOWS__
+      "cpus:4;gpus:0;mem:2048;disk:1024;ports:[31000-32000]"
+#else
+      "cpus:2;gpus:0;mem:1024;disk:1024;ports:[31000-32000]"
+#endif // __WINDOWS__
+      };
+
+  const std::string defaultTaskResourcesString{
+#ifdef __WINDOWS__
+      "cpus:1;mem:512;disk:32"
+#else
+      "cpus:0.1;mem:32;disk:32"
+#endif // __WINDOWS__
+      };
 };
 
 
@@ -360,6 +413,16 @@ namespace maintenance = mesos::v1::maintenance;
 namespace master = mesos::v1::master;
 namespace quota = mesos::v1::quota;
 
+using mesos::v1::OPERATION_PENDING;
+using mesos::v1::OPERATION_FINISHED;
+using mesos::v1::OPERATION_FAILED;
+using mesos::v1::OPERATION_ERROR;
+using mesos::v1::OPERATION_DROPPED;
+using mesos::v1::OPERATION_UNREACHABLE;
+using mesos::v1::OPERATION_GONE_BY_OPERATOR;
+using mesos::v1::OPERATION_RECOVERING;
+using mesos::v1::OPERATION_UNKNOWN;
+
 using mesos::v1::TASK_STAGING;
 using mesos::v1::TASK_STARTING;
 using mesos::v1::TASK_RUNNING;
@@ -391,7 +454,12 @@ using mesos::v1::InverseOffer;
 using mesos::v1::MachineID;
 using mesos::v1::Metric;
 using mesos::v1::Offer;
+using mesos::v1::OperationID;
+using mesos::v1::OperationState;
+using mesos::v1::OperationStatus;
 using mesos::v1::Resource;
+using mesos::v1::ResourceProviderID;
+using mesos::v1::ResourceProviderInfo;
 using mesos::v1::Resources;
 using mesos::v1::TaskID;
 using mesos::v1::TaskInfo;
@@ -441,6 +509,9 @@ struct DefaultFrameworkInfo
     framework.set_user(os::user().get());
     framework.set_principal(
         DefaultCredential<TCredential>::create().principal());
+    framework.add_roles("*");
+    framework.add_capabilities()->set_type(
+        TFrameworkInfo::Capability::MULTI_ROLE);
     framework.add_capabilities()->set_type(
         TFrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
@@ -471,56 +542,6 @@ using DefaultFrameworkInfo =
 // We factor out all common behavior and templatize it so that we can
 // can call it from both `v1::` and `internal::`.
 namespace common {
-template <typename TExecutorInfo, typename TResources, typename TCommandInfo>
-inline TExecutorInfo createExecutorInfo(
-    const std::string& executorId,
-    const Option<TCommandInfo>& command = None(),
-    const Option<std::string>& resources = None(),
-    const Option<typename TExecutorInfo::Type>& type = None())
-{
-  TExecutorInfo executor;
-  executor.mutable_executor_id()->set_value(executorId);
-  if (command.isSome()) {
-    executor.mutable_command()->CopyFrom(command.get());
-  }
-  if (resources.isSome()) {
-    executor.mutable_resources()->CopyFrom(
-        TResources::parse(resources.get()).get());
-  }
-  if (type.isSome()) {
-    executor.set_type(type.get());
-  }
-  return executor;
-}
-
-
-template <typename TExecutorInfo, typename TResources, typename TCommandInfo>
-inline TExecutorInfo createExecutorInfo(
-    const std::string& executorId,
-    const std::string& command,
-    const Option<std::string>& resources = None(),
-    const Option<typename TExecutorInfo::Type>& type = None())
-{
-  TCommandInfo commandInfo;
-  commandInfo.set_value(command);
-  return createExecutorInfo<TExecutorInfo, TResources, TCommandInfo>(
-      executorId, commandInfo, resources, type);
-}
-
-
-template <typename TExecutorInfo, typename TResources, typename TCommandInfo>
-inline TExecutorInfo createExecutorInfo(
-    const std::string& executorId,
-    const char* command,
-    const Option<std::string>& resources = None(),
-    const Option<typename TExecutorInfo::Type>& type = None())
-{
-  return createExecutorInfo<TExecutorInfo, TResources, TCommandInfo>(
-      executorId,
-      std::string(command),
-      resources);
-}
-
 
 template <typename TCommandInfo>
 inline TCommandInfo createCommandInfo(
@@ -541,6 +562,140 @@ inline TCommandInfo createCommandInfo(
 }
 
 
+template <typename TExecutorInfo,
+          typename TExecutorID,
+          typename TResources,
+          typename TCommandInfo,
+          typename TFrameworkID>
+inline TExecutorInfo createExecutorInfo(
+    const TExecutorID& executorId,
+    const Option<TCommandInfo>& command,
+    const Option<TResources>& resources,
+    const Option<typename TExecutorInfo::Type>& type,
+    const Option<TFrameworkID>& frameworkId)
+{
+  TExecutorInfo executor;
+  executor.mutable_executor_id()->CopyFrom(executorId);
+  if (command.isSome()) {
+    executor.mutable_command()->CopyFrom(command.get());
+  }
+  if (resources.isSome()) {
+    executor.mutable_resources()->CopyFrom(resources.get());
+  }
+  if (type.isSome()) {
+    executor.set_type(type.get());
+  }
+  if (frameworkId.isSome()) {
+    executor.mutable_framework_id()->CopyFrom(frameworkId.get());
+  }
+  return executor;
+}
+
+
+template <typename TExecutorInfo,
+          typename TExecutorID,
+          typename TResources,
+          typename TCommandInfo,
+          typename TFrameworkID>
+inline TExecutorInfo createExecutorInfo(
+    const std::string& _executorId,
+    const Option<TCommandInfo>& command,
+    const Option<TResources>& resources,
+    const Option<typename TExecutorInfo::Type>& type,
+    const Option<TFrameworkID>& frameworkId)
+{
+  TExecutorID executorId;
+  executorId.set_value(_executorId);
+  return createExecutorInfo<TExecutorInfo,
+                            TExecutorID,
+                            TResources,
+                            TCommandInfo,
+                            TFrameworkID>(
+      executorId, command, resources, type, frameworkId);
+}
+
+
+template <typename TExecutorInfo,
+          typename TExecutorID,
+          typename TResources,
+          typename TCommandInfo,
+          typename TFrameworkID>
+inline TExecutorInfo createExecutorInfo(
+    const std::string& executorId,
+    const Option<TCommandInfo>& command = None(),
+    const Option<std::string>& resources = None(),
+    const Option<typename TExecutorInfo::Type>& type = None(),
+    const Option<TFrameworkID>& frameworkId = None())
+{
+  if (resources.isSome()) {
+    return createExecutorInfo<TExecutorInfo,
+                              TExecutorID,
+                              TResources,
+                              TCommandInfo,
+                              TFrameworkID>(
+        executorId,
+        command,
+        TResources::parse(resources.get()).get(),
+        type,
+        frameworkId);
+  }
+
+  return createExecutorInfo<TExecutorInfo,
+                            TExecutorID,
+                            TResources,
+                            TCommandInfo,
+                            TFrameworkID>(
+      executorId, command, Option<TResources>::none(), type, frameworkId);
+}
+
+
+template <typename TExecutorInfo,
+          typename TExecutorID,
+          typename TResources,
+          typename TCommandInfo,
+          typename TFrameworkID>
+inline TExecutorInfo createExecutorInfo(
+    const TExecutorID& executorId,
+    const Option<TCommandInfo>& command,
+    const std::string& resources,
+    const Option<typename TExecutorInfo::Type>& type = None(),
+    const Option<TFrameworkID>& frameworkId = None())
+{
+  return createExecutorInfo<TExecutorInfo,
+                            TExecutorID,
+                            TResources,
+                            TCommandInfo,
+                            TFrameworkID>(
+      executorId,
+      command,
+      TResources::parse(resources).get(),
+      type,
+      frameworkId);
+}
+
+
+template <typename TExecutorInfo,
+          typename TExecutorID,
+          typename TResources,
+          typename TCommandInfo,
+          typename TFrameworkID>
+inline TExecutorInfo createExecutorInfo(
+    const std::string& executorId,
+    const std::string& command,
+    const Option<std::string>& resources = None(),
+    const Option<typename TExecutorInfo::Type>& type = None(),
+    const Option<TFrameworkID>& frameworkId = None())
+{
+  TCommandInfo commandInfo = createCommandInfo<TCommandInfo>(command);
+  return createExecutorInfo<TExecutorInfo,
+                            TExecutorID,
+                            TResources,
+                            TCommandInfo,
+                            TFrameworkID>(
+      executorId, commandInfo, resources, type, frameworkId);
+}
+
+
 template <typename TImage>
 inline TImage createDockerImage(const std::string& imageName)
 {
@@ -552,15 +707,45 @@ inline TImage createDockerImage(const std::string& imageName)
 
 
 template <typename TVolume>
-inline TVolume createVolumeFromHostPath(
+inline TVolume createVolumeSandboxPath(
     const std::string& containerPath,
-    const std::string& hostPath,
+    const std::string& sandboxPath,
     const typename TVolume::Mode& mode)
 {
   TVolume volume;
   volume.set_container_path(containerPath);
-  volume.set_host_path(hostPath);
   volume.set_mode(mode);
+
+  // TODO(jieyu): Use TVolume::Source::SANDBOX_PATH.
+  volume.set_host_path(sandboxPath);
+
+  return volume;
+}
+
+
+template <typename TVolume, typename TMountPropagation>
+inline TVolume createVolumeHostPath(
+    const std::string& containerPath,
+    const std::string& hostPath,
+    const typename TVolume::Mode& mode,
+    const Option<typename TMountPropagation::Mode>& mountPropagationMode =
+      None())
+{
+  TVolume volume;
+  volume.set_container_path(containerPath);
+  volume.set_mode(mode);
+
+  typename TVolume::Source* source = volume.mutable_source();
+  source->set_type(TVolume::Source::HOST_PATH);
+  source->mutable_host_path()->set_path(hostPath);
+
+  if (mountPropagationMode.isSome()) {
+    source
+      ->mutable_host_path()
+      ->mutable_mount_propagation()
+      ->set_mode(mountPropagationMode.get());
+  }
+
   return volume;
 }
 
@@ -614,6 +799,8 @@ inline void setAgentID(TaskInfo* task, const SlaveID& slaveId)
 {
   task->mutable_slave_id()->CopyFrom(slaveId);
 }
+
+
 inline void setAgentID(
     mesos::v1::TaskInfo* task,
     const mesos::v1::AgentID& agentId)
@@ -638,7 +825,7 @@ inline TTaskInfo createTask(
     const TCommandInfo& command,
     const Option<TExecutorID>& executorId = None(),
     const std::string& name = "test-task",
-    const std::string& id = UUID::random().toString())
+    const std::string& id = id::UUID::random().toString())
 {
   TTaskInfo task;
   task.set_name(name);
@@ -672,7 +859,7 @@ inline TTaskInfo createTask(
     const std::string& command,
     const Option<TExecutorID>& executorId = None(),
     const std::string& name = "test-task",
-    const std::string& id = UUID::random().toString())
+    const std::string& id = id::UUID::random().toString())
 {
   return createTask<
       TTaskInfo,
@@ -704,7 +891,7 @@ inline TTaskInfo createTask(
     const std::string& command,
     const Option<TExecutorID>& executorId = None(),
     const std::string& name = "test-task",
-    const std::string& id = UUID::random().toString())
+    const std::string& id = id::UUID::random().toString())
 {
   return createTask<
       TTaskInfo,
@@ -835,12 +1022,25 @@ inline typename TResource::DiskInfo createDiskInfo(
 // Helper for creating a disk source with type `PATH`.
 template <typename TResource>
 inline typename TResource::DiskInfo::Source createDiskSourcePath(
-    const std::string& root)
+    const Option<std::string>& root = None(),
+    const Option<std::string>& id = None(),
+    const Option<std::string>& profile = None())
 {
   typename TResource::DiskInfo::Source source;
 
   source.set_type(TResource::DiskInfo::Source::PATH);
-  source.mutable_path()->set_root(root);
+
+  if (root.isSome()) {
+    source.mutable_path()->set_root(root.get());
+  }
+
+  if (id.isSome()) {
+    source.set_id(id.get());
+  }
+
+  if (profile.isSome()) {
+    source.set_profile(profile.get());
+  }
 
   return source;
 }
@@ -849,12 +1049,69 @@ inline typename TResource::DiskInfo::Source createDiskSourcePath(
 // Helper for creating a disk source with type `MOUNT`.
 template <typename TResource>
 inline typename TResource::DiskInfo::Source createDiskSourceMount(
-    const std::string& root)
+    const Option<std::string>& root = None(),
+    const Option<std::string>& id = None(),
+    const Option<std::string>& profile = None())
 {
   typename TResource::DiskInfo::Source source;
 
   source.set_type(TResource::DiskInfo::Source::MOUNT);
-  source.mutable_mount()->set_root(root);
+
+  if (root.isSome()) {
+    source.mutable_mount()->set_root(root.get());
+  }
+
+  if (id.isSome()) {
+    source.set_id(id.get());
+  }
+
+  if (profile.isSome()) {
+    source.set_profile(profile.get());
+  }
+
+  return source;
+}
+
+
+// Helper for creating a disk source with type `BLOCK'
+template <typename TResource>
+inline typename TResource::DiskInfo::Source createDiskSourceBlock(
+    const Option<std::string>& id = None(),
+    const Option<std::string>& profile = None())
+{
+  typename TResource::DiskInfo::Source source;
+
+  source.set_type(TResource::DiskInfo::Source::BLOCK);
+
+  if (id.isSome()) {
+    source.set_id(id.get());
+  }
+
+  if (profile.isSome()) {
+    source.set_profile(profile.get());
+  }
+
+  return source;
+}
+
+
+// Helper for creating a disk source with type `RAW'.
+template <typename TResource>
+inline typename TResource::DiskInfo::Source createDiskSourceRaw(
+    const Option<std::string>& id = None(),
+    const Option<std::string>& profile = None())
+{
+  typename TResource::DiskInfo::Source source;
+
+  source.set_type(TResource::DiskInfo::Source::RAW);
+
+  if (id.isSome()) {
+    source.set_id(id.get());
+  }
+
+  if (profile.isSome()) {
+    source.set_profile(profile.get());
+  }
 
   return source;
 }
@@ -903,8 +1160,10 @@ inline TResource createPersistentVolume(
     const Option<std::string>& creatorPrincipal = None(),
     bool isShared = false)
 {
-  TResource volume =
-    TResources::parse("disk", stringify(size.megabytes()), role).get();
+  TResource volume = TResources::parse(
+      "disk",
+      stringify((double) size.bytes() / Bytes::MEGABYTES),
+      role).get();
 
   volume.mutable_disk()->CopyFrom(
       createDiskInfo<TResource, TVolume>(
@@ -1035,13 +1294,20 @@ inline TDomainInfo createDomainInfo(
 }
 
 
-// Helpers for creating offer operations.
+// Helpers for creating operations.
 template <typename TResources, typename TOffer>
-inline typename TOffer::Operation RESERVE(const TResources& resources)
+inline typename TOffer::Operation RESERVE(
+    const TResources& resources,
+    const Option<std::string> operationId = None())
 {
   typename TOffer::Operation operation;
   operation.set_type(TOffer::Operation::RESERVE);
   operation.mutable_reserve()->mutable_resources()->CopyFrom(resources);
+
+  if (operationId.isSome()) {
+    operation.mutable_id()->set_value(operationId.get());
+  }
+
   return operation;
 }
 
@@ -1103,6 +1369,55 @@ inline typename TOffer::Operation LAUNCH_GROUP(
 }
 
 
+template <typename TResource, typename TTargetType, typename TOffer>
+inline typename TOffer::Operation CREATE_VOLUME(
+    const TResource& source,
+    const TTargetType& type,
+    const Option<std::string> operationId = None())
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::CREATE_VOLUME);
+  operation.mutable_create_volume()->mutable_source()->CopyFrom(source);
+  operation.mutable_create_volume()->set_target_type(type);
+
+  if (operationId.isSome()) {
+    operation.mutable_id()->set_value(operationId.get());
+  }
+
+  return operation;
+}
+
+
+template <typename TResource, typename TOffer>
+inline typename TOffer::Operation DESTROY_VOLUME(const TResource& volume)
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::DESTROY_VOLUME);
+  operation.mutable_destroy_volume()->mutable_volume()->CopyFrom(volume);
+  return operation;
+}
+
+
+template <typename TResource, typename TOffer>
+inline typename TOffer::Operation CREATE_BLOCK(const TResource& source)
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::CREATE_BLOCK);
+  operation.mutable_create_block()->mutable_source()->CopyFrom(source);
+  return operation;
+}
+
+
+template <typename TResource, typename TOffer>
+inline typename TOffer::Operation DESTROY_BLOCK(const TResource& block)
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::DESTROY_BLOCK);
+  operation.mutable_destroy_block()->mutable_block()->CopyFrom(block);
+  return operation;
+}
+
+
 template <typename TParameters, typename TParameter>
 inline TParameters parameterize(const ACLs& acls)
 {
@@ -1124,8 +1439,10 @@ inline ExecutorInfo createExecutorInfo(Args&&... args)
 {
   return common::createExecutorInfo<
       ExecutorInfo,
+      ExecutorID,
       Resources,
-      CommandInfo>(std::forward<Args>(args)...);
+      CommandInfo,
+      FrameworkID>(std::forward<Args>(args)...);
 }
 
 
@@ -1158,9 +1475,8 @@ inline mesos::slave::ContainerConfig createContainerConfig(
   if (taskInfo.isSome()) {
     containerConfig.mutable_task_info()->CopyFrom(taskInfo.get());
 
-    if (taskInfo.get().has_container()) {
-      containerConfig.mutable_container_info()
-        ->CopyFrom(taskInfo.get().container());
+    if (taskInfo->has_container()) {
+      containerConfig.mutable_container_info()->CopyFrom(taskInfo->container());
     }
   } else {
     if (executorInfo.has_container()) {
@@ -1199,6 +1515,33 @@ inline mesos::slave::ContainerConfig createContainerConfig(
 }
 
 
+// Helper for creating standalone container configs.
+inline mesos::slave::ContainerConfig createContainerConfig(
+    const CommandInfo& commandInfo,
+    const std::string& resources,
+    const std::string& sandboxDirectory,
+    const Option<ContainerInfo>& containerInfo = None(),
+    const Option<std::string>& user = None())
+{
+  mesos::slave::ContainerConfig containerConfig;
+  containerConfig.mutable_command_info()->CopyFrom(commandInfo);
+  containerConfig.mutable_resources()->CopyFrom(
+      Resources::parse(resources).get());
+
+  containerConfig.set_directory(sandboxDirectory);
+
+  if (user.isSome()) {
+    containerConfig.set_user(user.get());
+  }
+
+  if (containerInfo.isSome()) {
+    containerConfig.mutable_container_info()->CopyFrom(containerInfo.get());
+  }
+
+  return containerConfig;
+}
+
+
 template <typename... Args>
 inline Image createDockerImage(Args&&... args)
 {
@@ -1207,9 +1550,17 @@ inline Image createDockerImage(Args&&... args)
 
 
 template <typename... Args>
-inline Volume createVolumeFromHostPath(Args&&... args)
+inline Volume createVolumeSandboxPath(Args&&... args)
 {
-  return common::createVolumeFromHostPath<Volume>(std::forward<Args>(args)...);
+  return common::createVolumeSandboxPath<Volume>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline Volume createVolumeHostPath(Args&&... args)
+{
+  return common::createVolumeHostPath<Volume, MountPropagation>(
+      std::forward<Args>(args)...);
 }
 
 
@@ -1307,6 +1658,20 @@ inline Resource::DiskInfo::Source createDiskSourceMount(Args&&... args)
 
 
 template <typename... Args>
+inline Resource::DiskInfo::Source createDiskSourceBlock(Args&&... args)
+{
+  return common::createDiskSourceBlock<Resource>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline Resource::DiskInfo::Source createDiskSourceRaw(Args&&... args)
+{
+  return common::createDiskSourceRaw<Resource>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
 inline Resource createDiskResource(Args&&... args)
 {
   return common::createDiskResource<Resource, Resources, Volume>(
@@ -1396,6 +1761,36 @@ inline Offer::Operation LAUNCH_GROUP(Args&&... args)
 
 
 template <typename... Args>
+inline Offer::Operation CREATE_VOLUME(Args&&... args)
+{
+  return common::CREATE_VOLUME<Resource,
+                               Resource::DiskInfo::Source::Type,
+                               Offer>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline Offer::Operation DESTROY_VOLUME(Args&&... args)
+{
+  return common::DESTROY_VOLUME<Resource, Offer>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline Offer::Operation CREATE_BLOCK(Args&&... args)
+{
+  return common::CREATE_BLOCK<Resource, Offer>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline Offer::Operation DESTROY_BLOCK(Args&&... args)
+{
+  return common::DESTROY_BLOCK<Resource, Offer>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
 inline Parameters parameterize(Args&&... args)
 {
   return common::parameterize<Parameters, Parameter>(
@@ -1410,8 +1805,10 @@ inline mesos::v1::ExecutorInfo createExecutorInfo(Args&&... args)
 {
   return common::createExecutorInfo<
       mesos::v1::ExecutorInfo,
+      mesos::v1::ExecutorID,
       mesos::v1::Resources,
-      mesos::v1::CommandInfo>(std::forward<Args>(args)...);
+      mesos::v1::CommandInfo,
+      mesos::v1::FrameworkID>(std::forward<Args>(args)...);
 }
 
 
@@ -1433,10 +1830,19 @@ inline mesos::v1::Image createDockerImage(Args&&... args)
 
 
 template <typename... Args>
-inline mesos::v1::Volume createVolumeFromHostPath(Args&&... args)
+inline mesos::v1::Volume createVolumeSandboxPath(Args&&... args)
 {
-  return common::createVolumeFromHostPath<mesos::v1::Volume>(
+  return common::createVolumeSandboxPath<mesos::v1::Volume>(
       std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline mesos::v1::Volume createVolumeHostPath(Args&&... args)
+{
+  return common::createVolumeHostPath<
+      mesos::v1::Volume,
+      mesos::v1::MountPropagation>(std::forward<Args>(args)...);
 }
 
 
@@ -1543,6 +1949,24 @@ inline mesos::v1::Resource::DiskInfo::Source createDiskSourceMount(
 
 
 template <typename... Args>
+inline mesos::v1::Resource::DiskInfo::Source createDiskSourceBlock(
+    Args&&... args)
+{
+  return common::createDiskSourceBlock<mesos::v1::Resource>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline mesos::v1::Resource::DiskInfo::Source createDiskSourceRaw(
+    Args&&... args)
+{
+  return common::createDiskSourceRaw<mesos::v1::Resource>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
 inline mesos::v1::Resource createDiskResource(Args&&... args)
 {
   return common::createDiskResource<
@@ -1638,6 +2062,40 @@ inline mesos::v1::Offer::Operation LAUNCH_GROUP(Args&&... args)
 
 
 template <typename... Args>
+inline mesos::v1::Offer::Operation CREATE_VOLUME(Args&&... args)
+{
+  return common::CREATE_VOLUME<mesos::v1::Resource,
+                               mesos::v1::Resource::DiskInfo::Source::Type,
+                               mesos::v1::Offer>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline mesos::v1::Offer::Operation DESTROY_VOLUME(Args&&... args)
+{
+  return common::DESTROY_VOLUME<mesos::v1::Resource, mesos::v1::Offer>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline mesos::v1::Offer::Operation CREATE_BLOCK(Args&&... args)
+{
+  return common::CREATE_BLOCK<mesos::v1::Resource, mesos::v1::Offer>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
+inline mesos::v1::Offer::Operation DESTROY_BLOCK(Args&&... args)
+{
+  return common::DESTROY_BLOCK<mesos::v1::Resource, mesos::v1::Offer>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
 inline mesos::v1::Parameters parameterize(Args&&... args)
 {
   return common::parameterize<mesos::v1::Parameters, mesos::v1::Parameter>(
@@ -1659,6 +2117,116 @@ inline mesos::v1::scheduler::Call createCallAccept(
 
   foreach (const mesos::v1::Offer::Operation& operation, operations) {
     accept->add_operations()->CopyFrom(operation);
+  }
+
+  return call;
+}
+
+
+inline mesos::v1::scheduler::Call createCallAcknowledge(
+    const mesos::v1::FrameworkID& frameworkId,
+    const mesos::v1::AgentID& agentId,
+    const mesos::v1::scheduler::Event::Update& update)
+{
+  mesos::v1::scheduler::Call call;
+  call.set_type(mesos::v1::scheduler::Call::ACKNOWLEDGE);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  mesos::v1::scheduler::Call::Acknowledge* acknowledge =
+    call.mutable_acknowledge();
+
+  acknowledge->mutable_task_id()->CopyFrom(
+      update.status().task_id());
+
+  acknowledge->mutable_agent_id()->CopyFrom(agentId);
+  acknowledge->set_uuid(update.status().uuid());
+
+  return call;
+}
+
+
+inline mesos::v1::scheduler::Call createCallAcknowledgeOperationStatus(
+    const mesos::v1::FrameworkID& frameworkId,
+    const mesos::v1::AgentID& agentId,
+    const mesos::v1::ResourceProviderID& resourceProviderId,
+    const mesos::v1::scheduler::Event::UpdateOperationStatus& update)
+{
+  mesos::v1::scheduler::Call call;
+  call.set_type(mesos::v1::scheduler::Call::ACKNOWLEDGE_OPERATION_STATUS);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  mesos::v1::scheduler::Call::AcknowledgeOperationStatus* acknowledge =
+    call.mutable_acknowledge_operation_status();
+
+  acknowledge->mutable_agent_id()->CopyFrom(agentId);
+  acknowledge->mutable_resource_provider_id()->CopyFrom(resourceProviderId);
+  acknowledge->set_uuid(update.status().uuid().value());
+  acknowledge->mutable_operation_id()->CopyFrom(update.status().operation_id());
+
+  return call;
+}
+
+
+inline mesos::v1::scheduler::Call createCallKill(
+    const mesos::v1::FrameworkID& frameworkId,
+    const mesos::v1::TaskID& taskId,
+    const Option<mesos::v1::AgentID>& agentId = None(),
+    const Option<mesos::v1::KillPolicy>& killPolicy = None())
+{
+  mesos::v1::scheduler::Call call;
+  call.set_type(mesos::v1::scheduler::Call::KILL);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  mesos::v1::scheduler::Call::Kill* kill = call.mutable_kill();
+  kill->mutable_task_id()->CopyFrom(taskId);
+
+  if (agentId.isSome()) {
+    kill->mutable_agent_id()->CopyFrom(agentId.get());
+  }
+
+  if (killPolicy.isSome()) {
+    kill->mutable_kill_policy()->CopyFrom(killPolicy.get());
+  }
+
+  return call;
+}
+
+
+inline mesos::v1::scheduler::Call createCallReconcileOperations(
+    const mesos::v1::FrameworkID& frameworkId,
+    const std::vector<
+        mesos::v1::scheduler::Call::ReconcileOperations::Operation>&
+      operations = {})
+{
+  mesos::v1::scheduler::Call call;
+  call.set_type(mesos::v1::scheduler::Call::RECONCILE_OPERATIONS);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  mesos::v1::scheduler::Call::ReconcileOperations* reconcile =
+    call.mutable_reconcile_operations();
+
+  foreach (
+      const mesos::v1::scheduler::Call::ReconcileOperations::Operation&
+        operation,
+      operations) {
+    reconcile->add_operations()->CopyFrom(operation);
+  }
+
+  return call;
+}
+
+
+inline mesos::v1::scheduler::Call createCallSubscribe(
+  const mesos::v1::FrameworkInfo& frameworkInfo,
+  const Option<mesos::v1::FrameworkID>& frameworkId = None())
+{
+  mesos::v1::scheduler::Call call;
+  call.set_type(mesos::v1::scheduler::Call::SUBSCRIBE);
+
+  call.mutable_subscribe()->mutable_framework_info()->CopyFrom(frameworkInfo);
+
+  if (frameworkId.isSome()) {
+    call.mutable_framework_id()->CopyFrom(frameworkId.get());
   }
 
   return call;
@@ -1739,7 +2307,11 @@ ACTION_P5(LaunchTasks, executor, tasks, cpus, mem, role)
 
     Resources taskResources = Resources::parse(
         "cpus:" + stringify(cpus) + ";mem:" + stringify(mem)).get();
-    taskResources.allocate(role);
+
+    if (offer.resources_size() > 0 &&
+        offer.resources(0).has_allocation_info()) {
+      taskResources.allocate(role);
+    }
 
     int nextTaskId = 0;
     std::vector<TaskInfo> tasks;
@@ -1912,46 +2484,57 @@ public:
       rescindInverseOffers,
       void(Mesos*, const typename Event::RescindInverseOffer&));
   MOCK_METHOD2_T(update, void(Mesos*, const typename Event::Update&));
+  MOCK_METHOD2_T(
+      updateOperationStatus,
+      void(Mesos*, const typename Event::UpdateOperationStatus&));
   MOCK_METHOD2_T(message, void(Mesos*, const typename Event::Message&));
   MOCK_METHOD2_T(failure, void(Mesos*, const typename Event::Failure&));
   MOCK_METHOD2_T(error, void(Mesos*, const typename Event::Error&));
 
-  void event(Mesos* mesos, const Event& event)
+  void events(Mesos* mesos, std::queue<Event> events)
   {
-    switch (event.type()) {
-      case Event::SUBSCRIBED:
-        subscribed(mesos, event.subscribed());
-        break;
-      case Event::OFFERS:
-        offers(mesos, event.offers());
-        break;
-      case Event::INVERSE_OFFERS:
-        inverseOffers(mesos, event.inverse_offers());
-        break;
-      case Event::RESCIND:
-        rescind(mesos, event.rescind());
-        break;
-      case Event::RESCIND_INVERSE_OFFER:
-        rescindInverseOffers(mesos, event.rescind_inverse_offer());
-        break;
-      case Event::UPDATE:
-        update(mesos, event.update());
-        break;
-      case Event::MESSAGE:
-        message(mesos, event.message());
-        break;
-      case Event::FAILURE:
-        failure(mesos, event.failure());
-        break;
-      case Event::ERROR:
-        error(mesos, event.error());
-        break;
-      case Event::HEARTBEAT:
-        heartbeat(mesos);
-        break;
-      case Event::UNKNOWN:
-        LOG(FATAL) << "Received unexpected UNKNOWN event";
-        break;
+    while (!events.empty()) {
+      Event event = std::move(events.front());
+      events.pop();
+
+      switch (event.type()) {
+        case Event::SUBSCRIBED:
+          subscribed(mesos, event.subscribed());
+          break;
+        case Event::OFFERS:
+          offers(mesos, event.offers());
+          break;
+        case Event::INVERSE_OFFERS:
+          inverseOffers(mesos, event.inverse_offers());
+          break;
+        case Event::RESCIND:
+          rescind(mesos, event.rescind());
+          break;
+        case Event::RESCIND_INVERSE_OFFER:
+          rescindInverseOffers(mesos, event.rescind_inverse_offer());
+          break;
+        case Event::UPDATE:
+          update(mesos, event.update());
+          break;
+        case Event::UPDATE_OPERATION_STATUS:
+          updateOperationStatus(mesos, event.update_operation_status());
+          break;
+        case Event::MESSAGE:
+          message(mesos, event.message());
+          break;
+        case Event::FAILURE:
+          failure(mesos, event.failure());
+          break;
+        case Event::ERROR:
+          error(mesos, event.error());
+          break;
+        case Event::HEARTBEAT:
+          heartbeat(mesos);
+          break;
+        case Event::UNKNOWN:
+          LOG(FATAL) << "Received unexpected UNKNOWN event";
+          break;
+      }
     }
   }
 };
@@ -1966,26 +2549,24 @@ public:
   TestMesos(
       const std::string& master,
       ContentType contentType,
-      const std::shared_ptr<MockHTTPScheduler<Mesos, Event>>& _scheduler,
+      const std::shared_ptr<MockHTTPScheduler<Mesos, Event>>& scheduler,
       const Option<std::shared_ptr<mesos::master::detector::MasterDetector>>&
           detector = None())
     : Mesos(
           master,
           contentType,
-          // We don't pass the `_scheduler` shared pointer as the library
-          // interface expects a `std::function` object.
           lambda::bind(&MockHTTPScheduler<Mesos, Event>::connected,
-                       _scheduler.get(),
+                       scheduler,
                        this),
           lambda::bind(&MockHTTPScheduler<Mesos, Event>::disconnected,
-                       _scheduler.get(),
+                       scheduler,
                        this),
-          lambda::bind(&TestMesos<Mesos, Event>::events,
+          lambda::bind(&MockHTTPScheduler<Mesos, Event>::events,
+                       scheduler,
                        this,
                        lambda::_1),
           v1::DEFAULT_CREDENTIAL,
-          detector),
-      scheduler(_scheduler) {}
+          detector) {}
 
   virtual ~TestMesos()
   {
@@ -2008,19 +2589,6 @@ public:
       process::Clock::resume();
     }
   }
-
-protected:
-  void events(std::queue<Event> events)
-  {
-    while (!events.empty()) {
-      Event event = std::move(events.front());
-      events.pop();
-      scheduler->event(this, event);
-    }
-  }
-
-private:
-  std::shared_ptr<MockHTTPScheduler<Mesos, Event>> scheduler;
 };
 
 } // namespace scheduler {
@@ -2029,9 +2597,11 @@ private:
 namespace v1 {
 namespace scheduler {
 
+using APIResult = mesos::v1::scheduler::APIResult;
 using Call = mesos::v1::scheduler::Call;
 using Event = mesos::v1::scheduler::Event;
 using Mesos = mesos::v1::scheduler::Mesos;
+using Response = mesos::v1::scheduler::Response;
 
 
 using TestMesos = tests::scheduler::TestMesos<
@@ -2039,11 +2609,61 @@ using TestMesos = tests::scheduler::TestMesos<
     mesos::v1::scheduler::Event>;
 
 
+// This matcher is used to match an offer event that contains a vector of offers
+// having any resource that passes the filter.
+MATCHER_P(OffersHaveAnyResource, filter, "")
+{
+  foreach (const Offer& offer, arg.offers()) {
+    foreach (const Resource& resource, offer.resources()) {
+      if (filter(resource)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+
+// Like LaunchTasks, but decline the entire offer and don't launch any tasks.
+ACTION(DeclineOffers)
+{
+  Call call;
+  call.set_type(Call::DECLINE);
+
+  Call::Decline* decline = call.mutable_decline();
+
+  foreach (const Offer& offer, arg1.offers()) {
+    decline->add_offer_ids()->CopyFrom(offer.id());
+
+    if (!call.has_framework_id()) {
+      call.mutable_framework_id()->CopyFrom(offer.framework_id());
+    }
+  }
+
+  arg0->send(call);
+}
+
+
 ACTION_P(SendSubscribe, frameworkInfo)
 {
   Call call;
   call.set_type(Call::SUBSCRIBE);
   call.mutable_subscribe()->mutable_framework_info()->CopyFrom(frameworkInfo);
+
+  arg0->send(call);
+}
+
+
+ACTION_P2(SendSubscribe, frameworkInfo, frameworkId)
+{
+  Call call;
+  call.set_type(Call::SUBSCRIBE);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+  call.mutable_subscribe()->mutable_framework_info()->CopyFrom(frameworkInfo);
+  call.mutable_subscribe()->mutable_framework_info()->mutable_id()->CopyFrom(
+      frameworkId);
+
   arg0->send(call);
 }
 
@@ -2058,6 +2678,25 @@ ACTION_P2(SendAcknowledge, frameworkId, agentId)
   acknowledge->mutable_task_id()->CopyFrom(arg1.status().task_id());
   acknowledge->mutable_agent_id()->CopyFrom(agentId);
   acknowledge->set_uuid(arg1.status().uuid());
+
+  arg0->send(call);
+}
+
+
+ACTION_P3(
+    SendAcknowledgeOperationStatus, frameworkId, agentId, resourceProviderId)
+{
+  Call call;
+  call.set_type(Call::ACKNOWLEDGE_OPERATION_STATUS);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  Call::AcknowledgeOperationStatus* acknowledge =
+    call.mutable_acknowledge_operation_status();
+
+  acknowledge->mutable_agent_id()->CopyFrom(agentId);
+  acknowledge->mutable_resource_provider_id()->CopyFrom(resourceProviderId);
+  acknowledge->set_uuid(arg1.status().uuid().value());
+  acknowledge->mutable_operation_id()->CopyFrom(arg1.status().operation_id());
 
   arg0->send(call);
 }
@@ -2090,36 +2729,41 @@ public:
   MOCK_METHOD2_T(acknowledged,
                  void(Mesos*, const typename Event::Acknowledged&));
 
-  void event(Mesos* mesos, const Event& event)
+  void events(Mesos* mesos, std::queue<Event> events)
   {
-    switch (event.type()) {
-      case Event::SUBSCRIBED:
-        subscribed(mesos, event.subscribed());
-        break;
-      case Event::LAUNCH:
-        launch(mesos, event.launch());
-        break;
-      case Event::LAUNCH_GROUP:
-        launchGroup(mesos, event.launch_group());
-        break;
-      case Event::KILL:
-        kill(mesos, event.kill());
-        break;
-      case Event::ACKNOWLEDGED:
-        acknowledged(mesos, event.acknowledged());
-        break;
-      case Event::MESSAGE:
-        message(mesos, event.message());
-        break;
-      case Event::SHUTDOWN:
-        shutdown(mesos);
-        break;
-      case Event::ERROR:
-        error(mesos, event.error());
-        break;
-      case Event::UNKNOWN:
-        LOG(FATAL) << "Received unexpected UNKNOWN event";
-        break;
+    while (!events.empty()) {
+      Event event = std::move(events.front());
+      events.pop();
+
+      switch (event.type()) {
+        case Event::SUBSCRIBED:
+          subscribed(mesos, event.subscribed());
+          break;
+        case Event::LAUNCH:
+          launch(mesos, event.launch());
+          break;
+        case Event::LAUNCH_GROUP:
+          launchGroup(mesos, event.launch_group());
+          break;
+        case Event::KILL:
+          kill(mesos, event.kill());
+          break;
+        case Event::ACKNOWLEDGED:
+          acknowledged(mesos, event.acknowledged());
+          break;
+        case Event::MESSAGE:
+          message(mesos, event.message());
+          break;
+        case Event::SHUTDOWN:
+          shutdown(mesos);
+          break;
+        case Event::ERROR:
+          error(mesos, event.error());
+          break;
+        case Event::UNKNOWN:
+          LOG(FATAL) << "Received unexpected UNKNOWN event";
+          break;
+      }
     }
   }
 };
@@ -2133,39 +2777,19 @@ class TestMesos : public Mesos
 public:
   TestMesos(
       ContentType contentType,
-      const std::shared_ptr<MockHTTPExecutor<Mesos, Event>>& _executor)
+      const std::shared_ptr<MockHTTPExecutor<Mesos, Event>>& executor)
     : Mesos(
           contentType,
           lambda::bind(&MockHTTPExecutor<Mesos, Event>::connected,
-                       _executor,
+                       executor,
                        this),
           lambda::bind(&MockHTTPExecutor<Mesos, Event>::disconnected,
-                       _executor,
+                       executor,
                        this),
-          lambda::bind(&TestMesos<Mesos, Event>::events,
+          lambda::bind(&MockHTTPExecutor<Mesos, Event>::events,
+                       executor,
                        this,
-                       lambda::_1)),
-      executor(_executor) {}
-
-protected:
-  void events(std::queue<Event> events)
-  {
-    while (!events.empty()) {
-      Event event = std::move(events.front());
-      events.pop();
-      executor->event(this, event);
-    }
-  }
-
-private:
-  // TODO(bmahler): This is a shared pointer because the `Mesos`
-  // library copies the pointer into callbacks that can execute
-  // after `Mesos` is destructed. We can avoid this by ensuring
-  // that `~Mesos()` blocks until deferred callbacks are cleared
-  // (merely grabbing the `process::Mutex` lock is sufficient).
-  // The `Mesos` library can also provide a `Future<Nothing> stop()`
-  // to allow callers to wait for all events to be flushed.
-  std::shared_ptr<MockHTTPExecutor<Mesos, Event>> executor;
+                       lambda::_1)) {}
 };
 
 } // namespace executor {
@@ -2208,7 +2832,7 @@ ACTION_P3(SendUpdateFromTask, frameworkId, executorId, state)
   status.mutable_executor_id()->CopyFrom(executorId);
   status.set_state(state);
   status.set_source(mesos::v1::TaskStatus::SOURCE_EXECUTOR);
-  status.set_uuid(UUID::random().toBytes());
+  status.set_uuid(id::UUID::random().toBytes());
 
   mesos::v1::executor::Call call;
   call.mutable_framework_id()->CopyFrom(frameworkId);
@@ -2229,7 +2853,7 @@ ACTION_P3(SendUpdateFromTaskID, frameworkId, executorId, state)
   status.mutable_executor_id()->CopyFrom(executorId);
   status.set_state(state);
   status.set_source(mesos::v1::TaskStatus::SOURCE_EXECUTOR);
-  status.set_uuid(UUID::random().toBytes());
+  status.set_uuid(id::UUID::random().toBytes());
 
   mesos::v1::executor::Call call;
   call.mutable_framework_id()->CopyFrom(frameworkId);
@@ -2253,14 +2877,104 @@ using MockHTTPExecutor = tests::executor::MockHTTPExecutor<
 
 namespace resource_provider {
 
-template <typename Event, typename Driver>
+template <
+    typename Event,
+    typename Call,
+    typename Driver,
+    typename ResourceProviderInfo,
+    typename Resource,
+    typename Resources,
+    typename ResourceProviderID,
+    typename OperationState,
+    typename Operation,
+    typename Source>
 class MockResourceProvider
 {
 public:
+  MockResourceProvider(
+      const ResourceProviderInfo& _info,
+      const Option<Resources>& _resources = None())
+    : info(_info),
+      resources(_resources)
+  {
+    ON_CALL(*this, connected())
+      .WillByDefault(Invoke(
+          this,
+          &MockResourceProvider<
+              Event,
+              Call,
+              Driver,
+              ResourceProviderInfo,
+              Resource,
+              Resources,
+              ResourceProviderID,
+              OperationState,
+              Operation,
+              Source>::connectedDefault));
+    EXPECT_CALL(*this, connected()).WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, subscribed(_))
+      .WillByDefault(Invoke(
+          this,
+          &MockResourceProvider<
+              Event,
+              Call,
+              Driver,
+              ResourceProviderInfo,
+              Resource,
+              Resources,
+              ResourceProviderID,
+              OperationState,
+              Operation,
+              Source>::subscribedDefault));
+    EXPECT_CALL(*this, subscribed(_)).WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, applyOperation(_))
+      .WillByDefault(Invoke(
+          this,
+          &MockResourceProvider<
+              Event,
+              Call,
+              Driver,
+              ResourceProviderInfo,
+              Resource,
+              Resources,
+              ResourceProviderID,
+              OperationState,
+              Operation,
+              Source>::operationDefault));
+    EXPECT_CALL(*this, applyOperation(_)).WillRepeatedly(DoDefault());
+
+    ON_CALL(*this, publishResources(_))
+      .WillByDefault(Invoke(
+          this,
+          &MockResourceProvider<
+              Event,
+              Call,
+              Driver,
+              ResourceProviderInfo,
+              Resource,
+              Resources,
+              ResourceProviderID,
+              OperationState,
+              Operation,
+              Source>::publishDefault));
+    EXPECT_CALL(*this, publishResources(_)).WillRepeatedly(DoDefault());
+  }
+
   MOCK_METHOD0_T(connected, void());
   MOCK_METHOD0_T(disconnected, void());
   MOCK_METHOD1_T(subscribed, void(const typename Event::Subscribed&));
-  MOCK_METHOD1_T(operation, void(const typename Event::Operation&));
+  MOCK_METHOD1_T(applyOperation, void(const typename Event::ApplyOperation&));
+  MOCK_METHOD1_T(
+      publishResources,
+      void(const typename Event::PublishResources&));
+  MOCK_METHOD1_T(
+      acknowledgeOperationStatus,
+      void(const typename Event::AcknowledgeOperationStatus&));
+  MOCK_METHOD1_T(
+      reconcileOperations,
+      void(const typename Event::ReconcileOperations&));
 
   void events(std::queue<Event> events)
   {
@@ -2272,8 +2986,17 @@ public:
         case Event::SUBSCRIBED:
           subscribed(event.subscribed());
           break;
-        case Event::OPERATION:
-          operation(event.operation());
+        case Event::APPLY_OPERATION:
+          applyOperation(event.apply_operation());
+          break;
+        case Event::PUBLISH_RESOURCES:
+          publishResources(event.publish_resources());
+          break;
+        case Event::ACKNOWLEDGE_OPERATION_STATUS:
+          acknowledgeOperationStatus(event.acknowledge_operation_status());
+          break;
+        case Event::RECONCILE_OPERATIONS:
+          reconcileOperations(event.reconcile_operations());
           break;
         case Event::UNKNOWN:
           LOG(FATAL) << "Received unexpected UNKNOWN event";
@@ -2282,7 +3005,6 @@ public:
     }
   }
 
-  template <typename Call>
   process::Future<Nothing> send(const Call& call)
   {
     return driver->send(call);
@@ -2295,19 +3017,207 @@ public:
       const Credential& credential)
   {
     driver.reset(new Driver(
-            std::move(detector),
-            contentType,
-            lambda::bind(&MockResourceProvider<Event, Driver>::connected, this),
-            lambda::bind(
-                &MockResourceProvider<Event, Driver>::disconnected, this),
-            lambda::bind(
-                &MockResourceProvider<Event, Driver>::events, this, lambda::_1),
-            credential));
+        std::move(detector),
+        contentType,
+        lambda::bind(
+            &MockResourceProvider<
+                Event,
+                Call,
+                Driver,
+                ResourceProviderInfo,
+                Resource,
+                Resources,
+                ResourceProviderID,
+                OperationState,
+                Operation,
+                Source>::connected,
+            this),
+        lambda::bind(
+            &MockResourceProvider<
+                Event,
+                Call,
+                Driver,
+                ResourceProviderInfo,
+                Resource,
+                Resources,
+                ResourceProviderID,
+                OperationState,
+                Operation,
+                Source>::disconnected,
+            this),
+        lambda::bind(
+            &MockResourceProvider<
+                Event,
+                Call,
+                Driver,
+                ResourceProviderInfo,
+                Resource,
+                Resources,
+                ResourceProviderID,
+                OperationState,
+                Operation,
+                Source>::events,
+            this,
+            lambda::_1),
+        credential));
+
+    driver->start();
   }
 
+  void connectedDefault()
+  {
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+    call.mutable_subscribe()->mutable_resource_provider_info()->CopyFrom(info);
+
+    driver->send(call);
+  }
+
+  void subscribedDefault(const typename Event::Subscribed& subscribed)
+  {
+    info.mutable_id()->CopyFrom(subscribed.provider_id());
+
+    if (resources.isSome()) {
+      Resources injected;
+
+      foreach (Resource resource, resources.get()) {
+        resource.mutable_provider_id()->CopyFrom(info.id());
+        injected += resource;
+      }
+
+      Call call;
+      call.set_type(Call::UPDATE_STATE);
+      call.mutable_resource_provider_id()->CopyFrom(info.id());
+
+      typename Call::UpdateState* update = call.mutable_update_state();
+      update->mutable_resources()->CopyFrom(injected);
+      update->mutable_resource_version_uuid()->set_value(
+          id::UUID::random().toBytes());
+
+      driver->send(call);
+    }
+  }
+
+  void operationDefault(const typename Event::ApplyOperation& operation)
+  {
+    CHECK(info.has_id());
+
+    Call call;
+    call.set_type(Call::UPDATE_OPERATION_STATUS);
+    call.mutable_resource_provider_id()->CopyFrom(info.id());
+
+    typename Call::UpdateOperationStatus* update =
+      call.mutable_update_operation_status();
+    update->mutable_framework_id()->CopyFrom(operation.framework_id());
+    update->mutable_operation_uuid()->CopyFrom(operation.operation_uuid());
+
+    update->mutable_status()->set_state(
+        OperationState::OPERATION_FINISHED);
+
+    switch (operation.info().type()) {
+      case Operation::LAUNCH:
+      case Operation::LAUNCH_GROUP:
+        break;
+      case Operation::RESERVE:
+        break;
+      case Operation::UNRESERVE:
+        break;
+      case Operation::CREATE:
+        break;
+      case Operation::DESTROY:
+        break;
+      case Operation::CREATE_VOLUME:
+        update->mutable_status()->add_converted_resources()->CopyFrom(
+            operation.info().create_volume().source());
+        update->mutable_status()
+          ->mutable_converted_resources()
+          ->Mutable(0)
+          ->mutable_disk()
+          ->mutable_source()
+          ->set_type(operation.info().create_volume().target_type());
+        break;
+      case Operation::DESTROY_VOLUME:
+        update->mutable_status()->add_converted_resources()->CopyFrom(
+            operation.info().destroy_volume().volume());
+        update->mutable_status()
+          ->mutable_converted_resources()
+          ->Mutable(0)
+          ->mutable_disk()
+          ->mutable_source()
+          ->set_type(Source::RAW);
+        break;
+      case Operation::CREATE_BLOCK:
+        update->mutable_status()->add_converted_resources()->CopyFrom(
+            operation.info().create_block().source());
+        update->mutable_status()
+          ->mutable_converted_resources()
+          ->Mutable(0)
+          ->mutable_disk()
+          ->mutable_source()
+          ->set_type(Source::BLOCK);
+        break;
+      case Operation::DESTROY_BLOCK:
+        update->mutable_status()->add_converted_resources()->CopyFrom(
+            operation.info().destroy_block().block());
+        update->mutable_status()
+          ->mutable_converted_resources()
+          ->Mutable(0)
+          ->mutable_disk()
+          ->mutable_source()
+          ->set_type(Source::RAW);
+        break;
+      case Operation::UNKNOWN:
+        break;
+    }
+
+    update->mutable_latest_status()->CopyFrom(update->status());
+
+    driver->send(call);
+  }
+
+  void publishDefault(const typename Event::PublishResources& publish)
+  {
+    CHECK(info.has_id());
+
+    Call call;
+    call.set_type(Call::UPDATE_PUBLISH_RESOURCES_STATUS);
+    call.mutable_resource_provider_id()->CopyFrom(info.id());
+
+    typename Call::UpdatePublishResourcesStatus* update =
+      call.mutable_update_publish_resources_status();
+    update->mutable_uuid()->CopyFrom(publish.uuid());
+    update->set_status(Call::UpdatePublishResourcesStatus::OK);
+
+    driver->send(call);
+  }
+
+  ResourceProviderInfo info;
+
 private:
+  Option<Resources> resources;
   std::unique_ptr<Driver> driver;
 };
+
+inline process::Owned<EndpointDetector> createEndpointDetector(
+    const process::UPID& pid)
+{
+  // Start and register a resource provider.
+  std::string scheme = "http";
+
+#ifdef USE_SSL_SOCKET
+  if (process::network::openssl::flags().enabled) {
+    scheme = "https";
+  }
+#endif
+
+  process::http::URL url(
+      scheme,
+      pid.address.ip,
+      pid.address.port,
+      pid.id + "/api/v1/resource_provider");
+
+  return process::Owned<EndpointDetector>(new ConstantEndpointDetector(url));
+}
 
 } // namespace resource_provider {
 
@@ -2324,7 +3234,15 @@ using Event = mesos::v1::resource_provider::Event;
 
 using MockResourceProvider = tests::resource_provider::MockResourceProvider<
     mesos::v1::resource_provider::Event,
-    mesos::v1::resource_provider::Driver>;
+    mesos::v1::resource_provider::Call,
+    mesos::v1::resource_provider::Driver,
+    mesos::v1::ResourceProviderInfo,
+    mesos::v1::Resource,
+    mesos::v1::Resources,
+    mesos::v1::ResourceProviderID,
+    mesos::v1::OperationState,
+    mesos::v1::Offer::Operation,
+    mesos::v1::Resource::DiskInfo::Source>;
 
 } // namespace v1 {
 
@@ -2343,6 +3261,18 @@ public:
       getObjectApprover, process::Future<process::Owned<ObjectApprover>>(
           const Option<authorization::Subject>& subject,
           const authorization::Action& action));
+};
+
+
+// Definition of a MockGarbageCollector that can be used in tests with gmock.
+class MockGarbageCollector : public slave::GarbageCollector
+{
+public:
+  MockGarbageCollector();
+  virtual ~MockGarbageCollector();
+
+  // The default action is to always return `true`.
+  MOCK_METHOD1(unschedule, process::Future<bool>(const std::string& path));
 };
 
 
@@ -2652,13 +3582,158 @@ void ExpectNoFutureUnionHttpProtobufs(
 }
 
 
-// This matcher is used to match the task ids of TaskStatus messages.
-// Suppose we set up N futures for LaunchTasks and N futures for StatusUpdates.
-// (This is a common pattern). We get into a situation where all StatusUpdates
-// are satisfied before the LaunchTasks if the master re-sends StatusUpdates.
-// We use this matcher to only satisfy the StatusUpdate future if the
-// StatusUpdate came from the corresponding task.
-MATCHER_P(TaskStatusEq, task, "") { return arg.task_id() == task.task_id(); }
+// This matcher is used to match a vector of resource offers that
+// contains an offer having any resource that passes the filter.
+MATCHER_P(OffersHaveAnyResource, filter, "")
+{
+  foreach (const Offer& offer, arg) {
+    foreach (const Resource& resource, offer.resources()) {
+      if (filter(resource)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+
+// This matcher is used to match a vector of resource offers that
+// contains an offer having the specified resource.
+MATCHER_P(OffersHaveResource, resource, "")
+{
+  foreach (const Offer& offer, arg) {
+    Resources resources = offer.resources();
+
+    // If `resource` is not allocated, we are matching offers against
+    // resources constructed from scratch, so we strip off allocations.
+    if (!resource.has_allocation_info()) {
+      resources.unallocate();
+    }
+
+    if (resources.contains(resource)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+// This matcher is used to match the task id of a `TaskStatus` message.
+MATCHER_P(TaskStatusTaskIdEq, taskInfo, "")
+{
+  return arg.task_id() == taskInfo.task_id();
+}
+
+
+// This matcher is used to match the state of a `TaskStatus` message.
+MATCHER_P(TaskStatusStateEq, taskState, "")
+{
+  return arg.state() == taskState;
+}
+
+
+// This matcher is used to match the task id of an `Event.update.status`
+// message.
+MATCHER_P(TaskStatusUpdateTaskIdEq, taskInfo, "")
+{
+  return arg.status().task_id() == taskInfo.task_id();
+}
+
+
+// This matcher is used to match the state of an `Event.update.status`
+// message.
+MATCHER_P(TaskStatusUpdateStateEq, taskState, "")
+{
+  return arg.status().state() == taskState;
+}
+
+
+// This matcher is used to match the task id of
+// `authorization::Request.Object.TaskInfo`.
+MATCHER_P(AuthorizationRequestHasTaskID, taskId, "")
+{
+  if (!arg.has_object()) {
+    return false;
+  }
+
+  if (!arg.object().has_task_info()) {
+    return false;
+  }
+
+  return arg.object().task_info().task_id() == taskId;
+}
+
+
+// This matcher is used to match the task id of `Option<TaskInfo>`.
+MATCHER_P(OptionTaskHasTaskID, taskId, "")
+{
+  return arg.isNone() ? false : arg->task_id() == taskId;
+}
+
+
+// This matcher is used to match an `Option<TaskGroupInfo>` which contains a
+// task with the specified task id.
+MATCHER_P(OptionTaskGroupHasTaskID, taskId, "")
+{
+  if (arg.isNone()) {
+    return false;
+  }
+
+  foreach(const TaskInfo& taskInfo, arg->tasks()) {
+    if (taskInfo.task_id() == taskId) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+struct ParamExecutorType
+{
+public:
+  struct Printer
+  {
+    std::string operator()(
+        const ::testing::TestParamInfo<ParamExecutorType>& info) const
+    {
+      switch (info.param.type) {
+        case COMMAND:
+          return "CommandExecutor";
+        case DEFAULT:
+          return "DefaultExecutor";
+        default:
+          UNREACHABLE();
+      }
+    }
+  };
+
+  static ParamExecutorType commandExecutor()
+  {
+    return ParamExecutorType(COMMAND);
+  }
+
+  static ParamExecutorType defaultExecutor()
+  {
+    return ParamExecutorType(DEFAULT);
+  }
+
+  bool isCommandExecutor() const { return type == COMMAND; }
+  bool isDefaultExecutor() const { return type == DEFAULT; }
+
+private:
+  enum Type
+  {
+    COMMAND,
+    DEFAULT
+  };
+
+  ParamExecutorType(Type _type) : type(_type) {}
+
+  Type type;
+};
 
 } // namespace tests {
 } // namespace internal {

@@ -42,7 +42,8 @@ namespace mesos {
 namespace internal {
 namespace log {
 
-static bool isRejectedPromise(const PromiseResponse& response) {
+static bool isRejectedPromise(const PromiseResponse& response)
+{
   if (response.has_type()) {
     // New format (Mesos >= 0.26).
     return response.type() == PromiseResponse::REJECT;
@@ -53,7 +54,8 @@ static bool isRejectedPromise(const PromiseResponse& response) {
 }
 
 
-static bool isRejectedWrite(const WriteResponse& response) {
+static bool isRejectedWrite(const WriteResponse& response)
+{
   if (response.has_type()) {
     // New format (Mesos >= 0.26).
     return response.type() == WriteResponse::REJECT;
@@ -215,8 +217,7 @@ private:
           // An action has already been performed in this position, we
           // need to save the action with the highest proposal number.
           if (highestAckAction.isNone() ||
-              (highestAckAction.get().performed() <
-               response.action().performed())) {
+              (highestAckAction->performed() < response.action().performed())) {
             highestAckAction = response.action();
           }
         } else {

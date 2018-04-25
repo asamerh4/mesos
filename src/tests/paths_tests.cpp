@@ -47,7 +47,7 @@ public:
     frameworkId.set_value("framework1");
     executorId.set_value("executor1");
     taskId.set_value("task1");
-    containerId.set_value(UUID::random().toString());
+    containerId.set_value(id::UUID::random().toString());
     role = "role1";
     persistenceId = "persistenceId1";
 
@@ -84,7 +84,7 @@ protected:
 
 TEST_F(PathsTest, CreateExecutorDirectory)
 {
-  const string& result = paths::createExecutorDirectory(
+  Try<string> result = paths::createExecutorDirectory(
       rootDir, slaveId, frameworkId, executorId, containerId);
 
   // Expected directory layout.
@@ -99,7 +99,7 @@ TEST_F(PathsTest, CreateExecutorDirectory)
       "runs",
       containerId.value());
 
-  ASSERT_EQ(dir, result);
+  ASSERT_SOME_EQ(dir, result);
 }
 
 

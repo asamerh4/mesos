@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <mesos/authorizer/authorizer.hpp>
 
 #include <mesos/allocator/allocator.hpp>
@@ -54,6 +56,14 @@
 #include <stout/try.hpp>
 #include <stout/strings.hpp>
 
+#ifdef USE_SSL_SOCKET
+#include <stout/os/permissions.hpp>
+#endif // USE_SSL_SOCKET
+
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
+
 #include "common/protobuf_utils.hpp"
 
 #include "local.hpp"
@@ -75,7 +85,7 @@
 
 #include "slave/gc.hpp"
 #include "slave/slave.hpp"
-#include "slave/status_update_manager.hpp"
+#include "slave/task_status_update_manager.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
@@ -83,11 +93,19 @@
 using namespace mesos::internal;
 #ifndef __WINDOWS__
 using namespace mesos::internal::log;
+#endif // __WINDOWS__
 
+using mesos::SecretGenerator;
+
+#ifndef __WINDOWS__
 using mesos::log::Log;
 #endif // __WINDOWS__
 
 using mesos::allocator::Allocator;
+
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
 
 using mesos::master::contender::MasterContender;
 using mesos::master::contender::StandaloneMasterContender;
@@ -104,7 +122,7 @@ using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::GarbageCollector;
 using mesos::internal::slave::Slave;
-using mesos::internal::slave::StatusUpdateManager;
+using mesos::internal::slave::TaskStatusUpdateManager;
 
 using mesos::modules::Anonymous;
 using mesos::modules::ModuleManager;
@@ -143,10 +161,11 @@ static MasterContender* contender = nullptr;
 static Option<Authorizer*> authorizer_ = None();
 static Files* files = nullptr;
 static vector<GarbageCollector*>* garbageCollectors = nullptr;
-static vector<StatusUpdateManager*>* statusUpdateManagers = nullptr;
+static vector<TaskStatusUpdateManager*>* taskStatusUpdateManagers = nullptr;
 static vector<Fetcher*>* fetchers = nullptr;
 static vector<ResourceEstimator*>* resourceEstimators = nullptr;
 static vector<QoSController*>* qosControllers = nullptr;
+static vector<SecretGenerator*>* secretGenerators = nullptr;
 
 
 PID<Master> launch(const Flags& flags, Allocator* _allocator)
@@ -351,10 +370,11 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
   PID<Master> pid = process::spawn(master);
 
   garbageCollectors = new vector<GarbageCollector*>();
-  statusUpdateManagers = new vector<StatusUpdateManager*>();
+  taskStatusUpdateManagers = new vector<TaskStatusUpdateManager*>();
   fetchers = new vector<Fetcher*>();
   resourceEstimators = new vector<ResourceEstimator*>();
   qosControllers = new vector<QoSController*>();
+  secretGenerators = new vector<SecretGenerator*>();
 
   vector<UPID> pids;
 
@@ -408,7 +428,8 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     }
 
     garbageCollectors->push_back(new GarbageCollector());
-    statusUpdateManagers->push_back(new StatusUpdateManager(slaveFlags));
+    taskStatusUpdateManagers->push_back(
+        new TaskStatusUpdateManager(slaveFlags));
     fetchers->push_back(new Fetcher(slaveFlags));
 
     Try<ResourceEstimator*> resourceEstimator =
@@ -430,6 +451,37 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     }
 
     qosControllers->push_back(qosController.get());
+
+    SecretGenerator* secretGenerator = nullptr;
+
+#ifdef USE_SSL_SOCKET
+    if (slaveFlags.jwt_secret_key.isSome()) {
+      Try<string> jwtSecretKey = os::read(slaveFlags.jwt_secret_key.get());
+      if (jwtSecretKey.isError()) {
+        EXIT(EXIT_FAILURE) << "Failed to read the file specified by "
+                           << "--jwt_secret_key";
+      }
+
+      // TODO(greggomann): Factor the following code out into a common helper,
+      // since we also do this when loading credentials.
+      Try<os::Permissions> permissions =
+        os::permissions(slaveFlags.jwt_secret_key.get());
+      if (permissions.isError()) {
+        LOG(WARNING) << "Failed to stat jwt secret key file '"
+                     << slaveFlags.jwt_secret_key.get()
+                     << "': " << permissions.error();
+      } else if (permissions->others.rwx) {
+        LOG(WARNING) << "Permissions on executor secret key file '"
+                     << slaveFlags.jwt_secret_key.get()
+                     << "' are too open; it is recommended that your"
+                     << " key file is NOT accessible by others";
+      }
+
+      secretGenerator = new JWTSecretGenerator(jwtSecretKey.get());
+    }
+#endif // USE_SSL_SOCKET
+
+    secretGenerators->push_back(secretGenerator);
 
     // Override the default launcher that gets created per agent to
     // 'posix' if we're creating multiple agents because the
@@ -472,9 +524,10 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
         containerizer.get(),
         files,
         garbageCollectors->back(),
-        statusUpdateManagers->back(),
+        taskStatusUpdateManagers->back(),
         resourceEstimators->back(),
         qosControllers->back(),
+        secretGenerators->back(),
         authorizer_); // Same authorizer as master.
 
     slaves[containerizer.get()] = slave;
@@ -531,12 +584,14 @@ void shutdown()
     delete garbageCollectors;
     garbageCollectors = nullptr;
 
-    foreach (StatusUpdateManager* statusUpdateManager, *statusUpdateManagers) {
-      delete statusUpdateManager;
+    foreach (
+        TaskStatusUpdateManager* taskStatusUpdateManager,
+        *taskStatusUpdateManagers) {
+      delete taskStatusUpdateManager;
     }
 
-    delete statusUpdateManagers;
-    statusUpdateManagers = nullptr;
+    delete taskStatusUpdateManagers;
+    taskStatusUpdateManagers = nullptr;
 
     foreach (Fetcher* fetcher, *fetchers) {
       delete fetcher;
@@ -544,6 +599,13 @@ void shutdown()
 
     delete fetchers;
     fetchers = nullptr;
+
+    foreach (SecretGenerator* secretGenerator, *secretGenerators) {
+      delete secretGenerator;
+    }
+
+    delete secretGenerators;
+    secretGenerators = nullptr;
 
     foreach (ResourceEstimator* estimator, *resourceEstimators) {
       delete estimator;

@@ -47,6 +47,13 @@ Option<Error> validateEnvironment(const Environment& environment);
 
 Option<Error> validateCommandInfo(const CommandInfo& command);
 
+Option<Error> validateVolume(const Volume& volume);
+
+Option<Error> validateContainerInfo(const ContainerInfo& containerInfo);
+
+Option<Error> validateGpus(
+    const google::protobuf::RepeatedPtrField<Resource>& resources);
+
 } // namespace validation {
 } // namespace common {
 } // namespace internal {

@@ -12,7 +12,9 @@
 
 #include "openssl.hpp"
 
+#ifndef __WINDOWS__
 #include <sys/param.h>
+#endif // __WINDOWS__
 
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -30,6 +32,15 @@
 
 #include <stout/os.hpp>
 #include <stout/strings.hpp>
+
+#ifdef __WINDOWS__
+// OpenSSL on Windows requires this adapter module to be compiled as part of the
+// consuming project to deal with Windows runtime library differences. Not doing
+// so manifests itself as the "no OPENSSL_Applink" runtime error.
+//
+// https://www.openssl.org/docs/faq.html
+#include <openssl/applink.c>
+#endif // __WINDOWS__
 
 using std::map;
 using std::ostringstream;
@@ -530,19 +541,17 @@ void reinitialize()
   if (ssl_flags->verify_cert) {
     // Set CA locations.
     if (ssl_flags->ca_file.isSome() || ssl_flags->ca_dir.isSome()) {
-      const char* ca_file = ssl_flags->ca_file.isSome()
-        ? ssl_flags->ca_file.get().c_str()
-        : nullptr;
+      const char* ca_file =
+        ssl_flags->ca_file.isSome() ? ssl_flags->ca_file->c_str() : nullptr;
 
-      const char* ca_dir = ssl_flags->ca_dir.isSome()
-        ? ssl_flags->ca_dir.get().c_str()
-        : nullptr;
+      const char* ca_dir =
+        ssl_flags->ca_dir.isSome() ? ssl_flags->ca_dir->c_str() : nullptr;
 
       if (SSL_CTX_load_verify_locations(ctx, ca_file, ca_dir) != 1) {
         unsigned long error = ERR_get_error();
         EXIT(EXIT_FAILURE)
           << "Could not load CA file and/or directory (OpenSSL error #"
-          << stringify(error)  << "): "
+          << stringify(error) << "): "
           << error_string(error) << " -> "
           << (ca_file != nullptr ? (stringify("FILE: ") + ca_file) : "")
           << (ca_dir != nullptr ? (stringify("DIR: ") + ca_dir) : "");
@@ -603,7 +612,7 @@ void reinitialize()
   // Set certificate chain.
   if (SSL_CTX_use_certificate_chain_file(
           ctx,
-          ssl_flags->cert_file.get().c_str()) != 1) {
+          ssl_flags->cert_file->c_str()) != 1) {
     unsigned long error = ERR_get_error();
     EXIT(EXIT_FAILURE)
       << "Could not load cert file '" << ssl_flags->cert_file.get() << "' "
@@ -612,9 +621,7 @@ void reinitialize()
 
   // Set private key.
   if (SSL_CTX_use_PrivateKey_file(
-          ctx,
-          ssl_flags->key_file.get().c_str(),
-          SSL_FILETYPE_PEM) != 1) {
+          ctx, ssl_flags->key_file->c_str(), SSL_FILETYPE_PEM) != 1) {
     unsigned long error = ERR_get_error();
     EXIT(EXIT_FAILURE)
       << "Could not load key file '" << ssl_flags->key_file.get() << "' "
@@ -818,7 +825,7 @@ Try<Nothing> verify(
     X509_NAME* name = X509_get_subject_name(cert);
 
     if (name != nullptr) {
-      char text[_POSIX_HOST_NAME_MAX] {};
+      char text[MAXHOSTNAMELEN] {};
 
       if (X509_NAME_get_text_by_NID(
               name,

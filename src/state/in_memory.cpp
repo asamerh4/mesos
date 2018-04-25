@@ -52,12 +52,11 @@ public:
     return entries.get(name);
   }
 
-  bool set(const Entry& entry, const UUID& uuid)
+  bool set(const Entry& entry, const id::UUID& uuid)
   {
     const Option<Entry>& option = entries.get(entry.name());
 
-    if (option.isSome() &&
-        UUID::fromBytes(option.get().uuid()).get() != uuid) {
+    if (option.isSome() && id::UUID::fromBytes(option->uuid()).get() != uuid) {
       return false;
     }
 
@@ -73,8 +72,8 @@ public:
       return false;
     }
 
-    if (UUID::fromBytes(option.get().uuid()).get() !=
-        UUID::fromBytes(entry.uuid()).get()) {
+    if (id::UUID::fromBytes(option->uuid()).get() !=
+        id::UUID::fromBytes(entry.uuid()).get()) {
       return false;
     }
 
@@ -115,7 +114,7 @@ Future<Option<Entry>> InMemoryStorage::get(const string& name)
 }
 
 
-Future<bool> InMemoryStorage::set(const Entry& entry, const UUID& uuid)
+Future<bool> InMemoryStorage::set(const Entry& entry, const id::UUID& uuid)
 {
   return dispatch(process, &InMemoryStorageProcess::set, entry, uuid);
 }

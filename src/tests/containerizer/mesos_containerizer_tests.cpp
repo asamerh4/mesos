@@ -58,6 +58,7 @@ using namespace process;
 
 using mesos::internal::master::Master;
 
+using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::executorEnvironment;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::FetcherProcess;
@@ -124,12 +125,12 @@ TEST_F(MesosContainerizerTest, Launch)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -138,7 +139,52 @@ TEST_F(MesosContainerizerTest, Launch)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
+
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait.get()->has_status());
+  EXPECT_WEXITSTATUS_EQ(42, wait.get()->status());
+}
+
+
+TEST_F(MesosContainerizerTest, StandaloneLaunch)
+{
+  slave::Flags flags = CreateSlaveFlags();
+  flags.launcher = "posix";
+  flags.isolation = "posix/cpu,posix/mem";
+
+  Fetcher fetcher(flags);
+
+  Try<MesosContainerizer*> create = MesosContainerizer::create(
+      flags,
+      true,
+      &fetcher);
+
+  ASSERT_SOME(create);
+
+  Owned<MesosContainerizer> containerizer(create.get());
+
+  SlaveState state;
+  state.id = SlaveID();
+
+  AWAIT_READY(containerizer->recover(state));
+
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
+      containerId,
+      createContainerConfig(
+          createCommandInfo("exit 42"),
+          "cpus:1;mem:64",
+          sandbox.get()),
+      map<string, string>(),
+      None());
+
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
@@ -172,12 +218,12 @@ TEST_F(MesosContainerizerTest, Destroy)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -186,7 +232,7 @@ TEST_F(MesosContainerizerTest, Destroy)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
@@ -224,12 +270,12 @@ TEST_F(MesosContainerizerTest, StatusWithContainerID)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -238,7 +284,7 @@ TEST_F(MesosContainerizerTest, StatusWithContainerID)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<ContainerStatus> status = containerizer->status(containerId);
   AWAIT_READY(status);
@@ -327,9 +373,9 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ScriptSucceeds)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -339,7 +385,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ScriptSucceeds)
       None());
 
   // Wait until the launch completes.
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait for the child (preparation script + executor) to complete.
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
@@ -374,9 +420,9 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ScriptFails)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -386,7 +432,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ScriptFails)
       None());
 
   // Wait until the launch completes.
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait for the child (preparation script + executor) to complete.
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
@@ -433,9 +479,9 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, MultipleScripts)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -445,7 +491,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, MultipleScripts)
       None());
 
   // Wait until the launch completes.
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait for the child (preparation script(s) + executor) to complete.
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
@@ -492,7 +538,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ExecutorEnvironmentVariable)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   // Ensure that LIBPROCESS_IP has been passed despite the explicit
   // specification of the environment. If so, then touch the test file.
@@ -514,14 +560,14 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ExecutorEnvironmentVariable)
       None(),
       false);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executorInfo, sandbox.get()),
       environment,
       None());
 
   // Wait until the launch completes.
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait for the child (preparation script + executor) to complete.
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
@@ -568,14 +614,14 @@ TEST_F(MesosContainerizerExecuteTest, IoRedirection)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   string errMsg = "this is stderr";
   string outMsg = "this is stdout";
   string command =
     "(echo '" + errMsg + "' 1>&2) && echo '" + outMsg + "'";
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           None(),
@@ -585,7 +631,7 @@ TEST_F(MesosContainerizerExecuteTest, IoRedirection)
       None());
 
   // Wait for the launch to complete.
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait on the container.
   Future<Option<ContainerTermination>> wait =
@@ -625,21 +671,21 @@ TEST_F(MesosContainerizerExecuteTest, ROOT_SandboxFileOwnership)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   const string user = "nobody";
 
   ExecutorInfo executor = createExecutorInfo("executor", "exit 0");
   executor.mutable_command()->set_user(user);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executor, sandbox.get()),
       map<string, string>(),
       None());
 
   // Wait for the launch to complete.
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Result<uid_t> uid = os::getuid(user);
   ASSERT_SOME(uid);
@@ -709,11 +755,12 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
                     Return(promise.future())));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  TaskInfo taskInfo;
-  CommandInfo commandInfo;
-  taskInfo.mutable_command()->MergeFrom(commandInfo);
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+
+  TaskInfo taskInfo = createTask(slaveId, Resources(), CommandInfo());
 
   containerizer->launch(
       containerId,
@@ -777,11 +824,12 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  TaskInfo taskInfo;
-  CommandInfo commandInfo;
-  taskInfo.mutable_command()->MergeFrom(commandInfo);
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+
+  TaskInfo taskInfo = createTask(slaveId, Resources(), CommandInfo());
 
   containerizer->launch(
       containerId,
@@ -804,7 +852,7 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
 
   // Need to help the compiler to disambiguate between overloads.
   ContainerLaunchInfo launchInfo;
-  launchInfo.add_pre_exec_commands()->CopyFrom(commandInfo);
+  launchInfo.add_pre_exec_commands()->CopyFrom(taskInfo.command());
   Option<ContainerLaunchInfo> option = launchInfo;
   promise.set(option);
 
@@ -835,9 +883,13 @@ TEST_F(MesosContainerizerDestroyTest, DestroyUnknownContainer)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  AWAIT_EXPECT_FALSE(containerizer->destroy(containerId));
+  Future<Option<ContainerTermination>> destroyed =
+    containerizer->destroy(containerId);
+
+  AWAIT_READY(destroyed);
+  EXPECT_NONE(destroyed.get());
 }
 
 
@@ -897,12 +949,12 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Image image;
   image.set_type(Image::DOCKER);
   Image::Docker dockerImage;
-  dockerImage.set_name(UUID::random().toString());
+  dockerImage.set_name(id::UUID::random().toString());
   image.mutable_docker()->CopyFrom(dockerImage);
 
   ContainerInfo::MesosInfo mesosInfo;
@@ -912,15 +964,17 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
   containerInfo.set_type(ContainerInfo::MESOS);
   containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
 
-  TaskInfo taskInfo;
-  CommandInfo commandInfo;
-  taskInfo.mutable_command()->MergeFrom(commandInfo);
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+
+  TaskInfo taskInfo = createTask(slaveId, Resources(), CommandInfo());
+
   taskInfo.mutable_container()->CopyFrom(containerInfo);
 
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
   executorInfo.mutable_container()->CopyFrom(containerInfo);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(taskInfo, executorInfo, sandbox.get()),
       map<string, string>(),
@@ -981,12 +1035,12 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Image image;
   image.set_type(Image::DOCKER);
   Image::Docker dockerImage;
-  dockerImage.set_name(UUID::random().toString());
+  dockerImage.set_name(id::UUID::random().toString());
   image.mutable_docker()->CopyFrom(dockerImage);
 
   ContainerInfo::MesosInfo mesosInfo;
@@ -996,15 +1050,16 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
   containerInfo.set_type(ContainerInfo::MESOS);
   containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
 
-  TaskInfo taskInfo;
-  CommandInfo commandInfo;
-  taskInfo.mutable_command()->MergeFrom(commandInfo);
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+
+  TaskInfo taskInfo = createTask(slaveId, Resources(), CommandInfo());
   taskInfo.mutable_container()->CopyFrom(containerInfo);
 
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
   executorInfo.mutable_container()->CopyFrom(containerInfo);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(taskInfo, executorInfo, sandbox.get()),
       map<string, string>(),
@@ -1072,12 +1127,12 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Image image;
   image.set_type(Image::DOCKER);
   Image::Docker dockerImage;
-  dockerImage.set_name(UUID::random().toString());
+  dockerImage.set_name(id::UUID::random().toString());
   image.mutable_docker()->CopyFrom(dockerImage);
 
   ContainerInfo::MesosInfo mesosInfo;
@@ -1087,15 +1142,15 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
   containerInfo.set_type(ContainerInfo::MESOS);
   containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
 
-  TaskInfo taskInfo;
-  CommandInfo commandInfo;
-  taskInfo.mutable_command()->MergeFrom(commandInfo);
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  TaskInfo taskInfo = createTask(slaveId, Resources(), CommandInfo());
   taskInfo.mutable_container()->CopyFrom(containerInfo);
 
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
   executorInfo.mutable_container()->CopyFrom(containerInfo);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(taskInfo, executorInfo, sandbox.get()),
       map<string, string>(),
@@ -1161,11 +1216,11 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  TaskInfo taskInfo;
-  CommandInfo commandInfo;
-  taskInfo.mutable_command()->MergeFrom(commandInfo);
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  TaskInfo taskInfo = createTask(slaveId, Resources(), CommandInfo());
 
   // Destroy the container using the SubprocessLauncher but return a failed
   // future to the containerizer.
@@ -1173,7 +1228,7 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
     .WillOnce(DoAll(InvokeDestroyAndWait(testLauncher),
                     Return(Failure("Destroy failure"))));
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(
           taskInfo,
@@ -1182,7 +1237,7 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
       map<string, string>(),
       None());
 
-  AWAIT_READY(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
@@ -1229,10 +1284,10 @@ TEST_F(MesosContainerizerRecoverTest, SkipRecoverNonMesosContainers)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ExecutorID executorId;
-  executorId.set_value(UUID::random().toString());
+  executorId.set_value(id::UUID::random().toString());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ExecutorInfo executorInfo;
   executorInfo.mutable_container()->set_type(ContainerInfo::DOCKER);
@@ -1250,13 +1305,13 @@ TEST_F(MesosContainerizerRecoverTest, SkipRecoverNonMesosContainers)
 
   SlaveState slaveState;
   FrameworkID frameworkId;
-  frameworkId.set_value(UUID::random().toString());
+  frameworkId.set_value(id::UUID::random().toString());
   slaveState.frameworks.put(frameworkId, frameworkState);
 
-  Future<Nothing> recover = containerizer.get()->recover(slaveState);
+  Future<Nothing> recover = containerizer->recover(slaveState);
   AWAIT_READY(recover);
 
-  Future<hashset<ContainerID>> containers = containerizer.get()->containers();
+  Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   EXPECT_TRUE(containers->empty());
 }
@@ -1276,9 +1331,9 @@ TEST_F(MesosLauncherStatusTest, ExecutorPIDTest)
   ASSERT_SOME(launcher);
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
   ContainerID invalidContainerId;
-  invalidContainerId.set_value(UUID::random().toString());
+  invalidContainerId.set_value(id::UUID::random().toString());
 
   Try<pid_t> forked = launcher.get()->fork(
       containerId,
@@ -1297,7 +1352,7 @@ TEST_F(MesosLauncherStatusTest, ExecutorPIDTest)
   Future<ContainerStatus> validStatus = launcher.get()->status(containerId);
 
   AWAIT_READY(validStatus);
-  EXPECT_EQ(validStatus->executor_pid(), forked.get());
+  EXPECT_EQ(static_cast<pid_t>(validStatus->executor_pid()), forked.get());
 
   Future<ContainerStatus> invalidStatus =
     launcher.get()->status(invalidContainerId);
@@ -1329,7 +1384,7 @@ TEST_F(MesosContainerizerWaitTest, WaitUnknownContainer)
   Owned<MesosContainerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 

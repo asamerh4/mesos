@@ -32,9 +32,36 @@ when you are done.
     $ source deactivate
 ```
 
-**NOTE:** The virtual environment will also setup bash
-autocomplete for all `mesos` commands.
+You can also run the `bootstrap` script from any directory
+and specify the `VIRTUALENV_DIRECTORY` to set where it
+should be created.
 
+```
+$ VIRTUALENV_DIRECTORY=~/.mesos-cli-venv
+$ ${MESOS_DIR}/src/python/cli_new/bootstrap
+
+...
+
+Setup complete!
+
+To begin working, simply activate your virtual environment,
+run the CLI, and then deactivate the virtual environment
+when you are done.
+
+    $ source ~/.mesos-cli-venv/bin/activate
+    $ source ~/.mesos-cli-venv/bin/postactivate
+    $ mesos <command> [<args>...]
+    $ source ~/.mesos-cli-venv/bin/predeactivate
+    $ deactivate
+
+
+The postactivate and predeactivate files set up autocompletion.
+Add the mesos binary parent directory
+${MESOS_DIR}/src/python/cli_new/bin/
+to your path, export it, and source
+${MESOS_DIR}/src/python/cli_new/mesos.bash_completion
+to skip these two steps in the future.
+```
 
 ## Running tests
 
@@ -77,6 +104,19 @@ plugins = [
   "</absolute/path/to/plugin-1/directory>",
   "</absolute/path/to/plugin-2/directory>"
 ]
+
+# The `master` is a field that has to be composed of an
+# `address` or `zookeeper` field, but not both. For example:
+[master]
+  address = "10.10.0.30:5050"
+  # The `zookeeper` field has an `addresses` array and a `path` field.
+  # [master.zookeeper]
+  #   addresses = [
+  #     "10.10.0.31:5050",
+  #     "10.10.0.32:5050",
+  #     "10.10.0.33:5050"
+  #   ]
+  #   path = "/mesos"
 ```
 
 You can override the location of this configuration file using

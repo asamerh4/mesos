@@ -31,6 +31,7 @@
 #include <tuple>
 #include <vector>
 
+#include <process/after.hpp>
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
@@ -43,7 +44,9 @@
 #include <process/process.hpp>
 #include <process/queue.hpp>
 #include <process/socket.hpp>
+#include <process/state_machine.hpp>
 
+#include <stout/error.hpp>
 #include <stout/foreach.hpp>
 #include <stout/ip.hpp>
 #include <stout/lambda.hpp>
@@ -61,6 +64,7 @@
 
 using std::deque;
 using std::istringstream;
+using std::list;
 using std::map;
 using std::ostream;
 using std::ostringstream;
@@ -288,7 +292,7 @@ bool Request::acceptsEncoding(const string& encoding) const
   // then the server SHOULD use the "identity" content-coding...
   Option<string> accept = headers.get("Accept-Encoding");
 
-  if (accept.isNone() || accept.get().empty()) {
+  if (accept.isNone() || accept->empty()) {
     return false;
   }
 
@@ -419,26 +423,23 @@ Pipe::Writer Pipe::writer() const
 
 Future<string> Pipe::Reader::read()
 {
-  Future<string> future;
-
   synchronized (data->lock) {
     if (data->readEnd == Reader::CLOSED) {
-      future = Failure("closed");
+      return Failure("closed");
     } else if (!data->writes.empty()) {
-      future = data->writes.front();
+      Future<string> future = data->writes.front();
       data->writes.pop();
+      return future;
     } else if (data->writeEnd == Writer::CLOSED) {
-      future = ""; // End-of-file.
+      return ""; // End-of-file.
     } else if (data->writeEnd == Writer::FAILED) {
       CHECK_SOME(data->failure);
-      future = data->failure.get();
+      return data->failure.get();
     } else {
       data->reads.push(Owned<Promise<string>>(new Promise<string>()));
-      future = data->reads.back()->future();
+      return data->reads.back()->future();
     }
   }
-
-  return future;
 }
 
 
@@ -533,7 +534,7 @@ bool Pipe::Writer::write(string s)
   // NOTE: We set the promise outside the critical section to avoid
   // triggering callbacks that try to reacquire the lock.
   if (read.get() != nullptr) {
-    read->set(std::move(s));
+    read->set(std::move(s)); // NOLINT(misc-use-after-move)
   }
 
   return written;
@@ -672,7 +673,7 @@ OK::OK(const JSON::Value& value, const Option<string>& jsonp)
   }
 
   headers["Content-Length"] = stringify(out.str().size());
-  body = out.str().data();
+  body = out.str();
 }
 
 
@@ -740,7 +741,7 @@ Try<hashmap<string, string>> parse(const string& pattern, const string& path)
 } // namespace path {
 
 
-string encode(const string& s)
+string encode(const string& s, const string& additional_chars)
 {
   ostringstream out;
 
@@ -780,7 +781,9 @@ string encode(const string& s)
       default:
         // ASCII control characters and non-ASCII characters.
         // NOTE: The cast to unsigned int is needed.
-        if (c < 0x20 || c > 0x7F) {
+        if (c < 0x20 ||
+            c > 0x7F ||
+            additional_chars.find_first_of(c) != string::npos) {
           out << '%' << std::setfill('0') << std::setw(2) << std::hex
               << std::uppercase << (unsigned int) c;
         } else {
@@ -1150,7 +1153,7 @@ public:
 
   Future<Nothing> disconnect(const Option<string>& message = None())
   {
-    Try<Nothing> shutdown = socket.shutdown(
+    Try<Nothing, SocketError> shutdown = socket.shutdown(
         network::Socket::Shutdown::READ_WRITE);
 
     // If a response is still streaming, we send EOF to
@@ -1168,7 +1171,8 @@ public:
 
     disconnection.set(Nothing());
 
-    return shutdown;
+    return shutdown.isSome() ? Future<Nothing>(Nothing())
+                             : Failure(shutdown.error().message);
   }
 
   Future<Nothing> disconnected()
@@ -1404,7 +1408,8 @@ Future<Connection> connect(const network::Address& address, Scheme scheme)
   }
 
   Try<network::Socket> socket = network::Socket::create(
-      address.family(), kind);
+      address.family(),
+      kind);
 
   if (socket.isError()) {
     return Failure("Failed to create socket: " + socket.error());
@@ -1705,15 +1710,29 @@ Future<Nothing> send(
         Request* request = item->request;
         Future<Response> response = item->response;
 
-        return response
-          // TODO(benh):
-          // .recover([]() {
-          //   return InternalServerError("Discarded response");
-          // })
-          .repair([](const Future<Response>& response) {
-            // TODO(benh): Is this severe enough that we should close
-            // the connection?
-            return InternalServerError(response.failure());
+        // We do an `await` here so that we won't wait forever in the
+        // event that we've discarded the loop but `response` is
+        // abandoned or taking too long.
+        return await(response)
+          .recover([](const Future<Future<Response>>& future)
+              -> Future<Response> {
+            if (future.isFailed()) {
+              return InternalServerError(
+                  "Failed to wait for response: " + future.failure());
+            }
+
+            // Either `response` was abandoned or the loop has been
+            // discarded so we return `ServiceUnavailable` so we can
+            // continue the loop or break out if we've been discarded.
+            return ServiceUnavailable();
+          })
+          .then([](const Future<Response>& future) -> Response {
+            if (future.isFailed()) {
+              return InternalServerError(future.failure());
+            } else if (future.isDiscarded()) {
+              return ServiceUnavailable();
+            }
+            return future.get();
           })
           .then([=](const Response& response) {
             // TODO(benh): Should any generated InternalServerError
@@ -1919,6 +1938,315 @@ Future<Nothing> serve(
 }
 
 } // namespace internal {
+
+
+class ServerProcess : public Process<ServerProcess>
+{
+public:
+  ServerProcess(
+      network::Socket&& socket,
+      std::function<Future<Response>(
+          const network::Socket&,
+          const Request&)>&& f)
+    : socket(std::move(socket)),
+      f(std::move(f)),
+      state(State::INITIALIZED) {}
+
+  // `Server` implementation.
+  Future<Nothing> run()
+  {
+    return state.transition<State::INITIALIZED, State::RUNNING>([=]() {
+        // Start the accept loop and store the future so we can later
+        // discard it when we need to stop the server.
+        accepting = loop(
+          self(),
+          [=]() {
+            return socket.accept();
+          },
+          [=](const network::Socket& socket) -> ControlFlow<Nothing> {
+            // If we've transitioned to STOPPING we should break. It
+            // may seem like we should never get here because we
+            // discard the accept loop before we transition to
+            // STOPPING but it's possible that we've already
+            // dispatched this lambda and it is only now getting
+            // invoked. It's critical that we break because after we
+            // transition to STOPPING we assume that `clients` will
+            // not be modified by the accept loop.
+            if (state.is<State::STOPPING>()) {
+              return Break();
+            }
+
+            Client client = {
+              /* .socket = */ socket,
+              /* .serving = */ http::serve(
+                  socket,
+                  [=](const Request& request) {
+                    return f(socket, request);
+                  })
+            };
+
+            clients.put(socket, client);
+
+            client.serving
+              .onAny(defer(self(), [=](const Future<Nothing>&) {
+                clients.erase(socket);
+              }));
+
+            return Continue();
+          });
+
+      // We return a _discardable_ `accepting` so the caller can stop
+      // running a server by "discarding the run", for example:
+      //
+      //   Future<Nothing> run = server.run();
+      //   run.discard();
+      //
+      // Even if we returned an _undiscardable_ `accepting` we still
+      // need to do a `recover()` on it in the event that the accept
+      // loop fails (or is abandoned) so we can stop the server (if it
+      // isn't already being stopped). If `accepting` completes
+      // successfully then we must be stopping so just wait until
+      // we've stopped!
+      return accepting
+        .then(defer(self(), [=]() {
+          return state.when<State::STOPPED>();
+        }))
+        .recover(defer(self(), [=](const Future<Nothing>& future) {
+          // If the accept loop completes because it is abandoned,
+          // discarded, or failed we want to stop the server if it
+          // isn't already being stopped. In fact, someone stopping
+          // the server might be the reason we're executing this
+          // callback because `stop()` discards `accepting`.
+          //
+          // If we're not already stopping, i.e., the state is
+          // RUNNING, then it's safe to assume that the accept loop
+          // has (1) failed or (2) been discarded because someone did
+          // a discard on the future returned from `run()`. In either
+          // of these cases we initiate a `stop()` ourselves and after
+          // that completes return a failure capturing the reason we
+          // had to initiate the stop.
+          if (state.is<State::RUNNING>()) {
+            return stop(Server::DEFAULT_STOP_OPTIONS())
+              .then([=]() -> Future<Nothing> {
+                return Failure(stringify(future));
+              });
+          }
+
+          // Otherwise we must already be stopping so just wait till
+          // we're stopped.
+          return state.when<State::STOPPED>();
+        }));
+    });
+  }
+
+  Future<Nothing> stop(const Server::StopOptions& options)
+  {
+    return state.transition<State::RUNNING, State::STOPPING>([=]() {
+      // We make stopping be undiscardable to ensure that we properly
+      // cleanup. This has the added benefit of simplifying having to
+      // reason about how discards may propagate here when someone
+      // discards the future returned from `run()` after they've
+      // already called `stop()`.
+      return undiscardable([=]() {
+        accepting.discard();
+
+        // In addition to discarding the accept loop we also attempt
+        // to stop accepting new clients via shutting down the
+        // socket. Shutting down the socket on Linux will keep further
+        // connections from being established even though we haven't
+        // closed the socket but on OS X connections will keep queuing
+        // (in fact, calling `shutdown()` is an error, hence we don't
+        // check the return value).
+        socket.shutdown(network::Socket::Shutdown::READ_WRITE);
+
+        // TODO(benh): ideally we also try and shut down the read end
+        // of existing clients to signal that we won't handle any new
+        // requests. Note that doing this is expected by the
+        // specification, see section 8.1.4 in
+        // https://www.w3.org/Protocols/rfc2616/rfc2616-sec8.html. Something
+        // like:
+        //
+        // foreachvalue (Client& client, clients) {
+        //   client.socket.shutdown(network::Socket::Shutdown::READ);
+        // }
+        //
+        // Doing this is non-trivial, however, because in practice
+        // what most servers do is continue to read any partial
+        // requests until some point at which no more requests appear
+        // to be coming in. This will require significant changes in
+        // `http::serve()`, hence it's left as a TODO.
+
+        // Wait for the current clients to finish (we know no more
+        // clients will get added because we set `stopping` and the
+        // accept loop will respect that (see `run()`).
+        return await(lambda::map(
+            [](Client&& client) {
+              return client.serving;
+            },
+            clients.values()))
+          // After the grace period expires discard all the clients
+          // and then keep waiting.
+          .after(options.grace_period,
+                 defer(self(), [=](Future<list<Future<Nothing>>> f) {
+                   f.discard();
+                   return await(lambda::map(
+                       [](Client&& client) {
+                         client.serving.discard();
+                         return client.serving;
+                       },
+                       clients.values()));
+                 }))
+          .then(defer(self(), [=]() {
+            clients.clear();
+
+            // We `await()` the accept loop because we don't care how
+            // it completes, we just want it to complete.
+            return await(accepting)
+              .then(defer(self(), [=]() -> Future<Nothing> {
+                return state.transition<State::STOPPING, State::STOPPED>();
+              }));
+          }));
+      }());
+    },
+    "Server must be started in order to be stopped");
+  }
+
+protected:
+  virtual void finalize()
+  {
+    // If we started the accept loop then discard it and any clients
+    // we are already serving.
+    accepting.discard();
+
+    // NOTE: we know that no more sockets will be accepted because
+    // the accept loop is on `self()` and we're in `finalize()`.
+    foreachvalue (Client& client, clients) {
+      client.serving.discard();
+    }
+
+    clients.clear();
+  }
+
+private:
+  network::Socket socket;
+  std::function<Future<Response>(const network::Socket&, const Request&)> f;
+
+  enum class State
+  {
+    INITIALIZED,
+    RUNNING,
+    STOPPING,
+    STOPPED,
+  };
+
+  StateMachine<State> state;
+
+  Future<Nothing> accepting;
+
+  struct Client
+  {
+    network::Socket socket;
+    Future<Nothing> serving;
+  };
+
+  hashmap<int_fd, Client> clients;
+};
+
+
+Try<Server> Server::create(
+    network::Socket socket,
+    std::function<Future<Response>(const network::Socket&, const Request&)>&& f,
+    const CreateOptions& options)
+{
+  // NOTE: we start listening on the socket here so that a client can
+  // attempt to connect to the server even before `Server::run` has
+  // been called. If we postpone calling `Socket::listen` until we
+  // invoke `Server::run` there is a race between when `Server::run`
+  // returns and when `Socket::listen` actually gets called because
+  // `Server::run` dispatches to `ServerProcess::run`. This is likely
+  // not a problem in practice but is definitely problematic with
+  // tests that try and start making connections immediately after
+  // `Server::run` has returned but potentially before
+  // `Socket::listen` has been invoked.
+  Try<Nothing> listen = socket.listen(static_cast<int>(options.backlog));
+  if (listen.isError()) {
+    return Error("Failed to listen on socket: " + listen.error());
+  }
+
+  return Server(std::move(socket), std::move(f));
+}
+
+
+Try<Server> Server::create(
+    const network::Address& address,
+    std::function<Future<Response>(const network::Socket&, const Request&)>&& f,
+    const Server::CreateOptions& options)
+{
+  SocketImpl::Kind kind = [&]() {
+    switch (options.scheme) {
+      case Scheme::HTTP: return SocketImpl::Kind::POLL;
+#ifdef USE_SSL_SOCKET
+      case Scheme::HTTPS: return SocketImpl::Kind::SSL;
+#endif
+    }
+    UNREACHABLE();
+  }();
+
+  Try<network::Socket> socket = network::Socket::create(
+      address.family(),
+      kind);
+
+  if (socket.isError()) {
+    return Error("Failed to create socket: " + socket.error());
+  }
+
+  Try<network::Address> bind = socket->bind(address);
+  if (bind.isError()) {
+    return Error(
+        "Failed to bind to address '" + stringify(address) + "': "
+        + bind.error());
+  }
+
+  return create(socket.get(), std::move(f), options);
+}
+
+
+Server::Server(
+    network::Socket&& socket,
+    std::function<Future<Response>(const network::Socket&, const Request&)>&& f)
+  : socket(socket),
+    process(new ServerProcess(std::move(socket), std::move(f)))
+{
+  spawn(*process);
+}
+
+
+Server::~Server()
+{
+  // `process` may be a `nullptr` if we've moved `this`.
+  if (process.get() != nullptr) {
+    terminate(*process);
+    wait(*process);
+  }
+}
+
+
+Future<Nothing> Server::run()
+{
+  return dispatch(*process, &ServerProcess::run);
+}
+
+
+Future<Nothing> Server::stop(const Server::StopOptions& options)
+{
+  return dispatch(*process, &ServerProcess::stop, options);
+}
+
+
+Try<network::Address> Server::address() const
+{
+  return socket.address();
+}
 
 
 Request createRequest(

@@ -30,6 +30,7 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
+#include <process/future.hpp>
 #include <process/id.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
@@ -44,6 +45,7 @@
 #include <stout/uuid.hpp>
 
 #include "checks/checker.hpp"
+#include "checks/checks_runtime.hpp"
 #include "checks/health_checker.hpp"
 
 #include "common/http.hpp"
@@ -61,6 +63,7 @@ using mesos::executor::Event;
 using mesos::v1::executor::Mesos;
 
 using process::Clock;
+using process::Failure;
 using process::Future;
 using process::Owned;
 using process::UPID;
@@ -108,6 +111,15 @@ private:
     // `WAIT_NESTED_CONTAINER` call has not been established yet.
     Option<Connection> waiting;
 
+    // Error returned by the agent while trying to launch the container.
+    Option<string> launchError;
+
+    // TODO(bennoe): Create a real state machine instead of adding
+    // more and more ad-hoc boolean values.
+
+    // Indicates whether the child container has been launched.
+    bool launched;
+
     // Indicates whether a status update acknowledgement
     // has been received for any status update.
     bool acknowledged;
@@ -130,7 +142,6 @@ public:
     : ProcessBase(process::ID::generate("default-executor")),
       state(DISCONNECTED),
       contentType(ContentType::PROTOBUF),
-      launched(false),
       shuttingDown(false),
       unhealthy(false),
       frameworkInfo(None()),
@@ -147,7 +158,7 @@ public:
   void connected()
   {
     state = CONNECTED;
-    connectionId = UUID::random();
+    connectionId = id::UUID::random();
 
     doReliableRegistration();
   }
@@ -161,7 +172,7 @@ public:
 
     // Disconnect all active connections used for
     // waiting on child containers.
-    foreachvalue (Owned<Container> container, containers) {
+    foreachvalue (Owned<Container>& container, containers) {
       if (container->waiting.isSome()) {
         container->waiting->disconnect();
         container->waiting = None();
@@ -169,7 +180,7 @@ public:
     }
 
     // Pause all checks and health checks.
-    foreachvalue (Owned<Container> container, containers) {
+    foreachvalue (Owned<Container>& container, containers) {
       if (container->checker.isSome()) {
         container->checker->get()->pause();
       }
@@ -198,12 +209,12 @@ public:
         // It is possible that the agent process had failed after we
         // had launched the child containers. We can resume waiting on the
         // child containers again.
-        if (launched) {
+        if (!containers.empty()) {
           wait(containers.keys());
         }
 
         // Resume all checks and health checks.
-        foreachvalue (Owned<Container> container, containers) {
+        foreachvalue (Owned<Container>& container, containers) {
           if (container->checker.isSome()) {
             container->checker->get()->resume();
           }
@@ -239,7 +250,8 @@ public:
       }
 
       case Event::ACKNOWLEDGED: {
-        const UUID uuid = UUID::fromBytes(event.acknowledged().uuid()).get();
+        const id::UUID uuid =
+          id::UUID::fromBytes(event.acknowledged().uuid()).get();
 
         if (!unacknowledgedUpdates.contains(uuid)) {
           LOG(WARNING) << "Received acknowledgement " << uuid
@@ -318,12 +330,14 @@ protected:
       subscribe->add_unacknowledged_updates()->MergeFrom(update);
     }
 
-    // Send all unacknowledged tasks. We don't send unacknowledged terminated
-    // (and hence already removed from `containers`) tasks, because for such
-    // tasks `WAIT_NESTED_CONTAINER` call has already succeeded, meaning the
-    // agent knows about the tasks and corresponding containers.
+    // Send all unacknowledged tasks. We don't send tasks whose container
+    // didn't launch yet, because the agent will learn about once it launches.
+    // We also don't send unacknowledged terminated (and hence already removed
+    // from `containers`) tasks, because for such tasks `WAIT_NESTED_CONTAINER`
+    // call has already succeeded, meaning the agent knows about the tasks and
+    // corresponding containers.
     foreachvalue (const Owned<Container>& container, containers) {
-      if (!container->acknowledged) {
+      if (container->launched && !container->acknowledged) {
         subscribe->add_unacknowledged_tasks()->MergeFrom(container->taskInfo);
       }
     }
@@ -337,8 +351,6 @@ protected:
   {
     CHECK_EQ(SUBSCRIBED, state);
 
-    launched = true;
-
     process::http::connect(agent)
       .onAny(defer(self(), &Self::_launchGroup, taskGroup, lambda::_1));
   }
@@ -348,25 +360,39 @@ protected:
       const Future<Connection>& connection)
   {
     if (shuttingDown) {
-      LOG(WARNING) << "Ignoring the launch operation as the "
+      LOG(WARNING) << "Ignoring the launch group operation as the "
                    << "executor is shutting down";
       return;
     }
 
     if (!connection.isReady()) {
-      LOG(ERROR)
-        << "Unable to establish connection with the agent: "
-        << (connection.isFailed() ? connection.failure() : "discarded");
-      _shutdown();
+      LOG(WARNING) << "Unable to establish connection with the agent to "
+                   << "complete the launch group operation: "
+                   << (connection.isFailed() ? connection.failure()
+                                             : "discarded");
+      dropTaskGroup(taskGroup);
+
+      // Shutdown the executor if all the active child containers have
+      // terminated.
+      if (containers.empty()) {
+        _shutdown();
+      }
+
       return;
     }
 
     // It is possible that the agent process failed after the connection was
-    // established. Shutdown the executor if this happens.
+    // established. Drop the task group if this happens.
     if (state == DISCONNECTED || state == CONNECTED) {
-      LOG(ERROR) << "Unable to complete the launch operation "
-                 << "as the executor is in state " << state;
-      _shutdown();
+      LOG(WARNING) << "Unable to complete the launch group operation "
+                   << "as the executor is in state " << state;
+      dropTaskGroup(taskGroup);
+
+      // Shutdown the executor if all the active child containers have
+      // terminated.
+      if (containers.empty()) {
+        _shutdown();
+      }
       return;
     }
 
@@ -398,10 +424,28 @@ protected:
 
     foreach (const TaskInfo& task, taskGroup.tasks()) {
       ContainerID containerId;
-      containerId.set_value(UUID::random().toString());
+      containerId.set_value(id::UUID::random().toString());
       containerId.mutable_parent()->CopyFrom(executorContainerId.get());
 
       containerIds.push_back(containerId);
+
+      containers[task.task_id()] = Owned<Container>(new Container{
+        containerId,
+        task,
+        taskGroup,
+        None(),
+        None(),
+        None(),
+        None(),
+        None(),
+        false,
+        false,
+        false,
+        false});
+
+      // Send out the initial TASK_STARTING update.
+      const TaskStatus status = createTaskStatus(task.task_id(), TASK_STARTING);
+      forward(status);
 
       agent::Call call;
       call.set_type(agent::Call::LAUNCH_NESTED_CONTAINER);
@@ -480,7 +524,7 @@ protected:
       const Future<list<Response>>& responses)
   {
     if (shuttingDown) {
-      LOG(WARNING) << "Ignoring the launch operation as the "
+      LOG(WARNING) << "Ignoring the launch group operation as the "
                    << "executor is shutting down";
       return;
     }
@@ -496,47 +540,34 @@ protected:
       return;
     }
 
-    // Check if we received a 200 OK response for all the
-    // `LAUNCH_NESTED_CONTAINER` calls. Shutdown the executor
-    // if this is not the case.
-    foreach (const Response& response, responses.get()) {
-      if (response.code != process::http::Status::OK) {
-        LOG(ERROR) << "Received '" << response.status << "' ("
-                   << response.body << ") while launching child container";
-        _shutdown();
-        return;
-      }
-    }
-
-    // This could happen if the agent process failed after the child
-    // containers were launched. Shutdown the executor if this happens.
-    if (state == DISCONNECTED || state == CONNECTED) {
-      LOG(ERROR) << "Unable to complete the operation of launching child "
-                 << "containers as the executor is in state " << state;
-      _shutdown();
-      return;
-    }
-
-    CHECK_EQ(SUBSCRIBED, state);
-    CHECK(launched);
     CHECK_EQ(containerIds.size(), (size_t) taskGroup.tasks().size());
+    CHECK_EQ(containerIds.size(), responses->size());
 
-    size_t index = 0;
+    int index = 0;
+    auto responseIterator = responses->begin();
     foreach (const ContainerID& containerId, containerIds) {
       const TaskInfo& task = taskGroup.tasks().Get(index++);
       const TaskID& taskId = task.task_id();
+      const Response& response = *(responseIterator++);
 
-      containers[taskId] = Owned<Container>(new Container{
-        containerId,
-        task,
-        taskGroup,
-        None(),
-        None(),
-        None(),
-        None(),
-        false,
-        false,
-        false});
+      CHECK(containers.contains(taskId));
+      Container* container = containers.at(taskId).get();
+
+      // Check if we received a 200 OK response for the
+      // `LAUNCH_NESTED_CONTAINER` call. Skip the rest of the container
+      // initialization if this is not the case.
+      if (response.code != process::http::Status::OK) {
+        LOG(ERROR) << "Received '" << response.status << "' (" << response.body
+                   << ") while launching child container " << containerId
+                   << " of task '" << taskId << "'";
+        container->launchError = response.body;
+        continue;
+      }
+
+      container->launched = true;
+
+      const checks::runtime::Nested nestedRuntime{
+        containerId, agent, authorizationHeader};
 
       if (task.has_check()) {
         Try<Owned<checks::Checker>> checker =
@@ -545,9 +576,7 @@ protected:
               launcherDirectory,
               defer(self(), &Self::taskCheckUpdated, taskId, lambda::_1),
               taskId,
-              containerId,
-              agent,
-              authorizationHeader);
+              nestedRuntime);
 
         if (checker.isError()) {
           // TODO(anand): Should we send a TASK_FAILED instead?
@@ -556,7 +585,7 @@ protected:
           return;
         }
 
-        containers.at(taskId)->checker = checker.get();
+        container->checker = checker.get();
       }
 
       if (task.has_health_check()) {
@@ -566,9 +595,7 @@ protected:
               launcherDirectory,
               defer(self(), &Self::taskHealthUpdated, lambda::_1),
               taskId,
-              containerId,
-              agent,
-              authorizationHeader);
+              nestedRuntime);
 
         if (healthChecker.isError()) {
           // TODO(anand): Should we send a TASK_FAILED instead?
@@ -578,7 +605,7 @@ protected:
           return;
         }
 
-        containers.at(taskId)->healthChecker = healthChecker.get();
+        container->healthChecker = healthChecker.get();
       }
 
       // Currently, the Mesos agent does not expose the mapping from
@@ -604,13 +631,8 @@ protected:
                    << containerId << " of task '" << taskId << "' due to: "
                    << symlink.error();
       }
-    }
 
-    // Send a TASK_RUNNING status update now that the task group has
-    // been successfully launched.
-    foreach (const TaskInfo& task, taskGroup.tasks()) {
-      const TaskStatus status = createTaskStatus(task.task_id(), TASK_RUNNING);
-      forward(status);
+      forward(createTaskStatus(task.task_id(), TASK_RUNNING));
     }
 
     auto taskIds = [&taskGroup]() {
@@ -622,18 +644,30 @@ protected:
     };
 
     LOG(INFO)
-      << "Successfully launched tasks "
+      << "Finished launching tasks "
       << stringify(taskIds()) << " in child containers "
       << stringify(containerIds);
 
-    wait(taskIds());
+    if (state == SUBSCRIBED) {
+      // `wait()` requires the executor to be subscribed.
+      //
+      // Upon subscription, `received()` will call `wait()` on all containers,
+      // so it is safe to skip it here if we are not subscribed.
+      wait(taskIds());
+    } else {
+      LOG(INFO) << "Skipped waiting on child containers of tasks "
+                << stringify(taskIds()) << " until the connection "
+                << "to the agent is reestablished";
+    }
   }
 
   void wait(const list<TaskID>& taskIds)
   {
     CHECK_EQ(SUBSCRIBED, state);
-    CHECK(launched);
+    CHECK(!containers.empty());
     CHECK_SOME(connectionId);
+
+    LOG(INFO) << "Waiting on child containers of tasks " << stringify(taskIds);
 
     list<Future<Connection>> connections;
     for (size_t i = 0; i < taskIds.size(); i++) {
@@ -648,7 +682,7 @@ protected:
   void _wait(
       const Future<list<Connection>>& _connections,
       const list<TaskID>& taskIds,
-      const UUID& _connectionId)
+      const id::UUID& _connectionId)
   {
     // It is possible that the agent process failed in the interim.
     // We would resume waiting on the child containers once we
@@ -679,7 +713,7 @@ protected:
   }
 
   void __wait(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const Connection& connection,
       const TaskID& taskId)
   {
@@ -692,7 +726,7 @@ protected:
     CHECK_SOME(connectionId);
     CHECK(containers.contains(taskId));
 
-    Owned<Container> container = containers.at(taskId);
+    Container* container = containers.at(taskId).get();
 
     LOG(INFO) << "Waiting for child container " << container->containerId
               << " of task '" << taskId << "'";
@@ -718,7 +752,7 @@ protected:
   }
 
   void waited(
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const TaskID& taskId,
       const Future<Response>& response)
   {
@@ -733,7 +767,7 @@ protected:
     CHECK_EQ(SUBSCRIBED, state);
     CHECK(containers.contains(taskId));
 
-    Owned<Container> container = containers.at(taskId);
+    Container* container = containers.at(taskId).get();
 
     CHECK_SOME(container->waiting);
 
@@ -767,19 +801,18 @@ protected:
       return;
     }
 
-    // Check if we receive a 200 OK response for the `WAIT_NESTED_CONTAINER`
-    // calls. Shutdown the executor otherwise.
-    if (response->code != process::http::Status::OK) {
+    // Shutdown the executor if the agent responded to the
+    // `WAIT_NESTED_CONTAINER` call with an error. Note that several race
+    // conditions can cause a 404 NOT FOUND response, which shouldn't be
+    // treated as an error.
+    if (response->code != process::http::Status::NOT_FOUND &&
+        response->code != process::http::Status::OK) {
       LOG(ERROR) << "Received '" << response->status << "' ("
                  << response->body << ") waiting on child container "
                  << container->containerId << " of task '" << taskId << "'";
       _shutdown();
       return;
     }
-
-    Try<agent::Response> waitResponse =
-      deserialize<agent::Response>(contentType, response->body);
-    CHECK_SOME(waitResponse);
 
     // If the task is checked, pause the associated checker to avoid
     // sending check updates after a terminal status update.
@@ -799,35 +832,98 @@ protected:
 
     TaskState taskState;
     Option<string> message;
+    Option<TaskStatus::Reason> reason;
+    Option<TaskResourceLimitation> limitation;
 
-    Option<int> status = waitResponse->wait_nested_container().exit_status();
+    if (response->code == process::http::Status::NOT_FOUND) {
+      // The agent can respond with 404 NOT FOUND due to a failed container
+      // launch or due to a race condition.
 
-    if (status.isNone()) {
-      taskState = TASK_FAILED;
-    } else {
-      CHECK(WIFEXITED(status.get()) || WIFSIGNALED(status.get()))
-        << "Unexpected wait status " << status.get();
-
-      if (WSUCCEEDED(status.get())) {
-        taskState = TASK_FINISHED;
-      } else if (container->killing) {
+      if (container->killing) {
         // Send TASK_KILLED if the task was killed as a result of
         // `killTask()` or `shutdown()`.
         taskState = TASK_KILLED;
-      } else {
+      } else if (container->launchError.isSome()) {
+        // Send TASK_FAILED if we know that `LAUNCH_NESTED_CONTAINER` returned
+        // an error.
         taskState = TASK_FAILED;
+        message = container->launchError;
+      } else {
+        // We don't know exactly why `WAIT_NESTED_CONTAINER` returned 404 NOT
+        // FOUND, so we'll assume that the task failed.
+        taskState = TASK_FAILED;
+        message = "Unable to retrieve command's termination information";
+      }
+    } else {
+      Try<agent::Response> waitResponse =
+        deserialize<agent::Response>(contentType, response->body);
+      CHECK_SOME(waitResponse);
+
+      if (!waitResponse->wait_nested_container().has_exit_status()) {
+        taskState = TASK_FAILED;
+
+        if (container->launchError.isSome()) {
+          message = container->launchError;
+        } else {
+          message = "Command terminated with unknown status";
+        }
+      } else {
+        int status = waitResponse->wait_nested_container().exit_status();
+
+        CHECK(WIFEXITED(status) || WIFSIGNALED(status))
+          << "Unexpected wait status " << status;
+
+        if (container->killing) {
+          // Send TASK_KILLED if the task was killed as a result of
+          // `killTask()` or `shutdown()`.
+          taskState = TASK_KILLED;
+        } else if (WSUCCEEDED(status)) {
+          taskState = TASK_FINISHED;
+        } else {
+          taskState = TASK_FAILED;
+        }
+
+        message = "Command " + WSTRINGIFY(status);
       }
 
-      message = "Command " + WSTRINGIFY(status.get());
+      // Note that we always prefer the task state and reason from the
+      // agent response over what we can determine ourselves because
+      // in general, the agent has more specific information about why
+      // the container exited (e.g. this might be a container resource
+      // limitation).
+      if (waitResponse->wait_nested_container().has_state()) {
+        taskState = waitResponse->wait_nested_container().state();
+      }
+
+      if (waitResponse->wait_nested_container().has_reason()) {
+        reason = waitResponse->wait_nested_container().reason();
+      }
+
+      if (waitResponse->wait_nested_container().has_message()) {
+        if (message.isSome()) {
+          message->append(
+              ": " +  waitResponse->wait_nested_container().message());
+        } else {
+          message = waitResponse->wait_nested_container().message();
+        }
+      }
+
+      if (waitResponse->wait_nested_container().has_limitation()) {
+        limitation = waitResponse->wait_nested_container().limitation();
+      }
     }
 
     TaskStatus taskStatus = createTaskStatus(
         taskId,
         taskState,
-        None(),
-        message);
+        reason,
+        message,
+        limitation);
 
     // Indicate that a task has been unhealthy upon termination.
+    //
+    // TODO(gkleiman): We should do this if this task or another task that
+    // belongs to the same task group is unhealthy. See MESOS-8543.
     if (unhealthy) {
       // TODO(abudnik): Consider specifying appropriate status update reason,
       // saying that the task was killed due to a failing health check.
@@ -836,35 +932,16 @@ protected:
 
     forward(taskStatus);
 
-    CHECK(containers.contains(taskId));
-    containers.erase(taskId);
-
     LOG(INFO)
       << "Child container " << container->containerId << " of task '" << taskId
-      << "' in state " << stringify(taskState) << " "
-      << (status.isSome() ? WSTRINGIFY(status.get())
-                          : "terminated with unknown status");
-
-    // Shutdown the executor if all the active child containers have terminated.
-    if (containers.empty()) {
-      _shutdown();
-      return;
-    }
-
-    // Ignore if the executor is already in the process of shutting down.
-    if (shuttingDown) {
-      return;
-    }
-
-    // Ignore if this task group is already in the process of being killed.
-    if (container->killingTaskGroup) {
-      return;
-    }
+      << "' completed in state " << stringify(taskState)
+      << ": " << message.get();
 
     // The default restart policy for a task group is to kill all the
     // remaining child containers if one of them terminated with a
     // non-zero exit code.
-    if (taskState == TASK_FAILED || taskState == TASK_KILLED) {
+    if (!shuttingDown && !container->killingTaskGroup &&
+        (taskState == TASK_FAILED || taskState == TASK_KILLED)) {
       // Needed for logging.
       auto taskIds = [container]() {
         list<TaskID> taskIds_;
@@ -881,20 +958,36 @@ protected:
 
       container->killingTaskGroup = true;
       foreach (const TaskInfo& task, container->taskGroup.tasks()) {
-        const TaskID& taskId = task.task_id();
+        const TaskID& taskId_ = task.task_id();
 
         // Ignore if it's the same task that triggered this callback or
         // if the task is no longer active.
-        if (taskId == container->taskInfo.task_id() ||
-            !containers.contains(taskId)) {
+        if (taskId_ == container->taskInfo.task_id() ||
+            !containers.contains(taskId_)) {
           continue;
         }
 
-        Owned<Container> container_ = containers.at(taskId);
+        Container* container_ = containers.at(taskId_).get();
         container_->killingTaskGroup = true;
+
+        // Ignore if the task is already being killed. This can happen
+        // when the scheduler tries to kill multiple tasks in the task
+        // group simultaneously and then one of the tasks is killed
+        // while the other tasks are still being killed, see MESOS-8051.
+        if (container_->killing) {
+          continue;
+        }
 
         kill(container_);
       }
+    }
+
+    CHECK(containers.contains(taskId));
+    containers.erase(taskId);
+
+    // Shutdown the executor if all the active child containers have terminated.
+    if (containers.empty()) {
+      _shutdown();
     }
   }
 
@@ -909,7 +1002,7 @@ protected:
 
     shuttingDown = true;
 
-    if (!launched) {
+    if (containers.empty()) {
       _shutdown();
       return;
     }
@@ -935,7 +1028,7 @@ protected:
         continue;
       }
 
-      killResponses.push_back(kill(container));
+      killResponses.push_back(kill(container.get()));
     }
 
     // It is possible that the agent process can fail while we are
@@ -971,10 +1064,14 @@ protected:
   }
 
   Future<Nothing> kill(
-      Owned<Container> container,
+      Container* container,
       const Option<KillPolicy>& killPolicy = None())
   {
-    CHECK_EQ(SUBSCRIBED, state);
+    if (!container->launched) {
+      // We can get here if we're killing a task group for which multiple
+      // containers failed to launch.
+      return Nothing();
+    }
 
     CHECK(!container->killing);
     container->killing = true;
@@ -1031,7 +1128,6 @@ protected:
     delay(gracePeriod,
           self(),
           &Self::escalated,
-          connectionId.get(),
           containerId,
           container->taskInfo.task_id(),
           gracePeriod);
@@ -1046,13 +1142,23 @@ protected:
       forward(status);
     }
 
+    // Ideally we should detect and act on this kill's failure, and perform the
+    // following actions only once the kill is successful:
+    //
+    // 1) Stop (health) checking.
+    // 2) Send a `TASK_KILLING` task status update.
+    // 3) Schedule the kill escalation.
+    // 4) Set `container->killing` to `true`
+    //
+    // If the kill fails or times out, we could do one of the following options:
+    //
+    // 1) Automatically retry the kill (MESOS-8726).
+    // 2) Let the scheduler request another kill.
     return kill(containerId, SIGTERM);
   }
 
   Future<Nothing> kill(const ContainerID& containerId, int signal)
   {
-    CHECK_EQ(SUBSCRIBED, state);
-
     agent::Call call;
     call.set_type(agent::Call::KILL_NESTED_CONTAINER);
 
@@ -1063,24 +1169,24 @@ protected:
     kill->set_signal(signal);
 
     return post(None(), call)
-      .then([](const Response& /* response */) {
+      .then([=](const Response& response) -> Future<Nothing> {
+        if (response.code != process::http::Status::OK) {
+          return Failure(
+              stringify("The agent failed to send signal") +
+              " " + strsignal(signal) + " (" + stringify(signal) + ")" +
+              " to the container " + stringify(containerId) +
+              ": " + response.body);
+        }
+
         return Nothing();
       });
   }
 
   void escalated(
-      const UUID& _connectionId,
       const ContainerID& containerId,
       const TaskID& taskId,
       const Duration& timeout)
   {
-    if (connectionId != _connectionId) {
-      VLOG(1) << "Ignoring signal escalation timeout from a stale connection";
-      return;
-    }
-
-    CHECK_EQ(SUBSCRIBED, state);
-
     // It might be possible that the container is already terminated.
     // If that happens, don't bother escalating to SIGKILL.
     if (!containers.contains(taskId)) {
@@ -1096,7 +1202,20 @@ protected:
       << " did not terminate after " << timeout << ", sending SIGKILL"
       << " to the container";
 
-    kill(containerId, SIGKILL);
+    kill(containerId, SIGKILL)
+      .onFailed(defer(self(), [=](const string& failure) {
+        const Duration duration = Seconds(1);
+
+        LOG(WARNING)
+          << "Escalation to SIGKILL the task '" << taskId
+          << "' running in child container " << containerId
+          << " failed: " << failure << "; Retrying in " << duration;
+
+        process::delay(
+            duration, self(), &Self::escalated, containerId, taskId, timeout);
+
+        return;
+      }));
   }
 
   void killTask(
@@ -1109,12 +1228,10 @@ protected:
       return;
     }
 
-    CHECK_EQ(SUBSCRIBED, state);
-
     // TODO(anand): Add support for adjusting the remaining grace period if
     // we receive another kill request while a task is being killed but has
     // not terminated yet. See similar comments in the command executor
-    // for more context.
+    // for more context. See MESOS-8557 for more details.
 
     LOG(INFO) << "Received kill for task '" << taskId << "'";
 
@@ -1124,14 +1241,20 @@ protected:
       return;
     }
 
-    const Owned<Container>& container = containers.at(taskId);
+    Container* container = containers.at(taskId).get();
     if (container->killing) {
       LOG(WARNING) << "Ignoring kill for task '" << taskId
                    << "' as it is in the process of getting killed";
       return;
     }
 
-    kill(container, killPolicy);
+    const ContainerID& containerId = container->containerId;
+    kill(container, killPolicy)
+      .onFailed(defer(self(), [=](const string& failure) {
+        LOG(WARNING) << "Failed to kill the task '" << taskId
+                     << "' running in child container " << containerId << ": "
+                     << failure;
+      }));
   }
 
   void taskCheckUpdated(
@@ -1166,7 +1289,7 @@ protected:
     CHECK_SOME(containers.at(taskId)->lastTaskStatus);
     const TaskStatus status = protobuf::createTaskStatus(
         containers.at(taskId)->lastTaskStatus.get(),
-        UUID::random(),
+        id::UUID::random(),
         Clock::now().secs(),
         None(),
         None(),
@@ -1217,7 +1340,7 @@ protected:
     CHECK_SOME(containers.at(healthStatus.task_id())->lastTaskStatus);
     const TaskStatus status = protobuf::createTaskStatus(
         containers.at(healthStatus.task_id())->lastTaskStatus.get(),
-        UUID::random(),
+        id::UUID::random(),
         Clock::now().secs(),
         None(),
         None(),
@@ -1241,12 +1364,13 @@ private:
       const TaskID& taskId,
       const TaskState& state,
       const Option<TaskStatus::Reason>& reason = None(),
-      const Option<string>& message = None())
+      const Option<string>& message = None(),
+      const Option<TaskResourceLimitation>& limitation = None())
   {
     TaskStatus status = protobuf::createTaskStatus(
         taskId,
         state,
-        UUID::random(),
+        id::UUID::random(),
         Clock::now().secs());
 
     status.mutable_executor_id()->CopyFrom(executorId);
@@ -1260,8 +1384,12 @@ private:
       status.set_message(message.get());
     }
 
+    if (limitation.isSome()) {
+      status.mutable_limitation()->CopyFrom(limitation.get());
+    }
+
     CHECK(containers.contains(taskId));
-    const Owned<Container>& container = containers.at(taskId);
+    const Container* container = containers.at(taskId).get();
 
     // TODO(alexr): Augment health information in a way similar to
     // `CheckStatusInfo`. See MESOS-6417 for more details.
@@ -1312,7 +1440,8 @@ private:
     call.mutable_update()->mutable_status()->CopyFrom(status);
 
     // Capture the status update.
-    unacknowledgedUpdates[UUID::fromBytes(status.uuid()).get()] = call.update();
+    unacknowledgedUpdates[id::UUID::fromBytes(status.uuid()).get()] =
+      call.update();
 
     // Overwrite the last task status.
     CHECK(containers.contains(status.task_id()));
@@ -1345,7 +1474,7 @@ private:
                                : process::http::request(request);
   }
 
-  void retry(const UUID& _connectionId, const TaskID& taskId)
+  void retry(const id::UUID& _connectionId, const TaskID& taskId)
   {
     if (connectionId != _connectionId) {
       VLOG(1) << "Ignoring retry attempt from a stale connection";
@@ -1364,7 +1493,7 @@ private:
 
   void _retry(
       const Future<Connection>& connection,
-      const UUID& _connectionId,
+      const id::UUID& _connectionId,
       const TaskID& taskId)
   {
     const Duration duration = Seconds(1);
@@ -1378,7 +1507,7 @@ private:
     CHECK_SOME(connectionId);
     CHECK(containers.contains(taskId));
 
-    const Owned<Container>& container = containers.at(taskId);
+    const Container* container = containers.at(taskId).get();
 
     if (!connection.isReady()) {
       LOG(ERROR)
@@ -1412,6 +1541,19 @@ private:
         taskId);
   }
 
+  void dropTaskGroup(const TaskGroupInfo& taskGroup)
+  {
+    TaskState taskState =
+      protobuf::frameworkHasCapability(
+          frameworkInfo.get(), FrameworkInfo::Capability::PARTITION_AWARE)
+        ? TASK_DROPPED
+        : TASK_LOST;
+
+    foreach (const TaskInfo& task, taskGroup.tasks()) {
+      forward(createTaskStatus(task.task_id(), taskState));
+    }
+  }
+
   enum State
   {
     CONNECTED,
@@ -1420,7 +1562,6 @@ private:
   } state;
 
   const ContentType contentType;
-  bool launched;
   bool shuttingDown;
   bool unhealthy; // Set to true if any of the tasks are reported unhealthy.
   Option<FrameworkInfo> frameworkInfo;
@@ -1433,9 +1574,9 @@ private:
   const string launcherDirectory;
   const Option<string> authorizationHeader;
 
-  LinkedHashMap<UUID, Call::Update> unacknowledgedUpdates;
+  LinkedHashMap<id::UUID, Call::Update> unacknowledgedUpdates;
 
-  // Active child containers.
+  // Child containers.
   LinkedHashMap<TaskID, Owned<Container>> containers;
 
   // There can be multiple simulataneous ongoing (re-)connection attempts
@@ -1443,7 +1584,7 @@ private:
   // uniquely identifying the current connection and ignoring
   // the stale instance. We initialize this to a new value upon receiving
   // a `connected()` callback.
-  Option<UUID> connectionId;
+  Option<id::UUID> connectionId;
 };
 
 } // namespace internal {
@@ -1467,14 +1608,12 @@ public:
 
 int main(int argc, char** argv)
 {
-  process::initialize();
-
-  Flags flags;
   mesos::FrameworkID frameworkId;
   mesos::ExecutorID executorId;
   string scheme = "http"; // Default scheme.
   ::URL agent;
   string sandboxDirectory;
+  Flags flags;
 
   // Load flags from command line.
   Try<flags::Warnings> load = flags.load(None(), &argc, &argv);
@@ -1489,7 +1628,7 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  mesos::internal::logging::initialize(argv[0], flags, true); // Catch signals.
+  mesos::internal::logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -1528,6 +1667,8 @@ int main(int argc, char** argv)
     EXIT(EXIT_FAILURE)
       << "Expecting 'MESOS_SLAVE_PID' to be set in the environment";
   }
+
+  process::initialize();
 
   UPID upid(value.get());
   CHECK(upid) << "Failed to parse MESOS_SLAVE_PID '" << value.get() << "'";

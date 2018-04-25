@@ -68,62 +68,6 @@ class LinterBase(object):
     # A prefix at the beginning of the line to demark comments (e.g. '//')
     comment_prefix = ''
 
-    def find_candidates(self, root_dir):
-        """
-        Search through the all files rooted at 'root_dir' and compare
-        them against 'self.exclude_files' and 'self.source_files' to
-        come up with a set of candidate files to lint.
-        """
-        exclude_file_regex = re.compile(self.exclude_files)
-        source_criteria_regex = re.compile(self.source_files)
-        for root, _, files in os.walk(root_dir):
-            for name in files:
-                path = os.path.join(root, name)
-                if exclude_file_regex.search(path) is not None:
-                    continue
-
-                if source_criteria_regex.search(name) is not None:
-                    yield path
-
-    def run_lint(self, source_paths):
-        """
-        A custom function to provide linting for 'linter_type'.
-        It takes a list of source files to lint and returns the number
-        of errors found during the linting process.
-
-        It should print any errors as it encounters them to provide
-        feedback to the caller.
-        """
-        pass
-
-    def check_license_header(self, source_paths):
-        """Checks the license headers of the given files."""
-        error_count = 0
-        for path in source_paths:
-            with open(path) as source_file:
-                # We read the three first lines of the file as the
-                # first line could be a shebang and the second line empty.
-                head = "".join([next(source_file) for _ in xrange(3)])
-
-                # TODO(bbannier) We allow `Copyright` for
-                # currently deviating files. This should be
-                # removed one we have a uniform license format.
-                regex = r'^{comment_prefix} [Licensed|Copyright]'.format(
-                    comment_prefix=self.comment_prefix)
-                regex = re.compile(regex, re.MULTILINE)
-
-                if not regex.search(head):
-                    sys.stderr.write(
-                        "{path}:1: A license header should appear's on one of"
-                        " the first line of the file starting with"
-                        " '{comment_prefix} Licensed'.: {head}".format(
-                            path=path,
-                            head=head,
-                            comment_prefix=self.comment_prefix))
-                    error_count += 1
-
-        return error_count
-
     def check_encoding(self, source_paths):
         """
         Checks for encoding errors in the given files. Source
@@ -153,7 +97,75 @@ class LinterBase(object):
 
         return error_count
 
-    def main(self, file_list):
+    def check_license_header(self, source_paths):
+        """Checks the license headers of the given files."""
+        error_count = 0
+        for path in source_paths:
+            with open(path) as source_file:
+                # We read the three first lines of the file as the
+                # first line could be a shebang and the second line empty.
+                head = "".join([next(source_file) for _ in xrange(3)])
+
+                # TODO(bbannier) We allow `Copyright` for
+                # currently deviating files. This should be
+                # removed one we have a uniform license format.
+                regex = r'^{comment_prefix} [Licensed|Copyright]'.format(
+                    comment_prefix=self.comment_prefix)
+                regex = re.compile(regex, re.MULTILINE)
+
+                if not regex.search(head):
+                    sys.stderr.write(
+                        "{path}:1: A license header should appear's on one of"
+                        " the first line of the file starting with"
+                        " '{comment_prefix} Licensed'.: {head}".format(
+                            path=path,
+                            head=head,
+                            comment_prefix=self.comment_prefix))
+                    error_count += 1
+
+        return error_count
+
+    def find_candidates(self, root_dir):
+        """
+        Search through the all files rooted at 'root_dir' and compare
+        them against 'self.exclude_files' and 'self.source_files' to
+        come up with a set of candidate files to lint.
+        """
+        exclude_file_regex = re.compile(self.exclude_files)
+        source_criteria_regex = re.compile(self.source_files)
+        for root, _, files in os.walk(root_dir):
+            for name in files:
+                path = os.path.join(root, name)
+                if exclude_file_regex.search(path) is not None:
+                    continue
+
+                if source_criteria_regex.search(name) is not None:
+                    yield path
+
+    def run_command_in_virtualenv(self, command):
+        """
+        Activate the virtual environment, run the
+        given command and return its output.
+        """
+        virtualenv = os.path.join('support', '.virtualenv')
+        command = '. {virtualenv_path}/bin/activate; {cmd}'.format(
+            virtualenv_path=virtualenv, cmd=command)
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+
+        return process
+
+    def run_lint(self, source_paths):
+        """
+        A custom function to provide linting for 'linter_type'.
+        It takes a list of source files to lint and returns the number
+        of errors found during the linting process.
+
+        It should print any errors as it encounters them to provide
+        feedback to the caller.
+        """
+        pass
+
+    def main(self, modified_files):
         """
         This function takes a list of files and lints them for the
         class of files defined by 'linter_type'.
@@ -176,7 +188,7 @@ class LinterBase(object):
 
         # If file paths are specified, check all file paths that are
         # candidates; else check all candidates.
-        file_paths = file_list if len(file_list) > 0 else candidates
+        file_paths = modified_files if len(modified_files) > 0 else candidates
 
         # Compute the set intersect of the input file paths and candidates.
         # This represents the reduced set of candidates to run lint on.
@@ -216,6 +228,7 @@ class CppLinter(LinterBase):
                    os.path.join('3rdparty', 'stout')]
 
     exclude_files = '(' \
+                    r'elfio\-3\.2|' \
                     r'protobuf\-2\.4\.1|' \
                     r'googletest\-release\-1\.8\.0|' \
                     r'glog\-0\.3\.3|' \
@@ -259,6 +272,9 @@ class CppLinter(LinterBase):
             'whitespace/todo']
 
         rules_filter = '--filter=-,+' + ',+'.join(active_rules)
+
+        # We do not use a version of cpplint available through pip as
+        # we use a custom version (see cpplint.path) to lint C++ files.
         process = subprocess.Popen(
             ['python', 'support/cpplint.py', rules_filter] + source_paths,
             stderr=subprocess.PIPE,
@@ -275,12 +291,67 @@ class CppLinter(LinterBase):
         return process.returncode
 
 
+class JsLinter(LinterBase):
+    """The linter for JavaScript files, uses eslint."""
+    linter_type = 'JavaScript'
+
+    source_dirs = [os.path.join('src', 'webui')]
+
+    exclude_files = '(' \
+                    r'angular\-1\.2\.32|' \
+                    r'angular\-route\-1\.2\.32|' \
+                    r'bootstrap\-table\-1\.11\.1|' \
+                    r'clipboard\-1\.5\.16|' \
+                    r'jquery\-3\.2\.1|' \
+                    r'relative\-date|' \
+                    r'ui\-bootstrap\-tpls\-0\.9\.0|' \
+                    r'angular\-route\-1\.2\.32|' \
+                    r'underscore\-1\.4\.3' \
+                    ')'
+
+    source_files = r'\.(js)$'
+
+    comment_prefix = '//'
+
+    def run_lint(self, source_paths):
+        """
+        Runs eslint over given files.
+
+        https://eslint.org/docs/user-guide/configuring
+        """
+
+        num_errors = 0
+
+        source_files = ' '.join(source_paths)
+        config_path = os.path.join('support', '.eslintrc.js')
+
+        process = self.run_command_in_virtualenv(
+            'eslint {files} -c {config} -f compact'.format(
+                files=source_files,
+                config=config_path
+            )
+        )
+
+        for line in process.stdout:
+            if "Error -" in line or "Warning -" in line:
+                sys.stderr.write(line)
+                if "Error -" in line:
+                    num_errors += 1
+
+        return num_errors
+
+    def main(self, modified_files):
+        return super(JsLinter, self).main(modified_files)
+
+
 class PyLinter(LinterBase):
     """The linter for Python files, uses pylint."""
     linter_type = 'Python'
 
-    source_dirs = [os.path.join('src', 'python', 'cli_new'),
-                   os.path.join('src', 'python', 'lib')]
+    cli_dir = os.path.join('src', 'python', 'cli_new')
+    lib_dir = os.path.join('src', 'python', 'lib')
+    support_dir = 'support'
+    source_dirs = [cli_dir, lib_dir, support_dir]
 
     exclude_files = '(' \
                     r'protobuf\-2\.4\.1|' \
@@ -302,22 +373,27 @@ class PyLinter(LinterBase):
         https://google.github.io/styleguide/pyguide.html
         """
 
-        cli_dir = os.path.abspath(self.source_dirs[0])
-        source_files = ' '.join(source_paths)
-
-        process = subprocess.Popen(
-            [('. {virtualenv_dir}/bin/activate;'
-              ' PYTHONPATH={lib_dir}:{bin_dir} pylint'
-              ' --rcfile={config} --ignore={ignore} {files}').
-             format(virtualenv_dir=os.path.join(cli_dir, '.virtualenv'),
-                    lib_dir=os.path.join(cli_dir, 'lib'),
-                    bin_dir=os.path.join(cli_dir, 'bin'),
-                    config=os.path.join(cli_dir, 'pylint.config'),
-                    ignore=os.path.join(cli_dir, 'bin', 'mesos'),
-                    files=source_files)],
-            shell=True, stdout=subprocess.PIPE)
-
         num_errors = 0
+
+        pylint_config = os.path.join('support', 'pylint.config')
+
+        source_files = ''
+
+        for source_dir in self.source_dirs:
+            source_dir_files = []
+            for source_path in source_paths:
+                if source_path.startswith(source_dir):
+                    source_dir_files.append(source_path)
+
+            source_files = ' '.join([source_files, ' '.join(source_dir_files)])
+
+        process = self.run_command_in_virtualenv(
+            'pylint --rcfile={rcfile} {files}'.format(
+                rcfile=pylint_config,
+                files=source_files
+            )
+        )
+
         for line in process.stdout:
             if not line.startswith('*'):
                 num_errors += 1
@@ -325,63 +401,80 @@ class PyLinter(LinterBase):
 
         return num_errors
 
-    def __should_build_virtualenv(self, file_list):
-        cli_dir = os.path.abspath(self.source_dirs[0])
+    def main(self, modified_files):
+        return super(PyLinter, self).main(modified_files)
 
-        if not os.path.isdir(os.path.join(cli_dir, '.virtualenv')):
-            print 'Virtualenv for python linter not detected ... building'
-            return True
 
-        basenames = []
-        if file_list:
-            basenames = [os.path.basename(path) for path in file_list]
+def should_build_virtualenv(modified_files):
+    """
+    Check if we should build the virtual environment required.
+    This is the case if the requirements of the environment
+    have changed or if the support script is run with no
+    arguments (meaning that the entire codebase should be linted).
+    """
+    # NOTE: If the file list is empty, we are linting the entire
+    # codebase. We should always rebuild the virtualenv in this case.
+    if not modified_files:
+        return True
 
-        if 'pip-requirements.txt' in basenames:
-            print 'The "pip-requirements.txt" file has changed.'
-            return True
+    basenames = [os.path.basename(path) for path in modified_files]
 
-        if 'mesos.bash_completion' in basenames:
-            print 'The "mesos.bash_completion" file has changed.'
-            return True
+    if 'pip-requirements.txt' in basenames:
+        print 'The "pip-requirements.txt" file has changed.'
+        return True
 
-        # NOTE: If the file list is empty, we are linting the entire codebase.
-        # We should always rebuild the virtualenv in this case.
-        if len(file_list) <= 0:
-            return True
+    if 'build-virtualenv' in basenames:
+        print 'The "build-virtualenv" file has changed.'
+        return True
 
-        return False
+    # The JS and Python linters require a virtual environment.
+    # If all the files modified are not JS or Python files,
+    # we do not need to build the virtual environment.
+    # TODO(ArmandGrillet): There should be no duplicated logic to know
+    # which linters to instantiate depending on the files to analyze.
+    if not os.path.isdir(os.path.join('support', '.virtualenv')):
+        js_and_python_files = [JsLinter().source_files, PyLinter().source_files]
+        js_and_python_files_regex = re.compile('|'.join(js_and_python_files))
 
-    def __build_virtualenv(self):
-        """Rebuild the virtualenv."""
-        cli_dir = os.path.abspath(self.source_dirs[0])
+        for basename in basenames:
+            if js_and_python_files_regex.search(basename) is not None:
+                print 'Virtualenv not detected and required... building'
+                return True
 
-        print 'Rebuilding virtualenv ...'
+    return False
 
-        process = subprocess.Popen(
-            [os.path.join(cli_dir, 'bootstrap')],
-            stdout=subprocess.PIPE)
 
-        output = ''
-        for line in process.stdout:
-            output += line
+def build_virtualenv():
+    """
+    Rebuild the virtualenv by running a bootstrap script.
+    This will exit the program if there is a failure.
+    """
+    print 'Rebuilding virtualenv...'
 
-        process.wait()
+    process = subprocess.Popen(
+        [os.path.join('support', 'build-virtualenv')],
+        stdout=subprocess.PIPE)
 
-        if process.returncode != 0:
-            sys.stderr.write(output)
-            sys.exit(1)
+    output = ''
+    for line in process.stdout:
+        output += line
 
-    def main(self, file_list):
-        """Override main to rebuild our virtualenv if necessary."""
-        if self.__should_build_virtualenv(file_list):
-            self.__build_virtualenv()
+    process.wait()
 
-        return super(PyLinter, self).main(file_list)
-
+    if process.returncode != 0:
+        sys.stderr.write(output)
+        sys.exit(1)
 
 if __name__ == '__main__':
+    if should_build_virtualenv(sys.argv[1:]):
+        build_virtualenv()
+
+    # TODO(ArmandGrillet): We should only instantiate the linters
+    # required to lint the files to analyze. See MESOS-8351.
     CPP_LINTER = CppLinter()
     CPP_ERRORS = CPP_LINTER.main(sys.argv[1:])
+    JS_LINTER = JsLinter()
+    JS_ERRORS = JS_LINTER.main(sys.argv[1:])
     PY_LINTER = PyLinter()
     PY_ERRORS = PY_LINTER.main(sys.argv[1:])
-    sys.exit(CPP_ERRORS + PY_ERRORS)
+    sys.exit(CPP_ERRORS + JS_ERRORS + PY_ERRORS)

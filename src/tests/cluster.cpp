@@ -58,9 +58,15 @@
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 
+#include <stout/os/permissions.hpp>
+
 #ifdef __linux__
 #include "linux/cgroups.hpp"
 #endif
+
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
 
 #include "authorizer/local/authorizer.hpp"
 
@@ -84,7 +90,7 @@
 #include "slave/flags.hpp"
 #include "slave/gc.hpp"
 #include "slave/slave.hpp"
-#include "slave/status_update_manager.hpp"
+#include "slave/task_status_update_manager.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
@@ -94,6 +100,10 @@
 
 using std::string;
 using std::vector;
+
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
 
 using mesos::master::contender::StandaloneMasterContender;
 using mesos::master::contender::ZooKeeperMasterContender;
@@ -390,16 +400,18 @@ void Master::setAuthorizationCallbacks(Authorizer* authorizer)
 }
 
 
-Try<process::Owned<Slave>> Slave::start(
+Try<process::Owned<Slave>> Slave::create(
     MasterDetector* detector,
     const slave::Flags& flags,
     const Option<string>& id,
     const Option<slave::Containerizer*>& containerizer,
     const Option<slave::GarbageCollector*>& gc,
-    const Option<slave::StatusUpdateManager*>& statusUpdateManager,
+    const Option<slave::TaskStatusUpdateManager*>& taskStatusUpdateManager,
     const Option<mesos::slave::ResourceEstimator*>& resourceEstimator,
     const Option<mesos::slave::QoSController*>& qosController,
-    const Option<Authorizer*>& providedAuthorizer)
+    const Option<mesos::SecretGenerator*>& secretGenerator,
+    const Option<Authorizer*>& providedAuthorizer,
+    bool mock)
 {
   process::Owned<Slave> slave(new Slave());
 
@@ -503,25 +515,73 @@ Try<process::Owned<Slave>> Slave::start(
     slave->qosController.reset(_qosController.get());
   }
 
-  // If the status update manager is not provided, create a default one.
-  if (statusUpdateManager.isNone()) {
-    slave->statusUpdateManager.reset(new slave::StatusUpdateManager(flags));
+  // If the QoS controller is not provided, create a default one.
+  if (secretGenerator.isNone()) {
+    SecretGenerator* _secretGenerator = nullptr;
+
+#ifdef USE_SSL_SOCKET
+    if (flags.jwt_secret_key.isSome()) {
+      Try<string> jwtSecretKey = os::read(flags.jwt_secret_key.get());
+      if (jwtSecretKey.isError()) {
+        return Error("Failed to read the file specified by --jwt_secret_key");
+      }
+
+      // TODO(greggomann): Factor the following code out into a common helper,
+      // since we also do this when loading credentials.
+      Try<os::Permissions> permissions =
+        os::permissions(flags.jwt_secret_key.get());
+      if (permissions.isError()) {
+        LOG(WARNING) << "Failed to stat jwt secret key file '"
+                     << flags.jwt_secret_key.get()
+                     << "': " << permissions.error();
+      } else if (permissions->others.rwx) {
+        LOG(WARNING) << "Permissions on executor secret key file '"
+                     << flags.jwt_secret_key.get()
+                     << "' are too open; it is recommended that your"
+                     << " key file is NOT accessible by others";
+      }
+
+      _secretGenerator = new JWTSecretGenerator(jwtSecretKey.get());
+    }
+#endif // USE_SSL_SOCKET
+
+    slave->secretGenerator.reset(_secretGenerator);
+  }
+
+  // If the task status update manager is not provided, create a default one.
+  if (taskStatusUpdateManager.isNone()) {
+    slave->taskStatusUpdateManager.reset(
+        new slave::TaskStatusUpdateManager(flags));
   }
 
   // Inject all the dependencies.
-  slave->slave.reset(new slave::Slave(
-      id.isSome() ? id.get() : process::ID::generate("slave"),
-      flags,
-      detector,
-      slave->containerizer,
-      &slave->files,
-      gc.getOrElse(slave->gc.get()),
-      statusUpdateManager.getOrElse(slave->statusUpdateManager.get()),
-      resourceEstimator.getOrElse(slave->resourceEstimator.get()),
-      qosController.getOrElse(slave->qosController.get()),
-      authorizer));
-
-  slave->pid = process::spawn(slave->slave.get());
+  if (mock) {
+    slave->slave.reset(new MockSlave(
+        id.isSome() ? id.get() : process::ID::generate("slave"),
+        flags,
+        detector,
+        slave->containerizer,
+        &slave->files,
+        gc.getOrElse(slave->gc.get()),
+        taskStatusUpdateManager.getOrElse(slave->taskStatusUpdateManager.get()),
+        resourceEstimator.getOrElse(slave->resourceEstimator.get()),
+        qosController.getOrElse(slave->qosController.get()),
+        secretGenerator.getOrElse(slave->secretGenerator.get()),
+        authorizer));
+  } else {
+    slave->slave.reset(new slave::Slave(
+        id.isSome() ? id.get() : process::ID::generate("slave"),
+        flags,
+        detector,
+        slave->containerizer,
+        &slave->files,
+        gc.getOrElse(slave->gc.get()),
+        taskStatusUpdateManager.getOrElse(slave->taskStatusUpdateManager.get()),
+        resourceEstimator.getOrElse(slave->resourceEstimator.get()),
+        qosController.getOrElse(slave->qosController.get()),
+        secretGenerator.getOrElse(slave->secretGenerator.get()),
+        authorizer));
+  }
 
   return slave;
 }
@@ -553,6 +613,22 @@ Slave::~Slave()
     return;
   }
 
+  // We should wait until agent recovery completes to prevent a potential race
+  // between containerizer recovery process and the following code that invokes
+  // methods of the containerizer, e.g. a test can start an agent that in turn
+  // triggers containerizer recovery of orphaned containers, then immediately
+  // destroys the agent. Thus, the containerizer might return a different set of
+  // containers, depending on whether containerizer recovery has been finished.
+  //
+  // NOTE: This wait is omitted if a pointer to a containerizer object was
+  // passed to the slave's constructor, as it might be a mock containerizer,
+  // thereby agent recovery will never be finished.
+  if (ownedContainerizer.get() != nullptr) {
+    slave->recoveryInfo.recovered.future().await();
+  }
+
+  terminate();
+
   // This extra closure is necessary in order to use `AWAIT` and `ASSERT_*`,
   // as these macros require a void return type.
   [this]() {
@@ -565,13 +641,34 @@ Slave::~Slave()
 
     AWAIT_READY(containers);
 
+    // Because the `cgroups::destroy()` code path makes use of `delay()`, the
+    // clock must not be paused in order to reliably destroy all remaining
+    // containers. If necessary, we resume the clock here and then pause it
+    // again when we're done destroying containers.
+    bool paused = process::Clock::paused();
+
+    if (paused) {
+      process::Clock::resume();
+    }
+
     foreach (const ContainerID& containerId, containers.get()) {
       process::Future<Option<ContainerTermination>> wait =
         containerizer->wait(containerId);
 
-      containerizer->destroy(containerId);
+      process::Future<Option<ContainerTermination>> destroy =
+        containerizer->destroy(containerId);
 
+      AWAIT(destroy);
       AWAIT(wait);
+
+      if (!wait.isReady()) {
+        LOG(ERROR) << "Failed to destroy container " << containerId << ": "
+                   << (wait.isFailed() ? wait.failure() : "discarded");
+      }
+    }
+
+    if (paused) {
+      process::Clock::pause();
     }
 
     containers = containerizer->containers();
@@ -580,8 +677,6 @@ Slave::~Slave()
     ASSERT_TRUE(containers->empty())
       << "Failed to destroy containers: " << stringify(containers.get());
   }();
-
-  terminate();
 }
 
 
@@ -598,8 +693,18 @@ void Slave::shutdown()
 {
   cleanUpContainersInDestructor = false;
 
+  bool paused = process::Clock::paused();
+
+  if (paused) {
+    process::Clock::resume();
+  }
+
   process::dispatch(slave.get(), &slave::Slave::shutdown, process::UPID(), "");
   wait();
+
+  if (paused) {
+    process::Clock::pause();
+  }
 }
 
 
@@ -609,6 +714,18 @@ void Slave::terminate()
 
   process::terminate(pid);
   wait();
+}
+
+
+MockSlave* Slave::mock()
+{
+  return dynamic_cast<MockSlave*>(slave.get());
+}
+
+
+void Slave::start()
+{
+  pid = process::spawn(slave.get());
 }
 
 

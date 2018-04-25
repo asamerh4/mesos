@@ -14,14 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <glog/logging.h>
-
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include <mesos/resources.hpp>
 #include <mesos/scheduler.hpp>
+
+#include <mesos/authorizer/acls.hpp>
 
 #include <process/clock.hpp>
 #include <process/defer.hpp>
@@ -43,7 +43,13 @@
 #include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include "common/parse.hpp"
+
+#include "examples/flags.hpp"
+
+#include "logging/logging.hpp"
 
 using namespace mesos;
 using namespace mesos::internal;
@@ -64,11 +70,10 @@ const double CPUS_PER_EXECUTOR = 0.1;
 const int32_t MEM_PER_EXECUTOR = 64;
 
 constexpr char EXECUTOR_BINARY[] = "balloon-executor";
-constexpr char FRAMEWORK_PRINCIPAL[] = "balloon-framework-cpp";
 constexpr char FRAMEWORK_METRICS_PREFIX[] = "balloon_framework";
 
 
-class Flags : public virtual flags::FlagsBase
+class Flags : public virtual mesos::internal::examples::Flags
 {
 public:
   Flags()
@@ -78,10 +83,6 @@ public:
         "Name to be used by the framework.",
         "Balloon Framework");
 
-    add(&Flags::master,
-        "master",
-        "Master to connect to.");
-
     add(&Flags::task_memory_usage_limit,
         "task_memory_usage_limit",
         None(),
@@ -89,7 +90,7 @@ public:
         "The task will attempt to occupy memory up until this limit.",
         static_cast<const Bytes*>(nullptr),
         [](const Bytes& value) -> Option<Error> {
-          if (value.megabytes() < MEM_PER_EXECUTOR) {
+          if (value < Bytes(MEM_PER_EXECUTOR, Bytes::MEGABYTES)) {
             return Error(
                 "Please use a --task_memory_usage_limit greater than " +
                 stringify(MEM_PER_EXECUTOR) + " MB");
@@ -141,11 +142,6 @@ public:
         "The command that should be used to start the executor.\n"
         "This will override the value set by `--build_dir`.");
 
-    add(&Flags::checkpoint,
-        "checkpoint",
-        "Whether this framework should be checkpointed.\n",
-        false);
-
     add(&Flags::long_running,
         "long_running",
         "Whether this framework should launch tasks repeatedly\n"
@@ -154,7 +150,6 @@ public:
   }
 
   string name;
-  string master;
   Bytes task_memory_usage_limit;
   Bytes task_memory;
 
@@ -167,7 +162,6 @@ public:
   Option<JSON::Array> executor_uris;
   Option<string> executor_command;
 
-  bool checkpoint;
   bool long_running;
 };
 
@@ -182,6 +176,7 @@ public:
       const ExecutorInfo& _executor,
       const Flags& _flags)
     : frameworkInfo(_frameworkInfo),
+      role(_frameworkInfo.roles(0)),
       executor(_executor),
       flags(_flags),
       taskActive(false),
@@ -208,11 +203,12 @@ public:
   {
     Resources taskResources = Resources::parse(
         "cpus:" + stringify(CPUS_PER_TASK) +
-        ";mem:" + stringify(flags.task_memory.megabytes())).get();
-    taskResources.allocate(frameworkInfo.role());
+        ";mem:" + stringify(
+            (double) flags.task_memory.bytes() / Bytes::MEGABYTES)).get();
+    taskResources.allocate(role);
 
     Resources executorResources = Resources(executor.resources());
-    executorResources.allocate(frameworkInfo.role());
+    executorResources.allocate(role);
 
     foreach (const Offer& offer, offers) {
       Resources resources(offer.resources());
@@ -299,8 +295,10 @@ public:
       case TASK_ERROR:
         taskActive = false;
 
-        ++metrics.abnormal_terminations;
-        break;
+        if (status.reason() != TaskStatus::REASON_INVALID_OFFERS) {
+          ++metrics.abnormal_terminations;
+          break;
+        }
       default:
         break;
     }
@@ -308,6 +306,7 @@ public:
 
 private:
   const FrameworkInfo frameworkInfo;
+  const string role;
   const ExecutorInfo executor;
   const Flags flags;
   bool taskActive;
@@ -484,10 +483,23 @@ private:
 int main(int argc, char** argv)
 {
   Flags flags;
-  Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
+  Try<flags::Warnings> load = flags.load("MESOS_EXAMPLE_", argc, argv);
+
+  if (flags.help) {
+    std::cout << flags.usage() << std::endl;
+    return EXIT_SUCCESS;
+  }
 
   if (load.isError()) {
-    EXIT(EXIT_FAILURE) << flags.usage(load.error());
+    std::cerr << flags.usage(load.error()) << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  logging::initialize(argv[0], false);
+
+  // Log any flag warnings.
+  foreach (const flags::Warning& warning, load->warnings) {
+    LOG(WARNING) << warning.message;
   }
 
   const Resources resources = Resources::parse(
@@ -549,51 +561,50 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(os::user().get());
+  framework.set_principal(flags.principal);
   framework.set_name(flags.name);
   framework.set_checkpoint(flags.checkpoint);
-  framework.set_role("*");
+  framework.add_roles(flags.role);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   BalloonScheduler scheduler(framework, executor, flags);
 
-  // Log any flag warnings (after logging is initialized by the scheduler).
-  foreach (const flags::Warning& warning, load->warnings) {
-    LOG(WARNING) << warning.message;
+  if (flags.master == "local") {
+    // Configure master.
+    os::setenv("MESOS_ROLES", flags.role);
+    os::setenv("MESOS_AUTHENTICATE_FRAMEWORKS", stringify(flags.authenticate));
+
+    ACLs acls;
+    ACL::RegisterFramework* acl = acls.add_register_frameworks();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_roles()->add_values(flags.role);
+    os::setenv("MESOS_ACLS", stringify(JSON::protobuf(acls)));
   }
 
   MesosSchedulerDriver* driver;
 
-  // TODO(josephw): Refactor these into a common set of flags.
-  Option<string> value = os::getenv("MESOS_AUTHENTICATE_FRAMEWORKS");
-  if (value.isSome()) {
+  if (flags.authenticate) {
     LOG(INFO) << "Enabling authentication for the framework";
 
-    value = os::getenv("DEFAULT_PRINCIPAL");
-    if (value.isNone()) {
-      EXIT(EXIT_FAILURE)
-        << "Expecting authentication principal in the environment";
-    }
-
     Credential credential;
-    credential.set_principal(value.get());
-
-    framework.set_principal(value.get());
-
-    value = os::getenv("DEFAULT_SECRET");
-    if (value.isNone()) {
-      EXIT(EXIT_FAILURE)
-        << "Expecting authentication secret in the environment";
+    credential.set_principal(flags.principal);
+    if (flags.secret.isSome()) {
+      credential.set_secret(flags.secret.get());
     }
-
-    credential.set_secret(value.get());
 
     driver = new MesosSchedulerDriver(
-        &scheduler, framework, flags.master, credential);
+        &scheduler,
+        framework,
+        flags.master,
+        credential);
   } else {
-    framework.set_principal(FRAMEWORK_PRINCIPAL);
-
-    driver = new MesosSchedulerDriver(&scheduler, framework, flags.master);
+    driver = new MesosSchedulerDriver(
+        &scheduler,
+        framework,
+        flags.master);
   }
 
   int status = driver->run() == DRIVER_STOPPED ? 0 : 1;

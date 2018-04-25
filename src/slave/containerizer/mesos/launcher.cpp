@@ -60,7 +60,7 @@ Future<hashset<ContainerID>> SubprocessLauncher::recover(
 {
   foreach (const ContainerState& state, states) {
     const ContainerID& containerId = state.container_id();
-    pid_t pid = state.pid();
+    pid_t pid = static_cast<pid_t>(state.pid());
 
     if (pids.containsValue(pid)) {
       // This should (almost) never occur. There is the possibility
@@ -137,13 +137,13 @@ Try<pid_t> SubprocessLauncher::fork(
     return Error("Failed to fork a child process: " + child.error());
   }
 
-  LOG(INFO) << "Forked child with pid '" << child.get().pid()
+  LOG(INFO) << "Forked child with pid '" << child->pid()
             << "' for container '" << containerId << "'";
 
   // Store the pid (session id and process group id).
-  pids.put(containerId, child.get().pid());
+  pids.put(containerId, child->pid());
 
-  return child.get().pid();
+  return child->pid();
 }
 
 

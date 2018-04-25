@@ -27,6 +27,7 @@
 
 #include "common/http.hpp"
 #include "common/parse.hpp"
+#include "common/protobuf_utils.hpp"
 
 #include "slave/constants.hpp"
 
@@ -110,10 +111,19 @@ mesos::internal::slave::Flags::Flags()
       "  \"name\": \"lvm\"\n"
       "}");
 
+  add(&Flags::disk_profile_adaptor,
+      "disk_profile_adaptor",
+      "The name of the disk profile adaptor module that storage resource\n"
+      "providers should use for translating a 'disk profile' into inputs\n"
+      "consumed by various Container Storage Interface (CSI) plugins.\n"
+      "If this flag is not specified, the default behavior for storage\n"
+      "resource providers is to only expose resources for pre-existing\n"
+      "volumes and not publish RAW volumes.");
+
   add(&Flags::isolation,
       "isolation",
       "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem` (or \n"
-      "`windows/cpu` if you are on Windows), or\n"
+      "`windows/cpu,windows/mem` if you are on Windows), or\n"
       "`cgroups/cpu,cgroups/mem`, or `network/port_mapping`\n"
       "(configure with flag: `--with-network-isolator` to enable),\n"
       "or `gpu/nvidia` for nvidia specific gpu isolation,\n"
@@ -123,7 +133,7 @@ mesos::internal::slave::Flags::Flags()
 #ifndef __WINDOWS__
       "posix/cpu,posix/mem"
 #else
-      "windows/cpu"
+      "windows/cpu,windows/mem"
 #endif // __WINDOWS__
       );
 
@@ -153,6 +163,28 @@ mesos::internal::slave::Flags::Flags()
       "Strategy for provisioning container rootfs from images,\n"
       "e.g., `aufs`, `bind`, `copy`, `overlay`.");
 
+  add(&Flags::image_gc_config,
+      "image_gc_config",
+      "JSON-formatted configuration for automatic container image garbage\n"
+      "collection. This is an optional flag. If it is not set, it means\n"
+      "the automatic container image gc is not enabled. Users have to\n"
+      "trigger image gc manually via the operator API. If it is set, the\n"
+      "auto image gc is enabled. This image gc config can be provided either\n"
+      "as a path pointing to a local file, or as a JSON-formatted string.\n"
+      "Please note that the image garbage collection only work with Mesos\n"
+      "Containerizer for now."
+      "\n"
+      "See the ImageGcConfig message in `flags.proto` for the expected\n"
+      "format.\n"
+      "Example:\n"
+      "{\n"
+      "  \"image_disk_headroom\": 0.1,\n"
+      "  \"image_disk_watch_interval\": {\n"
+      "    \"nanoseconds\": 3600\n"
+      "  },\n"
+      "  \"excluded_images\": []\n"
+      "}");
+
   add(&Flags::appc_simple_discovery_uri_prefix,
       "appc_simple_discovery_uri_prefix",
       "URI prefix to be used for simple discovery of appc images,\n"
@@ -166,10 +198,11 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::docker_registry,
       "docker_registry",
-      "The default url for pulling Docker images. It could either be a Docker\n"
-      "registry server url (i.e: `https://registry.docker.io`), or a local\n"
-      "path (i.e: `/tmp/docker/images`) in which Docker image archives\n"
-      "(result of `docker save`) are stored.",
+      "The default url for Mesos containerizer to pull Docker images. It\n"
+      "could either be a Docker registry server url (i.e: `https://registry.docker.io`),\n" // NOLINT(whitespace/line_length)
+      "or a local path (i.e: `/tmp/docker/images`) in which Docker image\n"
+      "archives (result of `docker save`) are stored. Note that this option\n"
+      "won't change the default registry server for Docker containerizer.",
       "https://registry-1.docker.io");
 
   add(&Flags::docker_store_dir,
@@ -212,6 +245,15 @@ mesos::internal::slave::Flags::Flags()
       "  * The cache and container sandboxes can potentially interfere with\n"
       "    each other when occupying a shared space (i.e. disk contention).",
       path::join(os::temp(), "mesos", "fetch"));
+
+  add(&Flags::fetcher_stall_timeout,
+      "fetcher_stall_timeout",
+      "Amount of time for the fetcher to wait before considering a download\n"
+      "being too slow and abort it when the download stalls (i.e., the speed\n"
+      "keeps below one byte per second).\n"
+      "NOTE: This feature only applies when downloading data from the net and\n"
+      "does not apply to HDFS.",
+      DEFAULT_FETCHER_STALL_TIMEOUT);
 
   add(&Flags::work_dir,
       "work_dir",
@@ -347,9 +389,9 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::executor_reregistration_timeout,
       "executor_reregistration_timeout",
-      "The timeout within which an executor is expected to re-register after\n"
+      "The timeout within which an executor is expected to reregister after\n"
       "the agent has restarted, before the agent considers it gone and shuts\n"
-      "it down. Note that currently, the agent will not re-register with the\n"
+      "it down. Note that currently, the agent will not reregister with the\n"
       "master until this timeout has elapsed (see MESOS-7539).",
       EXECUTOR_REREGISTRATION_TIMEOUT,
       [](const Duration& value) -> Option<Error> {
@@ -394,11 +436,11 @@ mesos::internal::slave::Flags::Flags()
       DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD);
 
 #ifdef USE_SSL_SOCKET
-  add(&Flags::executor_secret_key,
-      "executor_secret_key",
-      "Path to a file containing the key used when generating executor\n"
-      "secrets. This flag is only available when Mesos is built with SSL\n"
-      "support.");
+  add(&Flags::jwt_secret_key,
+      "jwt_secret_key",
+      flags::DeprecatedName("executor_secret_key"),
+      "Path to a file containing the key used when generating JWT secrets.\n"
+      "This flag is only available when Mesos is built with SSL support.");
 #endif // USE_SSL_SOCKET
 
   add(&Flags::gc_delay,
@@ -440,15 +482,36 @@ mesos::internal::slave::Flags::Flags()
       "reconnect: Reconnect with any old live executors.\n"
       "cleanup  : Kill any old live executors and exit.\n"
       "           Use this option when doing an incompatible agent\n"
-      "           or executor upgrade!).",
+      "           or executor upgrade.",
       "reconnect");
 
   add(&Flags::recovery_timeout,
       "recovery_timeout",
       "Amount of time allotted for the agent to recover. If the agent takes\n"
       "longer than recovery_timeout to recover, any executors that are\n"
-      "waiting to reconnect to the agent will self-terminate.\n",
+      "waiting to reconnect to the agent will self-terminate.\n"
+      "The best value of this flag depends on the frameworks being run.\n"
+      "For non-partition-aware frameworks, it makes sense to set this\n"
+      "close to the `agent_reregister_timeout` on the master.\n"
+      "For partition-aware frameworks, it makes sense to set this higher\n"
+      "than the timeout that the framework uses to give up on the task,\n"
+      "otherwise the executor might terminate even if the task could still\n"
+      "successfully reconnect to the framework.",
       RECOVERY_TIMEOUT);
+
+  add(&Flags::reconfiguration_policy,
+      "reconfiguration_policy",
+      "This flag controls which agent configuration changes are considered\n"
+      "acceptable when recovering the previous agent state. Possible values:\n"
+      "equal:    The old and the new state must match exactly.\n"
+      "additive: The new state must be a superset of the old state:\n"
+      "          it is permitted to add additional resources, attributes\n"
+      "          and domains but not to remove or to modify existing ones.\n"
+      "Note that this only affects the checking done on the agent itself,\n"
+      "the master may still reject the agent if it detects a change that it\n"
+      "considers unacceptable, which, e.g., currently happens when port or\n"
+      "hostname are changed.",
+      "equal");
 
   add(&Flags::strict,
       "strict",
@@ -651,6 +714,37 @@ mesos::internal::slave::Flags::Flags()
       false);
 #endif
 
+  add(&Flags::agent_features,
+      "agent_features",
+      "JSON representation of agent features to whitelist. We always require\n"
+      "'MULTI_ROLE', 'HIERARCHICAL_ROLE', and 'RESERVATION_REFINEMENT'.\n"
+      "\n"
+      "Example:\n"
+      "{\n"
+      "    \"capabilities\": [\n"
+      "        {\"type\": \"MULTI_ROLE\"},\n"
+      "        {\"type\": \"HIERARCHICAL_ROLE\"},\n"
+      "        {\"type\": \"RESERVATION_REFINEMENT\"}\n"
+      "    ]\n"
+      "}\n",
+      [](const Option<SlaveCapabilities>& agentFeatures) -> Option<Error> {
+        // Check all required capabilities are enabled.
+        if (agentFeatures.isSome()) {
+          protobuf::slave::Capabilities capabilities(
+              agentFeatures->capabilities());
+
+          if (!capabilities.multiRole ||
+              !capabilities.hierarchicalRole ||
+              !capabilities.reservationRefinement) {
+            return Error(
+                "At least the following agent features need to be enabled: "
+                "MULTI_ROLE, HIERARCHICAL_ROLE, RESERVATION_REFINEMENT");
+          }
+        }
+
+        return None();
+      });
+
   add(&Flags::firewall_rules,
       "firewall_rules",
       "The value could be a JSON-formatted string of rules or a\n"
@@ -723,8 +817,10 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::docker_remove_delay,
       "docker_remove_delay",
-      "The amount of time to wait before removing docker containers\n"
-      "(e.g., `3days`, `2weeks`, etc).\n",
+      "The amount of time to wait before removing docker containers \n"
+      "(i.e., `docker rm`) after Mesos regards the container as TERMINATED\n"
+      "(e.g., `3days`, `2weeks`, etc). This only applies for the Docker\n"
+      "Containerizer.\n",
       DOCKER_REMOVE_DELAY);
 
   add(&Flags::docker_kill_orphans,
@@ -948,27 +1044,27 @@ mesos::internal::slave::Flags::Flags()
       "eth0_name",
       "The name of the public network interface (e.g., `eth0`). If it is\n"
       "not specified, the network isolator will try to guess it based\n"
-      "on the host default gateway. This flag is used for the\n"
+      "on the host default gateway. This flag is used by the\n"
       "`network/port_mapping` isolator.");
 
   add(&Flags::lo_name,
       "lo_name",
       "The name of the loopback network interface (e.g., lo). If it is\n"
       "not specified, the network isolator will try to guess it. This\n"
-      "flag is used for the `network/port_mapping` isolator.");
+      "flag is used by the `network/port_mapping` isolator.");
 
   add(&Flags::egress_rate_limit_per_container,
       "egress_rate_limit_per_container",
       "The limit of the egress traffic for each container, in Bytes/s.\n"
       "If not specified or specified as zero, the network isolator will\n"
       "impose no limits to containers' egress traffic throughput.\n"
-      "This flag uses the Bytes type (defined in stout) and is used for\n"
+      "This flag uses the Bytes type (defined in stout) and is used by\n"
       "the `network/port_mapping` isolator.");
 
   add(&Flags::egress_unique_flow_per_container,
       "egress_unique_flow_per_container",
       "Whether to assign an individual flow for each container for the\n"
-      "egress traffic. This flag is used for the `network/port_mapping`\n"
+      "egress traffic. This flag is used by the `network/port_mapping`\n"
       "isolator.",
       false);
 
@@ -983,24 +1079,40 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::network_enable_socket_statistics_summary,
       "network_enable_socket_statistics_summary",
       "Whether to collect socket statistics summary for each container.\n"
-      "This flag is used for the `network/port_mapping` isolator.",
+      "This flag is used by the `network/port_mapping` isolator.",
       false);
 
   add(&Flags::network_enable_socket_statistics_details,
       "network_enable_socket_statistics_details",
       "Whether to collect socket statistics details (e.g., TCP RTT) for\n"
-      "each container. This flag is used for the `network/port_mapping`\n"
+      "each container. This flag is used by the `network/port_mapping`\n"
       "isolator.",
       false);
 
   add(&Flags::network_enable_snmp_statistics,
       "network_enable_snmp_statistics",
       "Whether to collect SNMP statistics details (e.g., TCPRetransSegs) for\n"
-      "each container. This flag is used for the 'network/port_mapping'\n"
+      "each container. This flag is used by the 'network/port_mapping'\n"
       "isolator.",
       false);
 
 #endif // ENABLE_PORT_MAPPING_ISOLATOR
+
+#ifdef ENABLE_NETWORK_PORTS_ISOLATOR
+  add(&Flags::container_ports_watch_interval,
+      "container_ports_watch_interval",
+      "Interval at which the `network/ports` isolator should check for\n"
+      "containers listening on ports they don't have resources for.",
+      Seconds(30));
+
+  add(&Flags::check_agent_port_range_only,
+      "check_agent_port_range_only",
+      "When this is true, the `network/ports` isolator allows tasks to\n"
+      "listen on additional ports provided they fall outside the range\n"
+      "published by the agent's resources. Otherwise tasks are restricted\n"
+      "to only listen on ports for which they have been assigned resources.",
+      false);
+#endif // ENABLE_NETWORK_PORTS_ISOLATOR
 
   add(&Flags::network_cni_plugins_dir,
       "network_cni_plugins_dir",
@@ -1019,7 +1131,7 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::container_disk_watch_interval,
       "container_disk_watch_interval",
       "The interval between disk quota checks for containers. This flag is\n"
-      "used for the `disk/du` isolator.",
+      "used by the `disk/du` isolator.",
       Seconds(15));
 
   // TODO(jieyu): Consider enabling this flag by default. Remember
@@ -1027,7 +1139,7 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::enforce_container_disk_quota,
       "enforce_container_disk_quota",
       "Whether to enable disk quota enforcement for containers. This flag\n"
-      "is used for the `disk/du` isolator.",
+      "is used by the `disk/du` and `disk/xfs` isolators.",
       false);
 
   // This help message for --modules flag is the same for
@@ -1257,6 +1369,13 @@ mesos::internal::slave::Flags::Flags()
       "  `zk://username:password@host1:port1,host2:port2,.../path`\n"
       "  `file:///path/to/file` (where file contains one of the above)");
 
+  // TODO(xujyan): Pull master constant ZOOKEEPER_SESSION_TIMEOUT into
+  // a common constants header.
+  add(&Flags::zk_session_timeout,
+      "zk_session_timeout",
+      "ZooKeeper session timeout.",
+      Seconds(10));
+
   add(&Flags::ip_discovery_command,
       "ip_discovery_command",
       "Optional IP discovery binary: if set, it is expected to emit\n"
@@ -1272,6 +1391,17 @@ mesos::internal::slave::Flags::Flags()
       "NOTE: Currently Mesos doesn't listen on IPv6 sockets and hence\n"
       "this IPv6 address is only used to advertise IPv6 addresses for\n"
       "containers running on the host network.\n");
+
+  // TODO(bevers): Switch the default to `true` after gathering
+  // some real-world experience.
+  add(&Flags::memory_profiling,
+      "memory_profiling",
+      "This setting controls whether the memory profiling functionality of\n"
+      "libprocess should be exposed when jemalloc is detected.\n"
+      "NOTE: Even if set to true, memory profiling will not work unless\n"
+      "jemalloc is loaded into the address space of the binary, either by\n"
+      "linking against it at compile-time or using `LD_PRELOAD`.",
+      false);
 
   add(&Flags::domain,
       "domain",

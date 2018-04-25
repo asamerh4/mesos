@@ -28,6 +28,8 @@
 
 #include <mesos/authorizer/authorizer.hpp>
 
+#include "common/http.hpp"
+
 namespace mesos {
 namespace internal {
 namespace slave {
@@ -114,8 +116,10 @@ private:
 
   // Helper function to collect containers status and resource statistics.
   process::Future<JSON::Array> __containers(
-      process::Owned<AuthorizationAcceptor> authorizeContainer,
-      Option<IDAcceptor<ContainerID>> selectContainerId) const;
+      const process::Owned<ObjectApprovers>& approvers,
+      Option<IDAcceptor<ContainerID>> selectContainerId,
+      bool showNestedContainers,
+      bool showStandaloneContainers) const;
 
   // Helper routines for endpoint authorization.
   Try<std::string> extractEndpoint(const process::http::URL& url) const;
@@ -172,7 +176,7 @@ private:
       const Option<process::http::authentication::Principal>& principal) const;
 
   mesos::agent::Response::GetFrameworks _getFrameworks(
-      const process::Owned<ObjectApprover>& frameworksApprover) const;
+      const process::Owned<ObjectApprovers>& approvers ) const;
 
   process::Future<process::http::Response> getExecutors(
       const mesos::agent::Call& call,
@@ -180,8 +184,12 @@ private:
       const Option<process::http::authentication::Principal>& principal) const;
 
   mesos::agent::Response::GetExecutors _getExecutors(
-      const process::Owned<ObjectApprover>& frameworksApprover,
-      const process::Owned<ObjectApprover>& executorsApprover) const;
+      const process::Owned<ObjectApprovers>& approvers) const;
+
+  process::Future<process::http::Response> getOperations(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
 
   process::Future<process::http::Response> getTasks(
       const mesos::agent::Call& call,
@@ -189,11 +197,14 @@ private:
       const Option<process::http::authentication::Principal>& principal) const;
 
   mesos::agent::Response::GetTasks _getTasks(
-      const process::Owned<ObjectApprover>& frameworksApprover,
-      const process::Owned<ObjectApprover>& tasksApprover,
-      const process::Owned<ObjectApprover>& executorsApprover) const;
+      const process::Owned<ObjectApprovers>& approvers) const;
 
   process::Future<process::http::Response> getAgent(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  process::Future<process::http::Response> getResourceProviders(
       const mesos::agent::Call& call,
       ContentType acceptType,
       const Option<process::http::authentication::Principal>& principal) const;
@@ -204,37 +215,101 @@ private:
       const Option<process::http::authentication::Principal>& principal) const;
 
   mesos::agent::Response::GetState _getState(
-      const process::Owned<ObjectApprover>& frameworksApprover,
-      const process::Owned<ObjectApprover>& taskApprover,
-      const process::Owned<ObjectApprover>& executorsApprover) const;
+      const process::Owned<ObjectApprovers>& approvers) const;
 
   process::Future<process::http::Response> launchNestedContainer(
       const mesos::agent::Call& call,
       ContentType acceptType,
       const Option<process::http::authentication::Principal>& principal) const;
 
-  process::Future<process::http::Response> _launchNestedContainer(
+  process::Future<process::http::Response> launchContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <mesos::authorization::Action action>
+  process::Future<process::http::Response> launchContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <mesos::authorization::Action action>
+  process::Future<process::http::Response> _launchContainer(
       const ContainerID& containerId,
       const CommandInfo& commandInfo,
+      const Option<Resources>& resources,
       const Option<ContainerInfo>& containerInfo,
       const Option<mesos::slave::ContainerClass>& containerClass,
       ContentType acceptType,
-      const process::Owned<ObjectApprover>& approver) const;
+      const process::Owned<ObjectApprovers>& approvers) const;
 
   process::Future<process::http::Response> waitNestedContainer(
       const mesos::agent::Call& call,
       ContentType acceptType,
       const Option<process::http::authentication::Principal>& principal) const;
 
+  process::Future<process::http::Response> waitContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <authorization::Action action>
+  process::Future<process::http::Response> waitContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <authorization::Action action>
+  process::Future<process::http::Response> _waitContainer(
+      const ContainerID& containerId,
+      ContentType acceptType,
+      const process::Owned<ObjectApprovers>& approvers,
+      const bool deprecated) const;
+
   process::Future<process::http::Response> killNestedContainer(
       const mesos::agent::Call& call,
       ContentType acceptType,
       const Option<process::http::authentication::Principal>& principal) const;
 
+  process::Future<process::http::Response> killContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <mesos::authorization::Action ACTION>
+  process::Future<process::http::Response> killContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <mesos::authorization::Action ACTION>
+  process::Future<process::http::Response> _killContainer(
+      const ContainerID& containerId,
+      const int signal,
+      ContentType acceptType,
+      const process::Owned<ObjectApprovers>& approvers) const;
+
   process::Future<process::http::Response> removeNestedContainer(
       const mesos::agent::Call& call,
       ContentType acceptType,
       const Option<process::http::authentication::Principal>& principal) const;
+
+  process::Future<process::http::Response> removeContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <mesos::authorization::Action ACTION>
+  process::Future<process::http::Response> removeContainer(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  template <mesos::authorization::Action ACTION>
+  process::Future<process::http::Response> _removeContainer(
+      const ContainerID& containerId,
+      ContentType acceptType,
+      const process::Owned<ObjectApprovers>& approvers) const;
 
   process::Future<process::http::Response> launchNestedContainerSession(
       const mesos::agent::Call& call,
@@ -260,6 +335,24 @@ private:
   process::Future<process::http::Response> _attachContainerOutput(
       const mesos::agent::Call& call,
       const RequestMediaTypes& mediaTypes) const;
+
+  process::Future<process::http::Response> addResourceProviderConfig(
+      const mesos::agent::Call& call,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  process::Future<process::http::Response> updateResourceProviderConfig(
+      const mesos::agent::Call& call,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  process::Future<process::http::Response> removeResourceProviderConfig(
+      const mesos::agent::Call& call,
+      const Option<process::http::authentication::Principal>& principal) const;
+
+  process::Future<process::http::Response> pruneImages(
+      const mesos::agent::Call& call,
+      ContentType acceptType,
+      const Option<process::http::authentication::Principal>&
+          principal) const;
 
   Slave* slave;
 

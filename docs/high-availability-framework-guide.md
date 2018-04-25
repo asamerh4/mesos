@@ -14,7 +14,7 @@ should consider include:
   example by crashing or by losing network connectivity. If the master has been
   configured to use [high-availability mode](high-availability.md), this will
   result in promoting another Mesos master replica to become the current
-  leader. In this situation, the scheduler should re-register with the new
+  leader. In this situation, the scheduler should reregister with the new
   master and ensure that task state is consistent.
 
 * The host where a framework scheduler is running might fail. To ensure that the
@@ -189,10 +189,11 @@ initial state and several possible terminal states:
   has not yet started to run. In this state, the task's dependencies are
   fetched---for example, using the [Mesos fetcher cache](fetcher.md).
 
-* The `TASK_STARTING` state is optional and intended primarily for use by
-  custom executors. It can be used to describe the fact that a custom executor
-  has learned about the task (and maybe started fetching its dependencies) but has
-  not yet started to run it.
+* The `TASK_STARTING` state is optional. It can be used to describe the fact
+  that an executor has learned about the task (and maybe started fetching its
+  dependencies) but has not yet started to run it. Custom executors are
+  encouraged to send it, to provide a more detailed description of the current
+  task state to outside observers.
 
 * A task transitions to the `TASK_RUNNING` state after it has begun running
   successfully (if the task fails to start, it transitions to one of the

@@ -270,6 +270,20 @@ TEST(JsonTest, ParseError)
     " ";
 
   EXPECT_ERROR(JSON::parse<JSON::Object>(jsonString));
+
+  jsonString = R"~(
+    {
+      "double1": 123123123121231231231231321312312312123123122E112312387129381723\x0d\x0a\x0d\x0a\x0d\x0a\x0d
+    })~";
+
+  EXPECT_ERROR(JSON::parse<JSON::Object>(jsonString));
+
+  jsonString = R"~(
+    {
+      "double2": -332861120361594135E400
+    })~";
+
+  EXPECT_ERROR(JSON::parse<JSON::Object>(jsonString));
 }
 
 
@@ -355,8 +369,6 @@ TEST(JsonTest, Find)
   EXPECT_NONE(object.find<JSON::Number>("nested1.nested2.null"));
   EXPECT_NONE(object.find<JSON::Object>("nested1.nested2.null"));
   EXPECT_NONE(object.find<JSON::Array>("nested1.nested2.null"));
-  EXPECT_NONE(object.find<JSON::True>("nested1.nested2.null"));
-  EXPECT_NONE(object.find<JSON::False>("nested1.nested2.null"));
   EXPECT_NONE(object.find<JSON::Boolean>("nested1.nested2.null"));
 
   // Also test getting JSON::Value when you don't know the type.

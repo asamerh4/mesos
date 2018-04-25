@@ -75,7 +75,10 @@ message ACL {
 
   // Specifies which roles a principal can reserve resources for.
   message ReserveResources {
-    // Subjects: Framework principal or Operator username.
+    // Subjects:
+    // - Framework principal or Operator username in the case of
+    //   dynamic reservation.
+    // - Agent principal in the case of static reservation.
     required Entity principals = 1;
 
     // Objects: The principal(s) can reserve resources for these roles.
@@ -344,7 +347,7 @@ message ACL {
     required Entity level = 2;
   }
 
-  // Which principals are authorized to register (and re-register) as agents.
+  // Which principals are authorized to register (and reregister) as agents.
   message RegisterAgent {
     // Subjects: Agent principals.
     required Entity principals = 1;
@@ -403,6 +406,110 @@ message ACL {
     // Objects: Given implicitly. Use Entity type ANY or NONE to allow or deny
     // access.
     required Entity machines = 2;
+  }
+
+  // Which principals are authorized to mark an agent as gone.
+  message MarkAgentGone {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly. Use Entity type ANY or NONE to allow or deny
+    // access.
+    required Entity agents = 2;
+  }
+
+  // Which principals are authorized to launch standalone containers.
+  message LaunchStandaloneContainer {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(josephw): Consider allowing granular permission to launch as
+    // SOME particular operating system users (e.g., linux users).
+    required Entity users = 2;
+  }
+
+  // Which principals are authorized to kill a standalone container.
+  message KillStandaloneContainer {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(josephw): Consider allowing granular permission to act upon
+    // SOME particular operating system users (e.g., linux users).
+    required Entity users = 2;
+  }
+
+  // Which principals are authorized to wait on a standalone container.
+  message WaitStandaloneContainer {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(josephw): Consider allowing granular permission to act upon
+    // SOME particular operating system users (e.g., linux users).
+    required Entity users = 2;
+  }
+
+  // Which principals are authorized to remove the artifacts (sandbox
+  // and runtime directories) of a standalone container.
+  message RemoveStandaloneContainer {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(josephw): Consider allowing granular permission to act upon
+    // SOME particular operating system users (e.g., linux users).
+    required Entity users = 2;
+  }
+
+  // Which principals are authorized to see the container metadata of a
+  // standalone container.
+  message ViewStandaloneContainer {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(jieyu): Consider allowing granular permission to act upon
+    // SOME particular operating system users (e.g., linux users).
+    required Entity users = 2;
+  }
+
+  // Which principals are authorized to add, update and remove resource
+  // provider config files.
+  message ModifyResourceProviderConfig {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(chhsiao): Consider allowing granular permission to act upon
+    // SOME resource provider types and names.
+    required Entity resource_providers = 2;
+  }
+
+  // Which principals are authorized to prune unused container images.
+  message PruneImages {
+    // Subjects: HTTP Username.
+    required Entity principals = 1;
+
+    // Objects: Given implicitly.
+    // Use Entity type ANY or NONE to allow or deny access.
+    //
+    // TODO(zhitao): Consider allowing granular permission to act upon
+    // SOME image reference.
+    required Entity images = 2;
   }
 }
 
@@ -474,4 +581,12 @@ message ACLs {
   repeated ACL.StartMaintenance start_maintenances = 37;
   repeated ACL.StopMaintenance stop_maintenances = 38;
   repeated ACL.GetMaintenanceStatus get_maintenance_statuses = 39;
+  repeated ACL.MarkAgentGone mark_agents_gone = 40;
+  repeated ACL.LaunchStandaloneContainer launch_standalone_containers = 41;
+  repeated ACL.KillStandaloneContainer kill_standalone_containers = 42;
+  repeated ACL.WaitStandaloneContainer wait_standalone_containers = 43;
+  repeated ACL.RemoveStandaloneContainer remove_standalone_containers = 44;
+  repeated ACL.ViewStandaloneContainer view_standalone_containers = 46;
+  repeated ACL.ModifyResourceProviderConfig modify_resource_provider_configs = 45;
+  repeated ACL.PruneImages prune_images = 47;
 }

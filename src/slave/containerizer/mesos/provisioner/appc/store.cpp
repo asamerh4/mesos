@@ -32,6 +32,8 @@
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include "slave/containerizer/mesos/provisioner/appc/cache.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/fetcher.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/paths.hpp"
@@ -129,7 +131,10 @@ Try<Owned<slave::Store>> Store::create(
   // TODO(jojy): Uri fetcher has 'shared' semantics for the
   // provisioner. It's a shared pointer which needs to be injected
   // from top level into the store (instead of being created here).
-  Try<Owned<uri::Fetcher>> uriFetcher = uri::fetcher::create();
+  uri::fetcher::Flags _flags;
+  _flags.curl_stall_timeout = flags.fetcher_stall_timeout;
+
+  Try<Owned<uri::Fetcher>> uriFetcher = uri::fetcher::create(_flags);
   if (uriFetcher.isError()) {
     return Error("Failed to create uri fetcher: " + uriFetcher.error());
   }

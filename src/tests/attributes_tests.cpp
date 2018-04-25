@@ -32,7 +32,7 @@ TEST(AttributesTest, Parsing)
                                    "rack:rack1,rack2");
   ASSERT_EQ(Value::SCALAR, a.get(0).type());
   ASSERT_EQ("cpus", a.get(0).name());
-  ASSERT_FLOAT_EQ(45.55, a.get(0).scalar().value());
+  ASSERT_DOUBLE_EQ(45.55, a.get(0).scalar().value());
 
   ASSERT_EQ(Value::RANGES, a.get(1).type());
   ASSERT_EQ("ports", a.get(1).name());
@@ -68,6 +68,9 @@ TEST(AttributesTest, Equality)
   EXPECT_NE(a, Attributes::parse(""));
   EXPECT_NE(a, Attributes::parse("cpus:45.55;ports:45.55;rack:45.55"));
   EXPECT_NE(Attributes::parse(""), a);
+  EXPECT_EQ(
+      Attributes::parse("rack:rack1;dedicated:customer1;dedicated:customer2"),
+      Attributes::parse("dedicated:customer2;dedicated:customer1;rack:rack1"));
 }
 
 } // namespace tests {

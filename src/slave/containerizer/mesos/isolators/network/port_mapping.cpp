@@ -1366,7 +1366,8 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
 
   // Verify that the network namespace is available by checking the
   // existence of the network namespace handle of the current process.
-  if (ns::namespaces().count("net") == 0) {
+  Try<bool> netSupported = ns::supported(CLONE_NEWNET);
+  if (netSupported.isError() || !netSupported.get()) {
     return Error(
         "Using network isolator requires network namespace. "
         "Make sure your kernel is newer than 3.4");
@@ -2494,8 +2495,7 @@ Future<Option<ContainerLaunchInfo>> PortMappingIsolatorProcess::prepare(
   }
 
   const ExecutorInfo& executorInfo = containerConfig.executor_info();
-
-  Resources resources(executorInfo.resources());
+  const Resources resources(containerConfig.resources());
 
   IntervalSet<uint16_t> nonEphemeralPorts;
 
@@ -3966,8 +3966,9 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   // checksum offloading ensures the TCP layer will checksum and drop
   // it.
   script << "ethtool -K " << eth0 << " rx off\n";
-  script << "ip link set " << eth0 << " address " << hostMAC << " up\n";
-  script << "ip addr add " << hostIPNetwork  << " dev " << eth0 << "\n";
+  script << "ip link set " << eth0 << " address " << hostMAC
+         << " mtu " << hostEth0MTU << " up\n";
+  script << "ip addr add " << hostIPNetwork << " dev " << eth0 << "\n";
 
   // Set up the default gateway to match that of eth0.
   script << "ip route add default via " << hostDefaultGateway << "\n";

@@ -46,7 +46,6 @@
 #include <deque>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <list>
 #include <map>
 #include <memory> // TODO(benh): Replace shared_ptr with unique_ptr.
@@ -70,7 +69,6 @@
 #include <process/executor.hpp>
 #include <process/filter.hpp>
 #include <process/future.hpp>
-#include <process/gc.hpp>
 #include <process/help.hpp>
 #include <process/id.hpp>
 #include <process/io.hpp>
@@ -96,6 +94,7 @@
 #endif // __WINDOWS__
 
 #include <stout/duration.hpp>
+#include <stout/error.hpp>
 #include <stout/flags.hpp>
 #include <stout/foreach.hpp>
 #include <stout/lambda.hpp>
@@ -116,7 +115,10 @@
 #include "event_loop.hpp"
 #include "event_queue.hpp"
 #include "gate.hpp"
+#include "http_proxy.hpp"
+#include "memory_profiler.hpp"
 #include "process_reference.hpp"
+#include "socket_manager.hpp"
 #include "run_queue.hpp"
 
 namespace inet = process::network::inet;
@@ -246,6 +248,14 @@ struct Flags : public virtual flags::FlagsBase
         "libprocess is listening may not match the address from\n"
         "which libprocess connects to other actors.\n",
         false);
+
+    // TODO(bevers): Set the default to `true` after gathering some
+    // real-world experience with this.
+    add(&Flags::memory_profiling,
+        "memory_profiling",
+        "If set to false, disables the memory profiling functionality\n"
+        "of libprocess.",
+        false);
   }
 
   Option<net::IP> ip;
@@ -254,6 +264,7 @@ struct Flags : public virtual flags::FlagsBase
   Option<int> port;
   Option<int> advertise_port;
   bool require_peer_address_ip_match;
+  bool memory_profiling;
 };
 
 } // namespace internal {
@@ -282,67 +293,6 @@ namespace mime {
 map<string, string> types;
 
 } // namespace mime {
-
-
-// Provides a process that manages sending HTTP responses so as to
-// satisfy HTTP/1.1 pipelining. Each request should either enqueue a
-// response, or ask the proxy to handle a future response. The process
-// is responsible for making sure the responses are sent in the same
-// order as the requests. Note that we use a 'Socket' in order to keep
-// the underlying file descriptor from getting closed while there
-// might still be outstanding responses even though the client might
-// have closed the connection (see more discussion in
-// SocketManager::close and SocketManager::proxy).
-class HttpProxy : public Process<HttpProxy>
-{
-public:
-  explicit HttpProxy(const Socket& _socket);
-  virtual ~HttpProxy() {}
-
-  // Enqueues the response to be sent once all previously enqueued
-  // responses have been processed (e.g., waited for and sent).
-  void enqueue(const Response& response, const Request& request);
-
-  // Enqueues a future to a response that will get waited on (up to
-  // some timeout) and then sent once all previously enqueued
-  // responses have been processed (e.g., waited for and sent).
-  void handle(const Future<Response>& future, const Request& request);
-
-protected:
-  void finalize() override;
-
-private:
-  // Starts "waiting" on the next available future response.
-  void next();
-
-  // Invoked once a future response has been satisfied.
-  void waited(const Future<Response>& future);
-
-  // Demuxes and handles a response.
-  bool process(const Future<Response>& future, const Request& request);
-
-  // Handles stream based responses.
-  void stream(const Owned<Request>& request, const Future<string>& chunk);
-
-  Socket socket; // Wrap the socket to keep it from getting closed.
-
-  // Describes a queue "item" that wraps the future to the response
-  // and the original request.
-  // The original request contains needed information such as what encodings
-  // are acceptable and whether to persist the connection.
-  struct Item
-  {
-    Item(const Request& _request, const Future<Response>& _future)
-      : request(_request), future(_future) {}
-
-    const Request request; // Make a copy.
-    Future<Response> future; // Make a copy.
-  };
-
-  queue<Item*> items;
-
-  Option<http::Pipe::Reader> pipe; // Current pipe, if streaming.
-};
 
 
 // Helper for creating routes without a process.
@@ -395,115 +345,6 @@ private:
 };
 
 
-class SocketManager
-{
-public:
-  SocketManager();
-  ~SocketManager();
-
-  // Closes all managed sockets and clears any associated metadata.
-  // The `__s__` server socket must be closed and `ProcessManager`
-  // must be finalized before calling this.
-  void finalize();
-
-  void accepted(const Socket& socket);
-
-  void link(ProcessBase* process,
-            const UPID& to,
-            const ProcessBase::RemoteConnection remote,
-            const SocketImpl::Kind& kind = SocketImpl::DEFAULT_KIND());
-
-  // Test-only method to fetch the file descriptor behind a
-  // persistent socket.
-  Option<int_fd> get_persistent_socket(const UPID& to);
-
-  PID<HttpProxy> proxy(const Socket& socket);
-
-  // Used to clean up the pointer to an `HttpProxy` in case the
-  // `HttpProxy` is killed outside the control of the `SocketManager`.
-  // This generally happens when `process::finalize` is called.
-  void unproxy(const Socket& socket);
-
-  void send(Encoder* encoder, bool persist, const Socket& socket);
-  void send(const Response& response,
-            const Request& request,
-            const Socket& socket);
-  void send(Message&& message,
-            const SocketImpl::Kind& kind = SocketImpl::DEFAULT_KIND());
-
-  Encoder* next(int_fd s);
-
-  void close(int_fd s);
-
-  void exited(const Address& address);
-  void exited(ProcessBase* process);
-
-private:
-  // TODO(bmahler): Leverage a bidirectional multimap instead, or
-  // hide the complexity of manipulating 'links' through methods.
-  struct
-  {
-    // For links, we maintain a bidirectional mapping between the
-    // "linkers" (Processes) and the "linkees" (remote / local UPIDs).
-    // For remote socket addresses, we also need a mapping to the
-    // linkees for that socket address, because socket closure only
-    // notifies at the address level.
-    hashmap<UPID, hashset<ProcessBase*>> linkers;
-    hashmap<ProcessBase*, hashset<UPID>> linkees;
-    hashmap<Address, hashset<UPID>> remotes;
-  } links;
-
-  // Switch the underlying socket that a remote end is talking to.
-  // This manipulates the data structures below by swapping all data
-  // mapped to 'from' to being mapped to 'to'. This is useful for
-  // downgrading a socket from SSL to POLL based.
-  void swap_implementing_socket(const Socket& from, const Socket& to);
-
-  // Helper function for link().
-  void link_connect(
-      const Future<Nothing>& future,
-      Socket socket,
-      const UPID& to);
-
-  // Helper function for send().
-  void send_connect(
-      const Future<Nothing>& future,
-      Socket socket,
-      Message&& message);
-
-  // Collection of all active sockets (both inbound and outbound).
-  hashmap<int_fd, Socket> sockets;
-
-  // Collection of sockets that should be disposed when they are
-  // finished being used (e.g., when there is no more data to send on
-  // them). Can contain both inbound and outbound sockets.
-  hashset<int_fd> dispose;
-
-  // Map from socket to socket address for outbound sockets.
-  hashmap<int_fd, Address> addresses;
-
-  // Map from socket address to temporary sockets (outbound sockets
-  // that will be closed once there is no more data to send on them).
-  hashmap<Address, int_fd> temps;
-
-  // Map from socket address (ip, port) to persistent sockets
-  // (outbound sockets that will remain open even if there is no more
-  // data to send on them).  We distinguish these from the 'temps'
-  // collection so we can tell when a persistent socket has been lost
-  // (and thus generate ExitedEvents).
-  hashmap<Address, int_fd> persists;
-
-  // Map from outbound socket to outgoing queue.
-  hashmap<int_fd, queue<Encoder*>> outgoing;
-
-  // HTTP proxies.
-  hashmap<int_fd, HttpProxy*> proxies;
-
-  // Protects instance variables.
-  std::recursive_mutex mutex;
-};
-
-
 class ProcessManager
 {
 public:
@@ -511,8 +352,8 @@ public:
   ~ProcessManager();
 
   // Prevents any further processes from spawning and terminates all
-  // running processes. The special `gc` process will be terminated
-  // last. Then joins all processing threads and stops the event loop.
+  // running processes. Then joins all processing threads and stops
+  // the event loop.
   //
   // This is a prerequisite for finalizing the `SocketManager`.
   void finalize();
@@ -577,7 +418,8 @@ public:
 
   long workers() const
   {
-    return threads.size() - 1; // Less 1 for event loop thread.
+    // Less 1 for event loop thread.
+    return static_cast<long>(threads.size() - 1);
   }
 
 private:
@@ -649,7 +491,10 @@ static inet::Address __address__ = inet4::Address::ANY_ANY();
 static Option<inet6::Address> __address6__ = None();
 
 // Active SocketManager (eventually will probably be thread-local).
-static SocketManager* socket_manager = nullptr;
+//
+// NOTE: can't be `static` because it needs to be `extern` in
+// socket_manager.hpp so that http_proxy.cpp can use it.
+SocketManager* socket_manager = nullptr;
 
 // Active ProcessManager (eventually will probably be thread-local).
 static ProcessManager* process_manager = nullptr;
@@ -657,14 +502,22 @@ static ProcessManager* process_manager = nullptr;
 // Used for authenticating HTTP requests.
 static AuthenticatorManager* authenticator_manager = nullptr;
 
-// Authorization callbacks for HTTP endpoints.
-static AuthorizationCallbacks* authorization_callbacks = nullptr;
+// Authorization callbacks for HTTP endpoints. Note that we use
+// an atomic + mutex in order to do "double-checked locking" to
+// avoid the cost of acquiring the mutex when authorization is
+// not enabled. The mutex is non-recursive, which means that
+// an authorization callback must not set or unset the callbacks
+// or else we will deadlock! This is already a requirement,
+// since a callback calling in to clear or re-set the callbacks
+// is thereby deleting itself!
+//
+// TODO(bmahler): Consider using a read/write lock.
+static std::atomic<AuthorizationCallbacks*> authorization_callbacks =
+  ATOMIC_VAR_INIT(nullptr);
+static std::mutex* authorization_callbacks_mutex = new std::mutex();
 
 // Global route that returns process information.
 static Route* processes_route = nullptr;
-
-// Global garbage collector.
-GarbageCollector* gc = nullptr;
 
 // Global help.
 PID<Help> help;
@@ -726,21 +579,25 @@ namespace authorization {
 
 void setCallbacks(const AuthorizationCallbacks& callbacks)
 {
-  if (authorization_callbacks != nullptr) {
-    delete authorization_callbacks;
-  }
+  synchronized (authorization_callbacks_mutex) {
+    if (authorization_callbacks.load() != nullptr) {
+      delete authorization_callbacks.load();
+    }
 
-  authorization_callbacks = new AuthorizationCallbacks(callbacks);
+    authorization_callbacks.store(new AuthorizationCallbacks(callbacks));
+  }
 }
 
 
 void unsetCallbacks()
 {
-  if (authorization_callbacks != nullptr) {
-    delete authorization_callbacks;
-  }
+  synchronized (authorization_callbacks_mutex) {
+    if (authorization_callbacks.load() != nullptr) {
+      delete authorization_callbacks.load();
+    }
 
-  authorization_callbacks = nullptr;
+    authorization_callbacks.store(nullptr);
+  }
 }
 
 } // namespace authorization {
@@ -760,23 +617,10 @@ void Clock::settle()
 static Message encode(
     const UPID& from,
     const UPID& to,
-    const string& name,
-    const char* data,
-    size_t length)
-{
-  Message message{name, from, to, string(data, length)};
-  return message;
-}
-
-
-static Message encode(
-    const UPID& from,
-    const UPID& to,
     string&& name,
-    const char* data,
-    size_t length)
+    string&& data)
 {
-  Message message{std::move(name), from, to, string(data, length)};
+  Message message{std::move(name), from, to, std::move(data)};
   return message;
 }
 
@@ -814,7 +658,7 @@ static void transport(
     process_manager->deliver(event->message.to, event, sender);
   } else {
     // Remote message.
-    socket_manager->send(encode(from, to, name, data, length));
+    socket_manager->send(encode(from, to, string(name), string(data, length)));
   }
 }
 
@@ -823,8 +667,7 @@ static void transport(
     const UPID& from,
     const UPID& to,
     string&& name,
-    const char* data,
-    size_t length,
+    string&& data,
     ProcessBase* sender = nullptr)
 {
   if (to.address == __address__) {
@@ -833,13 +676,12 @@ static void transport(
         from,
         to,
         std::move(name),
-        data,
-        length);
+        std::move(data));
 
     process_manager->deliver(event->message.to, event, sender);
   } else {
     // Remote message.
-    socket_manager->send(encode(from, to, std::move(name), data, length));
+    socket_manager->send(encode(from, to, std::move(name), std::move(data)));
   }
 }
 
@@ -1051,7 +893,18 @@ namespace internal {
 
 void on_accept(const Future<Socket>& socket)
 {
-  if (socket.isReady()) {
+  // We stop the accept loop when libprocess is finalizing.
+  // Either we'll see a discarded socket here, or we'll see
+  // the server socket set to null below.
+  bool stopped = false;
+
+  if (socket.isDiscarded()) {
+    stopped = true;
+  } else if (socket.isFailed()) {
+    LOG(WARNING) << "Failed to accept socket: " << socket.failure();
+  } else {
+    CHECK_READY(socket);
+
     // Inform the socket manager for proper bookkeeping.
     socket_manager->accepted(socket.get());
 
@@ -1060,7 +913,7 @@ void on_accept(const Future<Socket>& socket)
 
     StreamingRequestDecoder* decoder = new StreamingRequestDecoder();
 
-    socket.get().recv(data, size)
+    socket->recv(data, size)
       .onAny(lambda::bind(
           &internal::decode_recv,
           lambda::_1,
@@ -1068,17 +921,22 @@ void on_accept(const Future<Socket>& socket)
           size,
           socket.get(),
           decoder));
-  } else {
-     LOG(INFO) << "Failed to accept socket: "
-               << (socket.isFailed() ? socket.failure() : "future discarded");
   }
 
   // NOTE: `__s__` may be cleaned up during `process::finalize`.
-  synchronized (socket_mutex) {
-    if (__s__ != nullptr) {
-      future_accept = __s__->accept()
-        .onAny(lambda::bind(&on_accept, lambda::_1));
+  if (!stopped) {
+    synchronized (socket_mutex) {
+      if (__s__ != nullptr) {
+        future_accept = __s__->accept()
+          .onAny(lambda::bind(&on_accept, lambda::_1));
+      } else {
+        stopped = true;
+      }
     }
+  }
+
+  if (stopped) {
+    LOG(INFO) << "Stopped the socket accept loop";
   }
 }
 
@@ -1316,16 +1174,15 @@ bool initialize(
   future_accept = __s__->accept()
     .onAny(lambda::bind(&internal::on_accept, lambda::_1));
 
-  // TODO(benh): Make sure creating the garbage collector, logging
-  // process, and profiler always succeeds and use supervisors to make
-  // sure that none terminate.
+  // TODO(benh): Make sure creating the logging process, and profiler
+  // always succeeds and use supervisors to make sure that none
+  // terminate.
 
   // For the global processes below, the order of initialization matters.
   // Some global processes are necessary for the function of certain methods:
   //
   //   process | Underpins this method
   //   --------|---------------------------
-  //   gc      | process::spawn(..., true)
   //   help    | ProcessBase::route(...)
   //   metrics | process::metrics::add(...)
   //
@@ -1334,22 +1191,17 @@ bool initialize(
   // graph shows what processes depend on which other processes.
   // Processes in the same vertical group can be safely started in any order.
   //
-  //   gc
-  //   |--help
-  //   |  |--metrics
-  //   |  |  |--system
-  //   |  |  |--job_object_manager (Windows only)
-  //   |  |  |--All other processes
-  //   |  |
-  //   |  |--logging
-  //   |  |--profiler
-  //   |  |--processesRoute
+  //   help
+  //   |--metrics
+  //   |  |--system
+  //   |  |--job_object_manager (Windows only)
+  //   |  |--All other processes
   //   |
-  //   |--authentication_manager
-
-  // Create global garbage collector process.
-  gc = new GarbageCollector();
-  spawn(gc);
+  //   |--logging
+  //   |--(memory-)profiler
+  //   |--processesRoute
+  //
+  //   authenticator_manager
 
   // Create global help process.
   help = spawn(new Help(delegate), true);
@@ -1364,6 +1216,12 @@ bool initialize(
 
   // Create the global profiler process.
   spawn(new Profiler(readwriteAuthenticationRealm), true);
+
+  // Create the global memory profiler process unless memory profiling
+  // was disabled.
+  if (libprocess_flags->memory_profiling) {
+    spawn(new MemoryProfiler(readwriteAuthenticationRealm), true);
+  }
 
   // Create the global system statistics process.
   spawn(new System(), true);
@@ -1449,7 +1307,7 @@ void finalize(bool finalize_wsa)
   // potentially dereference it.
   socket_manager->finalize();
 
-  // This is dereferenced inside `ProcessBase::visit(HttpEvent&)`.
+  // This is dereferenced inside `ProcessBase::consume(HttpEvent&&)`.
   // We can safely delete it since no further incoming HTTP connections
   // can be made because the server socket has been destroyed. This must
   // be deleted before the `ProcessManager` as it will indirectly
@@ -1514,272 +1372,6 @@ long workers()
 }
 
 
-HttpProxy::HttpProxy(const Socket& _socket)
-  : ProcessBase(ID::generate("__http__")),
-    socket(_socket) {}
-
-
-void HttpProxy::finalize()
-{
-  // Need to make sure response producers know not to continue to
-  // create a response (streaming or otherwise).
-  if (pipe.isSome()) {
-    http::Pipe::Reader reader = pipe.get();
-    reader.close();
-  }
-  pipe = None();
-
-  while (!items.empty()) {
-    Item* item = items.front();
-
-    // Attempt to discard the future.
-    item->future.discard();
-
-    // But it might have already been ready. In general, we need to
-    // wait until this future is potentially ready in order to attempt
-    // to close a pipe if one exists.
-    item->future.onReady([](const Response& response) {
-      // Cleaning up a response (i.e., closing any open Pipes in the
-      // event Response::type is PIPE).
-      if (response.type == Response::PIPE) {
-        CHECK_SOME(response.reader);
-        http::Pipe::Reader reader = response.reader.get(); // Remove const.
-        reader.close();
-      }
-    });
-
-    items.pop();
-    delete item;
-  }
-
-  // Just in case this process gets killed outside of `SocketManager::close`,
-  // remove the proxy from the socket.
-  socket_manager->unproxy(socket);
-}
-
-
-void HttpProxy::enqueue(const Response& response, const Request& request)
-{
-  handle(Future<Response>(response), request);
-}
-
-
-void HttpProxy::handle(const Future<Response>& future, const Request& request)
-{
-  items.push(new Item(request, future));
-
-  if (items.size() == 1) {
-    next();
-  }
-}
-
-
-void HttpProxy::next()
-{
-  if (items.size() > 0) {
-    // Wait for any transition of the future.
-    items.front()->future.onAny(
-        defer(self(), &HttpProxy::waited, lambda::_1));
-  }
-}
-
-
-void HttpProxy::waited(const Future<Response>& future)
-{
-  CHECK(items.size() > 0);
-  Item* item = items.front();
-
-  CHECK(future == item->future);
-
-  // Process the item and determine if we're done or not (so we know
-  // whether to start waiting on the next responses).
-  bool processed = process(item->future, item->request);
-
-  items.pop();
-  delete item;
-
-  if (processed) {
-    next();
-  }
-}
-
-
-bool HttpProxy::process(const Future<Response>& future, const Request& request)
-{
-  if (!future.isReady()) {
-    // TODO(benh): Consider handling other "states" of future
-    // (discarded, failed, etc) with different HTTP statuses.
-    Response response = future.isFailed()
-      ? InternalServerError(future.failure())
-      : InternalServerError("discarded future");
-
-    VLOG(1) << "Returning '" << response.status << "'"
-            << " for '" << request.url.path << "'"
-            << " ("
-            << (future.isFailed()
-                  ? future.failure()
-                  : "discarded") << ")";
-
-    socket_manager->send(response, request, socket);
-
-    return true; // All done, can process next response.
-  }
-
-  Response response = future.get();
-
-  // If the response specifies a path, try and perform a sendfile.
-  if (response.type == Response::PATH) {
-    // Make sure no body is sent (this is really an error and
-    // should be reported and no response sent.
-    response.body.clear();
-
-    const string& path = response.path;
-    int_fd fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-      if (errno == ENOENT || errno == ENOTDIR) {
-          VLOG(1) << "Returning '404 Not Found' for path '" << path << "'";
-          socket_manager->send(NotFound(), request, socket);
-      } else {
-        const string error = os::strerror(errno);
-        VLOG(1) << "Failed to send file at '" << path << "': " << error;
-        socket_manager->send(InternalServerError(), request, socket);
-      }
-    } else {
-      struct stat s; // Need 'struct' because of function named 'stat'.
-      // We don't bother introducing a `os::fstat` since this is only
-      // one of two places where we use `fstat` in the entire codebase
-      // as of writing this comment.
-#ifdef __WINDOWS__
-      if (::fstat(fd.crt(), &s) != 0) {
-#else
-      if (::fstat(fd, &s) != 0) {
-#endif
-        const string error = os::strerror(errno);
-        VLOG(1) << "Failed to send file at '" << path << "': " << error;
-        socket_manager->send(InternalServerError(), request, socket);
-      } else if (S_ISDIR(s.st_mode)) {
-        VLOG(1) << "Returning '404 Not Found' for directory '" << path << "'";
-        socket_manager->send(NotFound(), request, socket);
-      } else {
-        // While the user is expected to properly set a 'Content-Type'
-        // header, we fill in (or overwrite) 'Content-Length' header.
-        stringstream out;
-        out << s.st_size;
-        response.headers["Content-Length"] = out.str();
-
-        if (s.st_size == 0) {
-          socket_manager->send(response, request, socket);
-          return true; // All done, can process next request.
-        }
-
-        VLOG(1) << "Sending file at '" << path << "' with length " << s.st_size;
-
-        // TODO(benh): Consider a way to have the socket manager turn
-        // on TCP_CORK for both sends and then turn it off.
-        socket_manager->send(
-            new HttpResponseEncoder(response, request),
-            true,
-            socket);
-
-        // Note the file descriptor gets closed by FileEncoder.
-        socket_manager->send(
-            new FileEncoder(fd, s.st_size),
-            request.keepAlive,
-            socket);
-      }
-    }
-  } else if (response.type == Response::PIPE) {
-    // Make sure no body is sent (this is really an error and
-    // should be reported and no response sent.
-    response.body.clear();
-
-    // While the user is expected to properly set a 'Content-Type'
-    // header, we fill in (or overwrite) 'Transfer-Encoding' header.
-    response.headers["Transfer-Encoding"] = "chunked";
-
-    VLOG(3) << "Starting \"chunked\" streaming";
-
-    socket_manager->send(
-        new HttpResponseEncoder(response, request),
-        true,
-        socket);
-
-    CHECK_SOME(response.reader);
-    http::Pipe::Reader reader = response.reader.get();
-
-    pipe = reader;
-
-    // Avoid copying the request for each chunk read on the pipe.
-    //
-    // TODO(bmahler): Make request a process::Owned or
-    // process::Shared from the point where it is decoded.
-    Owned<Request> request_(new Request(request));
-
-    reader.read()
-      .onAny(defer(self(), &Self::stream, request_, lambda::_1));
-
-    return false; // Streaming, don't process next response (yet)!
-  } else {
-    socket_manager->send(response, request, socket);
-  }
-
-  return true; // All done, can process next response.
-}
-
-
-void HttpProxy::stream(
-    const Owned<Request>& request,
-    const Future<string>& chunk)
-{
-  CHECK_SOME(pipe);
-  CHECK_NOTNULL(request.get());
-
-  http::Pipe::Reader reader = pipe.get();
-
-  bool finished = false; // Whether we're done streaming.
-
-  if (chunk.isReady()) {
-    std::ostringstream out;
-
-    if (chunk.get().empty()) {
-      // Finished reading.
-      out << "0\r\n" << "\r\n";
-      finished = true;
-    } else {
-      out << std::hex << chunk.get().size() << "\r\n";
-      out << chunk.get();
-      out << "\r\n";
-
-      // Keep reading.
-      reader.read()
-        .onAny(defer(self(), &Self::stream, request, lambda::_1));
-    }
-
-    // Always persist the connection when streaming is not finished.
-    socket_manager->send(
-        new DataEncoder(out.str()),
-        finished ? request->keepAlive : true,
-        socket);
-  } else if (chunk.isFailed()) {
-    VLOG(1) << "Failed to read from stream: " << chunk.failure();
-    // TODO(bmahler): Have to close connection if headers were sent!
-    socket_manager->send(InternalServerError(), *request, socket);
-    finished = true;
-  } else {
-    VLOG(1) << "Failed to read from stream: discarded";
-    // TODO(bmahler): Have to close connection if headers were sent!
-    socket_manager->send(InternalServerError(), *request, socket);
-    finished = true;
-  }
-
-  if (finished) {
-    reader.close();
-    pipe = None();
-    next();
-  }
-}
-
-
 SocketManager::SocketManager() {}
 
 
@@ -1796,7 +1388,10 @@ void SocketManager::finalize()
   // We require all processes to be terminated prior to finalizing the
   // `SocketManager`. This simplifies the finalization logic as we do not
   // have to worry about sockets or links being created during cleanup.
-  CHECK(gc == nullptr);
+  //
+  // TODO(benh): can't do the following anymore, need another way:
+  //
+  // CHECK(gc == nullptr);
 
   int_fd socket = -1;
   // Close each socket.
@@ -1864,7 +1459,8 @@ void SocketManager::link_connect(
 {
   if (future.isDiscarded() || future.isFailed()) {
     if (future.isFailed()) {
-      VLOG(1) << "Failed to link, connect: " << future.failure();
+      LOG(WARNING) << "Failed to link to '" << to.address
+                   << "', connect: " << future.failure();
     }
 
     // Check if SSL is enabled, and whether we allow a downgrade to
@@ -1892,7 +1488,8 @@ void SocketManager::link_connect(
 
         Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
         if (create.isError()) {
-          VLOG(1) << "Failed to link, create socket: " << create.error();
+          LOG(WARNING) << "Failed to link to '" << to.address
+                       << "', create socket: " << create.error();
           socket_manager->close(socket);
           return;
         }
@@ -1996,7 +1593,8 @@ void SocketManager::link(
         // from SSL to POLL if enabled.
         Try<Socket> create = Socket::create(kind);
         if (create.isError()) {
-          LOG(WARNING) << "Failed to link, create socket: " << create.error();
+          LOG(WARNING) << "Failed to link to '" << to.address
+                       << "', create socket: " << create.error();
 
           // Failure to create a new socket should generate an `ExitedEvent`
           // for the linkee. At this point, we have not passed ownership of
@@ -2006,7 +1604,7 @@ void SocketManager::link(
           return;
         }
         socket = create.get();
-        int_fd s = socket.get().get();
+        int_fd s = socket->get();
 
         CHECK(sockets.count(s) == 0);
         sockets.emplace(s, socket.get());
@@ -2028,7 +1626,8 @@ void SocketManager::link(
         // create a new socket anyway.
         Try<Socket> create = Socket::create(kind);
         if (create.isError()) {
-          LOG(WARNING) << "Failed to link, create socket: " << create.error();
+          LOG(WARNING) << "Failed to link to '" << to.address
+                       << "', create socket: " << create.error();
 
           // Failure to create a new socket should generate an `ExitedEvent`
           // for the linkee. At this point, we have not passed ownership of
@@ -2053,9 +1652,10 @@ void SocketManager::link(
         // the final socket reference. This will not result in an
         // `ExitedEvent` because we have already removed the `existing`
         // socket from the mapping of linkees and linkers.
-        Try<Nothing> shutdown = existing.shutdown();
+        Try<Nothing, SocketError> shutdown = existing.shutdown();
         if (shutdown.isError()) {
-          VLOG(1) << "Failed to shutdown old link: " << shutdown.error();
+          VLOG(1) << "Failed to shutdown old link: "
+                  << shutdown.error().message;
         }
 
         connect = true;
@@ -2281,8 +1881,8 @@ void SocketManager::send_connect(
 {
   if (future.isDiscarded() || future.isFailed()) {
     if (future.isFailed()) {
-      VLOG(1) << "Failed to send '" << message.name << "' to '"
-              << message.to.address << "', connect: " << future.failure();
+      LOG(WARNING) << "Failed to send '" << message.name << "' to '"
+                   << message.to.address << "', connect: " << future.failure();
     }
 
     // Check if SSL is enabled, and whether we allow a downgrade to
@@ -2302,7 +1902,8 @@ void SocketManager::send_connect(
       synchronized (mutex) {
         Try<Socket> create = Socket::create(SocketImpl::Kind::POLL);
         if (create.isError()) {
-          VLOG(1) << "Failed to link, create socket: " << create.error();
+          LOG(WARNING) << "Failed to link to '" << message.to.address
+                       << "', create socket: " << create.error();
           socket_manager->close(socket);
           return;
         }
@@ -2318,13 +1919,15 @@ void SocketManager::send_connect(
       }
 
       CHECK_SOME(poll_socket);
-      poll_socket.get().connect(message.to.address)
-        .onAny(lambda::bind(
-            // TODO(benh): with C++14 we can use lambda instead of
-            // `std::bind` and capture `message` with a `std::move`.
-            [this, poll_socket](Message& message, const Future<Nothing>& f) {
-              send_connect(f, poll_socket.get(), std::move(message));
-            }, std::move(message), lambda::_1));
+      Future<Nothing> connect = poll_socket->connect(message.to.address);
+      connect.onAny(lambda::bind(
+          // TODO(benh): with C++14 we can use lambda instead of
+          // `std::bind` and capture `message` with a `std::move`.
+          [this, poll_socket](Message& message, const Future<Nothing>& f) {
+            send_connect(f, poll_socket.get(), std::move(message));
+          },
+          std::move(message),
+          lambda::_1));
 
       // We don't need to 'shutdown()' the socket as it was never
       // connected.
@@ -2395,7 +1998,9 @@ void SocketManager::send(Message&& message, const SocketImpl::Kind& kind)
       // from SSL to POLL if enabled.
       Try<Socket> create = Socket::create(kind);
       if (create.isError()) {
-        VLOG(1) << "Failed to send, create socket: " << create.error();
+        LOG(WARNING) << "Failed to send '" << message.name
+                     << "' to '" << message.to.address
+                     << "', create socket: " << create.error();
         return;
       }
       socket = create.get();
@@ -2494,13 +2099,17 @@ Encoder* SocketManager::next(int_fd s)
           Socket socket = iterator->second;
           sockets.erase(iterator);
 
-          Try<Nothing> shutdown = socket.shutdown();
+          Try<Nothing, SocketError> shutdown = socket.shutdown();
+
+          // Failure here could be due to reasons including that the underlying
+          // socket is already closed so it by itself doesn't necessarily
+          // suggest anything wrong.
           if (shutdown.isError()) {
-            LOG(ERROR) << "Failed to shutdown socket with fd " << socket.get()
-                       << ", address " << (socket.address().isSome()
-                                             ? stringify(socket.address().get())
-                                             : "N/A")
-                       << ": " << shutdown.error();
+            LOG(INFO) << "Failed to shutdown socket with fd " << socket.get()
+                      << ", address " << (socket.address().isSome()
+                                            ? stringify(socket.address().get())
+                                            : "N/A")
+                      << ": " << shutdown.error().message;
           }
         }
       }
@@ -2579,13 +2188,24 @@ void SocketManager::close(int_fd s)
       Socket socket = iterator->second;
       sockets.erase(iterator);
 
-      Try<Nothing> shutdown = socket.shutdown();
-      if (shutdown.isError()) {
+      // Failure here could be due to reasons including that the underlying
+      // socket is already closed so it by itself doesn't necessarily
+      // suggest anything wrong.
+      Try<Nothing, SocketError> shutdown = socket.shutdown();
+
+      // Avoid logging an error when the shutdown was triggered on a
+      // socket that is not connected.
+      if (shutdown.isError() &&
+#ifdef __WINDOWS__
+          shutdown.error().code != WSAENOTCONN) {
+#else // __WINDOWS__
+          shutdown.error().code != ENOTCONN) {
+#endif // __WINDOWS__
         LOG(ERROR) << "Failed to shutdown socket with fd " << socket.get()
                    << ", address " << (socket.address().isSome()
                                          ? stringify(socket.address().get())
                                          : "N/A")
-                   << ": " << shutdown.error();
+                   << ": " << shutdown.error().message;
       }
     }
   }
@@ -2653,14 +2273,14 @@ void SocketManager::exited(const Address& address)
 
 void SocketManager::exited(ProcessBase* process)
 {
-  // An exited event is enough to cause the process to get deleted
-  // (e.g., by the garbage collector), which means we can't
-  // dereference process (or even use the address) after we enqueue at
-  // least one exited event. Thus, we save the process pid.
+  // TODO(benh): an exited event might cause `process` to get deleted
+  // (e.g., by someone who did a `link()`), even though they should
+  // really be doing a `wait()`. To be on the safe side here we save
+  // `process->pid` and the current time of the process so we can
+  // avoid dereferencing `process` after we enqueue at least one
+  // exited event. Really we should only store a `UPID` in these data
+  // structures and not use `ProcessBase` at all!
   const UPID pid = process->pid;
-
-  // Likewise, we need to save the current time of the process so we
-  // can update the clocks of linked processes as appropriate.
   const Time time = Clock::now(process);
 
   synchronized (mutex) {
@@ -2780,8 +2400,6 @@ ProcessManager::~ProcessManager() {}
 
 void ProcessManager::finalize()
 {
-  CHECK(gc != nullptr);
-
   // Prevent anymore processes from being spawned.
   finalizing.store(true);
 
@@ -2789,10 +2407,6 @@ void ProcessManager::finalize()
   // is erased from `processes` in ProcessManager::cleanup(). Don't hold
   // the lock or process the whole map as terminating one process might
   // trigger other terminations.
-  //
-  // We skip the GC process in this loop and instead terminate it last.
-  // This ensures that the GC process is running whenever we terminate
-  // any GC-managed process, which is necessary to prevent leaking.
   while (true) {
     // NOTE: We terminate by `UPID` rather than `ProcessBase` as the
     // process may terminate between the synchronized section below
@@ -2802,36 +2416,18 @@ void ProcessManager::finalize()
     UPID pid;
 
     synchronized (processes_mutex) {
-      ProcessBase* process = nullptr;
-
-      foreachvalue (ProcessBase* candidate, processes) {
-        if (candidate == gc) {
-          continue;
-        }
-
-        process = candidate;
-        pid = candidate->self();
+      if (processes.empty()) {
         break;
       }
 
-      if (process == nullptr) {
-        break;
-      }
+      // Grab the `UPID` for the next process we'll terminate.
+      pid = processes.values().front()->self();
     }
 
     // Terminate this process but do not inject the message,
     // i.e. allow it to finish its work first.
     process::terminate(pid, false);
     process::wait(pid);
-  }
-
-  // Terminate `gc`.
-  process::terminate(gc, false);
-  process::wait(gc);
-
-  synchronized (processes_mutex) {
-    delete gc;
-    gc = nullptr;
   }
 
   // Send signal to all processing threads to stop running.
@@ -2874,7 +2470,7 @@ long ProcessManager::init_threads()
   Option<string> value = os::getenv(env_var);
   if (value.isSome()) {
     constexpr long maxval = 1024;
-    Try<long> number = numify<long>(value.get().c_str());
+    Try<long> number = numify<long>(value->c_str());
     if (number.isSome() && number.get() > 0L && number.get() <= maxval) {
       VLOG(1) << "Overriding default number of worker threads "
               << num_worker_threads << ", using the value "
@@ -2984,7 +2580,7 @@ void ProcessManager::handle(
     // from `SocketManager::finalize()` due to it closing all active sockets
     // during libprocess finalization.
     parse(*request)
-      .onAny([this, socket, request](const Future<MessageEvent*>& future) {
+      .onAny([socket, request](const Future<MessageEvent*>& future) {
         // Get the HttpProxy pid for this socket.
         PID<HttpProxy> proxy = socket_manager->proxy(socket);
 
@@ -3034,7 +2630,7 @@ void ProcessManager::handle(
 
         // TODO(benh): Use the sender PID when delivering in order to
         // capture happens-before timing relationships for testing.
-        bool accepted = deliver(event->message.to, event);
+        bool accepted = process_manager->deliver(event->message.to, event);
 
         // NOTE: prior to commit d5fe51c on April 11, 2014 we needed
         // to ignore sending responses in the event the receiver was a
@@ -3101,12 +2697,10 @@ void ProcessManager::handle(
   }
 
   synchronized (firewall_mutex) {
-    // Don't use a const reference, since it cannot be guaranteed
-    // that the rules don't keep an internal state.
-    foreach (Owned<firewall::FirewallRule>& rule, firewallRules) {
+    foreach (const Owned<firewall::FirewallRule>& rule, firewallRules) {
       Option<Response> rejection = rule->apply(socket, *request);
       if (rejection.isSome()) {
-        VLOG(1) << "Returning '"<< rejection.get().status << "' for '"
+        VLOG(1) << "Returning '" << rejection->status << "' for '"
                 << request->url.path << "' (firewall rule forbids request)";
 
         // TODO(arojas): Get rid of the duplicated code to return an
@@ -3207,7 +2801,9 @@ bool ProcessManager::deliver(
 
 UPID ProcessManager::spawn(ProcessBase* process, bool manage)
 {
-  CHECK(process != nullptr);
+  CHECK_NOTNULL(process);
+
+  bool spawned = false;
 
   // If the `ProcessManager` is cleaning itself up, no further processes
   // may be spawned.
@@ -3215,37 +2811,43 @@ UPID ProcessManager::spawn(ProcessBase* process, bool manage)
     LOG(WARNING)
       << "Attempted to spawn a process (" << process->self()
       << ") after finalizing libprocess!";
+  } else if (process->state.load() != ProcessBase::State::BOTTOM) {
+    LOG(WARNING)
+      << "Attempted to spawn a process (" << process->self()
+      << ") that has already been initialized";
+  } else {
+    synchronized (processes_mutex) {
+      if (processes.count(process->pid.id) > 0) {
+        LOG(WARNING)
+          << "Attempted to spawn already running process " << process->pid;
+      } else {
+        processes[process->pid.id] = process;
 
+        // NOTE: we set process reference on it's `UPID` _after_ we've
+        // spawned so that we make sure that we'll take the
+        // `ProcessManager::use()` code path in the event that we
+        // aren't able to spawn the process. This is important in
+        // circumstances where there are multiple processes with the
+        // same ID because the semantics that people have come to
+        // expect from libprocess is that a `UPID` should "resolve" to
+        // the already spawned process rather than a process that has
+        // the same name but hasn't yet been spawned.
+        process->pid.reference = process->reference;
+
+        spawned = true;
+      }
+    }
+  }
+
+  if (!spawned) {
     if (manage) {
       delete process;
     }
-
     return UPID();
   }
 
-  synchronized (processes_mutex) {
-    if (processes.count(process->pid.id) > 0) {
-      VLOG(1) << "Attempting to spawn already spawned process " << process->pid;
-      return UPID();
-    } else {
-      processes[process->pid.id] = process;
-
-      // NOTE: we set process reference on it's `UPID` _after_ we've
-      // spawned so that we make sure that we'll take the
-      // `ProcessManager::use()` code path in the event that we aren't
-      // able to spawn the process. This is important in circumstances
-      // where there are multiple processes with the same ID because
-      // the semantics that people have come to expect from libprocess
-      // is that a `UPID` should "resolve" to the already spawned
-      // process rather than a process that has the same name but
-      // hasn't yet been spawned.
-      process->pid.reference = process->reference;
-    }
-  }
-
-  // Use the garbage collector if requested.
   if (manage) {
-    dispatch(gc->self(), &GarbageCollector::manage<ProcessBase>, process);
+    process->manage = true;
   }
 
   // We save the PID before enqueueing the process to avoid the race
@@ -3257,7 +2859,7 @@ UPID ProcessManager::spawn(ProcessBase* process, bool manage)
   // Add process to the run queue (so 'initialize' will get invoked).
   enqueue(process);
 
-  VLOG(2) << "Spawned process " << pid;
+  VLOG(3) << "Spawned process " << pid;
 
   return pid;
 }
@@ -3267,8 +2869,9 @@ void ProcessManager::resume(ProcessBase* process)
 {
   __process__ = process;
 
-  VLOG(2) << "Resuming " << process->pid << " at " << Clock::now();
+  VLOG(3) << "Resuming " << process->pid << " at " << Clock::now();
 
+  bool manage = process->manage;
   bool terminate = false;
   bool blocked = false;
 
@@ -3278,9 +2881,28 @@ void ProcessManager::resume(ProcessBase* process)
         state == ProcessBase::State::READY);
 
   if (state == ProcessBase::State::BOTTOM) {
-    try { process->initialize(); }
-    catch (...) { terminate = true; }
+    // In the event that the process throws an exception,
+    // we will abort the program.
+    //
+    // TODO(bmahler): Consider providing recovery mechanisms.
+    try {
+      process->initialize();
+    } catch (const std::exception& e) {
+      LOG(FATAL) << "Aborting libprocess: '" << process->pid << "'"
+                 << " threw exception during initialization: " << e.what();
+    } catch (...) {
+      LOG(FATAL) << "Aborting libprocess: '" << process->pid << "'"
+                 << " threw exception during initialization: unknown";
+    }
+
+    state = ProcessBase::State::READY;
+    process->state.store(state);
   }
+
+  // We must hold a reference to the process because it's possible
+  // that another worker races ahead and deletes the process after
+  // we set the state to BLOCKED (see the comment below).
+  ProcessReference reference = process->reference;
 
   while (!terminate && !blocked) {
     Event* event = nullptr;
@@ -3292,23 +2914,31 @@ void ProcessManager::resume(ProcessBase* process)
     if (!process->events->consumer.empty()) {
       event = process->events->consumer.dequeue();
     } else {
+      // We now transition the process to BLOCKED. It's possible that
+      // events get enqueued while we're still in the READY state.
+      // If this happens, the process would not have been enqueued
+      // into the run queue and we need to continue processing the
+      // events!
+      //
+      // However, when checking for such events, we need to be
+      // careful not to process the events if they were enqueued
+      // *after* we transitioned to BLOCKED. In this case, the
+      // process was put in the run queue and transitioned back
+      // to READY by `ProcessBase::enqueue`. So, we check for this
+      // case by seeing if we can atomically swap the state from
+      // BLOCKED to READY.
+      //
+      // We also need to make sure we hold a reference to the
+      // process when we check the queue again (see the reference
+      // held above the loop), as it's possible that another worker
+      // thread dequeued the process off the run queue and raced
+      // ahead processing a termination event and deleted the
+      // process!
       state = ProcessBase::State::BLOCKED;
       process->state.store(state);
       blocked = true;
 
-      // Now check that we didn't miss any events that got added
-      // before we set ourselves to BLOCKED since we won't have been
-      // added to the run queue in those circumstances so we need to
-      // serve those events!
       if (!process->events->consumer.empty()) {
-        // Make sure the state is in READY! Either we need to
-        // explicitly do this because `ProcessBase::enqueue` saw us as
-        // READY (or BOTTOM) and didn't change the state or we're
-        // racing with `ProcessBase::enqueue` because they saw us at
-        // BLOCKED and are trying to change the state. If they change
-        // the state then they'll also enqueue this process, which
-        // means we need to bail because another thread might resume
-        // (and the reason we'll bail is because `blocked` is true)!
         if (process->state.compare_exchange_strong(
                 state,
                 ProcessBase::State::READY)) {
@@ -3361,39 +2991,49 @@ void ProcessManager::resume(ProcessBase* process)
       // Determine if we should terminate.
       terminate = event->is<TerminateEvent>();
 
-      // Now service the event.
+      // Now service the event. In the event that the process
+      // throws an exception, we will abort the program.
+      //
+      // TODO(bmahler): Consider providing recovery mechanisms.
       try {
-        process->serve(*event);
+        process->serve(std::move(*event));
       } catch (const std::exception& e) {
-        std::cerr << "libprocess: " << process->pid
-                  << " terminating due to "
-                  << e.what() << std::endl;
-        terminate = true;
+        LOG(FATAL) << "Aborting libprocess: '" << process->pid << "'"
+                   << " threw exception: " << e.what();
       } catch (...) {
-        std::cerr << "libprocess: " << process->pid
-                  << " terminating due to unknown exception" << std::endl;
-        terminate = true;
+        LOG(FATAL) << "Aborting libprocess: '" << process->pid << "'"
+                   << " threw unknown exception";
       }
 
       delete event;
-
-      if (terminate) {
-        cleanup(process);
-      }
     }
   }
 
-  // TODO(benh): If `terminate` was set to true when we initialized
-  // then we'll never actually cleanup! This bug has been here a long
-  // time!!!
+  // Clear the reference before we cleanup!
+  reference = ProcessReference();
+
+  if (terminate) {
+    cleanup(process);
+  }
 
   __process__ = nullptr;
+
+  // Need to delete the process _after_ we've set `__process__` back
+  // to `nullptr` otherwise during destruction we might execute code
+  // that uses/dereferences `__process__` erroneously.
+  if (terminate && manage) {
+    delete process;
+  }
 }
 
 
 void ProcessManager::cleanup(ProcessBase* process)
 {
-  VLOG(2) << "Cleaning up " << process->pid;
+  VLOG(3) << "Cleaning up " << process->pid;
+
+  // Invariant today is that all processes must be initialized and
+  // have their state transition to READY before being terminated.
+  CHECK(process->state.load() == ProcessBase::State::READY);
 
   // First, set the terminating state so no more events will get
   // enqueued and then decomission the event queue which will also
@@ -3414,7 +3054,7 @@ void ProcessManager::cleanup(ProcessBase* process)
   // Remove help strings for all installed routes for this process.
   dispatch(help, &Help::remove, process->pid.id);
 
-  // Possible gate non-libprocess threads are waiting at.
+    // Possible gate non-libprocess threads are waiting at.
   std::shared_ptr<Gate> gate = process->gate;
 
   // Remove process.
@@ -3439,36 +3079,37 @@ void ProcessManager::cleanup(ProcessBase* process)
     // Note that we don't remove the process from the clock during
     // cleanup, but rather the clock is reset for a process when it is
     // created (see ProcessBase::ProcessBase). We do this so that
-    // SocketManager::exited can access the current time of the
+    // `SocketManager::exited()` can access the current time of the
     // process to "order" exited events. TODO(benh): It might make
     // sense to consider storing the time of the process as a field of
-    // the class instead.
+    // the class instead. It probably also makes sense to pass the
+    // time to `SocketManager::exited()` rather than expect it to call
+    // into the clock.
 
     // Now we tell the socket manager about this process exiting so
     // that it can create exited events for linked processes. We
     // _must_ do this while synchronized on processes because
     // otherwise another process could attempt to link this process
-    // and SocketManager::link would see that the processes doesn't
-    // exist when it attempts to get a ProcessReference (since we
-    // removed the process above) thus causing an exited event, which
-    // could cause the process to get deleted (e.g., the garbage
-    // collector might link _after_ the process has already been
-    // removed from processes thus getting an exited event but we
-    // don't want that exited event to fire and actually delete the
-    // process until after we have used the process in
-    // SocketManager::exited).
+    // and `SocketManager::link()` would see that the processes
+    // doesn't exist when it attempts to get a `ProcessReference`
+    // (since we removed the process above) thus causing an exited
+    // event, which could cause the process to get deleted if someone
+    // is not properly doing a `wait()` but just waiting for exited
+    // events.
     socket_manager->exited(process);
 
     // ***************************************************************
-    // At this point we can no longer dereference the process since it
-    // might already be deallocated (e.g., by the garbage collector).
+    // At this point we should avoid dereferencing `process` since it
+    // might already be deallocated if some code is treating exited
+    // events (which were just sent above) as an indication that
+    // `process` has terminated _instead_ of calling `wait()` which
+    // will only return _after_ we open the gate below.
     // ***************************************************************
 
-    // Note that we need to open the gate while synchronized on
-    // processes because otherwise we might _open_ the gate before
-    // another thread _approaches_ the gate causing that thread to
-    // wait on _arrival_ to the gate forever (see
-    // ProcessManager::wait).
+    // Note that we need to open the gate within `synchronized
+    // (processes_mutex)` so that there is a happens-before
+    // relationship with respect to a process terminating and another
+    // process starting with the same `UPID`.
     CHECK(gate);
     gate->open();
   }
@@ -3560,7 +3201,7 @@ bool ProcessManager::wait(const UPID& pid)
   }
 
   if (process != nullptr) {
-    VLOG(2) << "Donating thread to " << process->pid << " while waiting";
+    VLOG(3) << "Donating thread to " << process->pid << " while waiting";
     ProcessBase* donator = __process__;
     resume(process);
     running.fetch_sub(1);
@@ -3783,7 +3424,11 @@ ProcessBase::ProcessBase(const string& id)
 }
 
 
-ProcessBase::~ProcessBase() {}
+ProcessBase::~ProcessBase()
+{
+  CHECK(state.load() == ProcessBase::State::BOTTOM ||
+        state.load() == ProcessBase::State::TERMINATING);
+}
 
 
 template <>
@@ -3882,31 +3527,33 @@ void ProcessBase::send(
     const char* data,
     size_t length)
 {
-  if (!to) {
-    return;
-  }
+  send(to, string(name), string(data, length));
+}
 
-  // Encode and transport outgoing message.
-  transport(pid, to, name, data, length, this);
+
+void ProcessBase::send(
+    const UPID& to,
+    string&& name)
+{
+  send(to, std::move(name), string());
 }
 
 
 void ProcessBase::send(
     const UPID& to,
     string&& name,
-    const char* data,
-    size_t length)
+    string&& data)
 {
   if (!to) {
     return;
   }
 
   // Encode and transport outgoing message.
-  transport(pid, to, std::move(name), data, length, this);
+  transport(pid, to, std::move(name), std::move(data), this);
 }
 
 
-void ProcessBase::visit(const MessageEvent& event)
+void ProcessBase::consume(MessageEvent&& event)
 {
   if (handlers.message.count(event.message.name) > 0) {
     handlers.message[event.message.name](
@@ -3922,13 +3569,13 @@ void ProcessBase::visit(const MessageEvent& event)
 }
 
 
-void ProcessBase::visit(const DispatchEvent& event)
+void ProcessBase::consume(DispatchEvent&& event)
 {
-  (*event.f)(this);
+  std::move(*event.f)(this);
 }
 
 
-void ProcessBase::visit(const HttpEvent& event)
+void ProcessBase::consume(HttpEvent&& event)
 {
   VLOG(1) << "Handling HTTP event for process '" << pid.id << "'"
           << " with path: '" << event.request->url.path << "'";
@@ -3958,6 +3605,11 @@ void ProcessBase::visit(const HttpEvent& event)
       event.request->url.path, "/" + tokens[0], strings::PREFIX);
   name = strings::trim(name, strings::PREFIX, "/");
 
+  // Normalize the name by trimming the trailing '/'. We enforce that requests
+  // to ".../path/" are resolved with the ".../path" route. The trailing slash
+  // is stripped here in order to accomplish this.
+  name = strings::trim(name, strings::SUFFIX, "/");
+
   // Look for an endpoint handler for this path. We begin with the full path,
   // but if no handler is found and the path is nested, we shorten it and look
   // again. For example: if the request is for '/a/b/c' and no handler is found,
@@ -3978,10 +3630,10 @@ void ProcessBase::visit(const HttpEvent& event)
       response = convert(std::move(request))
         .then(defer(self(), [this, endpoint, name](
             const Owned<Request>& request) {
-          return _visit(endpoint, name, request);
+          return _consume(endpoint, name, request);
         }));
     } else {
-      response = _visit(endpoint, name, request);
+      response = _consume(endpoint, name, request);
     }
 
     response
@@ -4039,7 +3691,7 @@ void ProcessBase::visit(const HttpEvent& event)
 }
 
 
-Future<Response> ProcessBase::_visit(
+Future<Response> ProcessBase::_consume(
     const HttpEndpoint& endpoint,
     const string& name,
     const Owned<Request>& request)
@@ -4050,6 +3702,10 @@ Future<Response> ProcessBase::_visit(
     authentication = authenticator_manager->authenticate(
         *request, endpoint.realm.get());
   }
+
+  // TODO(bmahler): This is an interim check to diagnose MESOS-8687.
+  CHECK(handlers.httpSequence.get() != nullptr)
+    << "PID '" << pid << "' with endpoint name '" << name << "'";
 
   // Sequence the authentication future to ensure the handlers
   // are invoked in the same order that requests arrive.
@@ -4076,25 +3732,43 @@ Future<Response> ProcessBase::_visit(
         principal = authentication->principal;
       }
 
-      // The result of a call to an authorization callback.
-      Future<bool> authorization;
+      // Look for an authorization callback installed for this endpoint.
+      //
+      // NOTE: we use double-checked locking here to avoid
+      // head-of-line blocking that occurs when the first thread
+      // attempts to check for authorization callbacks.
+      //
+      // TODO(bmahler): Consider a read/write lock in addition to
+      // double checked locking. Since we expect the callbacks to
+      // be set in production, it would be ideal to avoid locking
+      // altogether. This would be possible if authorization
+      // callbacks were bound to the lifetime of libprocess
+      // initialization and finalization.
+      //
+      // TODO(benh): Consider optimizing this further to not be
+      // sequentially consistent. For more details see:
+      // http://preshing.com/20130930/double-checked-locking-is-fixed-in-cpp11.
+      Future<bool> authorization = true;
 
-      // Look for an authorization callback installed for this endpoint path.
-      // If none is found, use a trivial one.
-      const string callback_path = path::join("/" + pid.id, name);
-      if (authorization_callbacks != nullptr &&
-          authorization_callbacks->count(callback_path) > 0) {
-        authorization = authorization_callbacks->at(callback_path)(
-            *request, principal);
+      if (authorization_callbacks.load() != nullptr) {
+        const string callback_path = path::join("/" + pid.id, name);
 
-        // Sequence the authorization future to ensure the handlers
-        // are invoked in the same order that requests arrive.
-        authorization = handlers.httpSequence->add<bool>(
-            [authorization]() { return authorization; });
-      } else {
-        authorization = handlers.httpSequence->add<bool>(
-            []() { return true; });
+        synchronized (authorization_callbacks_mutex) {
+          AuthorizationCallbacks* callbacks = authorization_callbacks.load();
+
+          if (callbacks != nullptr) {
+            auto callback = callbacks->find(callback_path);
+            if (callback != callbacks->end()) {
+              authorization = (callback->second)(*request, principal);
+            }
+          }
+        }
       }
+
+      // Sequence the authorization future to ensure the handlers
+      // are invoked in the same order that requests arrive.
+      authorization = handlers.httpSequence->add<bool>(
+          [authorization]() { return authorization; });
 
       // Install a callback on the authorization result.
       return authorization
@@ -4117,13 +3791,13 @@ Future<Response> ProcessBase::_visit(
 }
 
 
-void ProcessBase::visit(const ExitedEvent& event)
+void ProcessBase::consume(ExitedEvent&& event)
 {
   exited(event.pid);
 }
 
 
-void ProcessBase::visit(const TerminateEvent& event)
+void ProcessBase::consume(TerminateEvent&& event)
 {
   finalize();
 }
@@ -4150,6 +3824,10 @@ void ProcessBase::route(
   // Routes must start with '/'.
   CHECK(name.find('/') == 0);
 
+  // To avoid ambiguity between "/path" and "/path/" we disallow the latter.
+  CHECK(name.size() == 1 || name.back() != '/')
+    << "Routes must not end with '/'" << ": " << name;
+
   HttpEndpoint endpoint;
   endpoint.handler = handler;
   endpoint.options = options;
@@ -4169,6 +3847,10 @@ void ProcessBase::route(
 {
   // Routes must start with '/'.
   CHECK(name.find('/') == 0);
+
+  // To avoid ambiguity between "/path" and "/path/" we disallow the latter.
+  CHECK(name.size() == 1 || name.back() != '/')
+    << "Routes must not end with '/'" << ": " << name;
 
   HttpEndpoint endpoint;
   endpoint.realm = realm;
@@ -4275,8 +3957,8 @@ bool wait(const UPID& pid, const Duration& duration)
   // This could result in a deadlock if some code decides to wait on a
   // process that has invoked that code!
   if (__process__ != nullptr && __process__->self() == pid) {
-    std::cerr << "\n**** DEADLOCK DETECTED! ****\nYou are waiting on process "
-              << pid << " that it is currently executing." << std::endl;
+    LOG(ERROR) << "\n**** DEADLOCK DETECTED! ****\nYou are waiting on process "
+               << pid << " that it is currently executing.";
   }
 
   if (duration == Seconds(-1)) {
@@ -4348,12 +4030,12 @@ namespace internal {
 
 void dispatch(
     const UPID& pid,
-    const std::shared_ptr<lambda::function<void(ProcessBase*)>>& f,
+    std::unique_ptr<lambda::CallableOnce<void(ProcessBase*)>> f,
     const Option<const std::type_info*>& functionType)
 {
   process::initialize();
 
-  DispatchEvent* event = new DispatchEvent(pid, f, functionType);
+  DispatchEvent* event = new DispatchEvent(pid, std::move(f), functionType);
   process_manager->deliver(pid, event, __process__);
 }
 

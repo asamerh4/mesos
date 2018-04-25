@@ -44,6 +44,7 @@ using std::string;
 
 const unsigned int init_pid =
 #ifdef __WINDOWS__
+    // NOTE: This is also known as the System Idle Process.
     0;
 #else
     1;
@@ -77,26 +78,26 @@ TEST_F(ProcessTest, Process)
   const Result<Process> process = os::process(getpid());
 
   ASSERT_SOME(process);
-  EXPECT_EQ(getpid(), process.get().pid);
-  EXPECT_EQ(getppid(), process.get().parent);
-  ASSERT_SOME(process.get().session);
+  EXPECT_EQ(getpid(), process->pid);
+  EXPECT_EQ(getppid(), process->parent);
+  ASSERT_SOME(process->session);
 
 #ifndef __WINDOWS__
   // NOTE: `getsid` does not have a meaningful interpretation on Windows.
-  EXPECT_EQ(getsid(0), process.get().session.get());
+  EXPECT_EQ(getsid(0), process->session.get());
 #endif // __WINDOWS__
 
-  ASSERT_SOME(process.get().rss);
-  EXPECT_GT(process.get().rss.get(), 0);
+  ASSERT_SOME(process->rss);
+  EXPECT_GT(process->rss.get(), 0);
 
   // NOTE: On Linux /proc is a bit slow to update the CPU times,
   // hence we allow 0 in this test.
-  ASSERT_SOME(process.get().utime);
-  EXPECT_GE(process.get().utime.get(), Nanoseconds(0));
-  ASSERT_SOME(process.get().stime);
-  EXPECT_GE(process.get().stime.get(), Nanoseconds(0));
+  ASSERT_SOME(process->utime);
+  EXPECT_GE(process->utime.get(), Nanoseconds(0));
+  ASSERT_SOME(process->stime);
+  EXPECT_GE(process->stime.get(), Nanoseconds(0));
 
-  EXPECT_FALSE(process.get().command.empty());
+  EXPECT_FALSE(process->command.empty());
 
   // Assert invalid PID returns `None`.
   Result<Process> invalid_process = os::process(-1);
@@ -105,8 +106,9 @@ TEST_F(ProcessTest, Process)
   // Assert init.
   Result<Process> init_process = os::process(init_pid);
 #ifdef __WINDOWS__
-  // NOTE: On Windows, inspecting other processes usually requires privileges.
-  // So we expect it to error out instead of succeed, unlike the POSIX version.
+  // NOTE: On Windows, the init process is a pseudo-process, and it is not
+  // possible to get a handle to it. So we expect it to error out instead of
+  // succeed, unlike the POSIX version.
   EXPECT_ERROR(init_process);
 #elif __FreeBSD__
   // In a FreeBSD jail, we wont find an init process.
@@ -126,7 +128,7 @@ TEST_F(ProcessTest, Processes)
   const Try<list<Process>> processes = os::processes();
 
   ASSERT_SOME(processes);
-  ASSERT_GT(processes.get().size(), 2u);
+  ASSERT_GT(processes->size(), 2u);
 
   // Look for ourselves in the table.
   bool found = false;
@@ -167,13 +169,20 @@ TEST_F(ProcessTest, Pids)
   Try<set<pid_t>> pids = os::pids();
   ASSERT_SOME(pids);
   EXPECT_FALSE(pids->empty());
-  EXPECT_EQ(1u, pids.get().count(getpid()));
+  EXPECT_EQ(1u, pids->count(getpid()));
 
   // In a FreeBSD jail, pid 1 may not exist.
 #ifdef __FreeBSD__
   if (!isJailed()) {
 #endif
-    EXPECT_EQ(1u, pids.get().count(init_pid));
+#ifdef __WINDOWS__
+    // On Windows, we explicitly do not return the PID of the System Idle
+    // Process, because doing so can cause unexpected bugs.
+    EXPECT_EQ(0u, pids.get().count(init_pid));
+#else
+    // Elsewhere we always expect exactly 1 init PID.
+    EXPECT_EQ(1u, pids->count(init_pid));
+#endif
 #ifdef __FreeBSD__
   }
 #endif
@@ -182,8 +191,8 @@ TEST_F(ProcessTest, Pids)
   // NOTE: `getpgid` does not have a meaningful interpretation on Windows.
   pids = os::pids(getpgid(0), None());
   EXPECT_SOME(pids);
-  EXPECT_GE(pids.get().size(), 1u);
-  EXPECT_EQ(1u, pids.get().count(getpid()));
+  EXPECT_GE(pids->size(), 1u);
+  EXPECT_EQ(1u, pids->count(getpid()));
 
   // NOTE: This test is not meaningful on Windows because process IDs are
   // expected to be non-negative.
@@ -192,8 +201,8 @@ TEST_F(ProcessTest, Pids)
   // NOTE: `getsid` does not have a meaningful interpretation on Windows.
   pids = os::pids(None(), getsid(0));
   EXPECT_SOME(pids);
-  EXPECT_GE(pids.get().size(), 1u);
-  EXPECT_EQ(1u, pids.get().count(getpid()));
+  EXPECT_GE(pids->size(), 1u);
+  EXPECT_EQ(1u, pids->count(getpid()));
 
   // NOTE: This test is not meaningful on Windows because process IDs are
   // expected to be non-negative.
@@ -256,20 +265,20 @@ TEST_F(ProcessTest, Pstree)
   // might simply exec the command above (i.e., 'sleep 10') while
   // others might fork/exec the command, keeping around a 'sh -c'
   // process as well.
-  ASSERT_LE(1u, tree.get().children.size());
-  ASSERT_GE(2u, tree.get().children.size());
+  ASSERT_LE(1u, tree->children.size());
+  ASSERT_GE(2u, tree->children.size());
 
-  pid_t child = tree.get().process.pid;
-  pid_t grandchild = tree.get().children.front().process.pid;
+  pid_t child = tree->process.pid;
+  pid_t grandchild = tree->children.front().process.pid;
 
   // Now check pstree again.
   tree = os::pstree(child);
 
   ASSERT_SOME(tree);
-  EXPECT_EQ(child, tree.get().process.pid);
+  EXPECT_EQ(child, tree->process.pid);
 
-  ASSERT_LE(1u, tree.get().children.size());
-  ASSERT_GE(2u, tree.get().children.size());
+  ASSERT_LE(1u, tree->children.size());
+  ASSERT_GE(2u, tree->children.size());
 
   // Cleanup by killing the descendant processes.
   EXPECT_EQ(0, kill(grandchild, SIGKILL));

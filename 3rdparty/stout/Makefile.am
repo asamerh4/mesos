@@ -64,11 +64,8 @@ BUNDLED_DEPS = # Initialize BUNDLED_DEPS so we can add to it.
 %-stamp:
 	@cd $(BUNDLED_DIR) && $(MAKE) $(AM_MAKEFLAGS) $(@:$(BUNDLED_DIR)/%=%)
 
-# We use "-isystem" instead of "-I" to add Boost to the include search
-# path. This disables compiler warnings inside Boost headers since we
-# can't easily fix them. See MESOS-3799.
 if WITH_BUNDLED_BOOST
-BOOST_INCLUDE_FLAGS = -isystem $(BOOST)
+BOOST_INCLUDE_FLAGS = -I$(BOOST)
 BUNDLED_DEPS += $(BOOST)-stamp
 endif
 
@@ -119,8 +116,8 @@ endif
 PROTOCFLAGS = -I$(srcdir)/tests
 
 # Targets for generating C++ protocol buffer code.
-protobuf_tests.pb.cc protobuf_tests.pb.h: tests/protobuf_tests.proto
-	$(PROTOC) $(PROTOCFLAGS) --cpp_out=$(builddir) $^
+%.pb.cc %.pb.h: tests/%.proto $(BUNDLED_DEPS)
+	$(PROTOC) $(PROTOCFLAGS) --cpp_out=$(builddir) $<
 
 # Tests for stout.
 check_PROGRAMS = stout-tests
@@ -132,6 +129,7 @@ stout_tests_SOURCES =			\
   tests/boundedhashmap_tests.cpp	\
   tests/bytes_tests.cpp			\
   tests/cache_tests.cpp			\
+  tests/cpp17_tests.cpp			\
   tests/duration_tests.cpp		\
   tests/dynamiclibrary_tests.cpp	\
   tests/error_tests.cpp			\
@@ -152,6 +150,7 @@ stout_tests_SOURCES =			\
   tests/numify_tests.cpp		\
   tests/option_tests.cpp		\
   tests/os_tests.cpp			\
+  tests/os/copyfile_tests.cpp		\
   tests/os/env_tests.cpp		\
   tests/os/filesystem_tests.cpp		\
   tests/os/process_tests.cpp		\
@@ -171,6 +170,7 @@ stout_tests_SOURCES =			\
   tests/subcommand_tests.cpp		\
   tests/svn_tests.cpp			\
   tests/try_tests.cpp			\
+  tests/uri_tests.cpp			\
   tests/uuid_tests.cpp			\
   tests/variant_tests.cpp		\
   tests/version_tests.cpp
@@ -211,15 +211,18 @@ endif
 
 BUILT_SOURCES = $(BUNDLED_DEPS)
 
-BUILT_SOURCES +=			\
-  protobuf_tests.pb.cc
-
-nodist_stout_tests_SOURCES =		\
-  protobuf_tests.pb.cc
-
-CLEANFILES =				\
+PROTOBUF_TESTS_PROTOS =			\
   protobuf_tests.pb.cc			\
   protobuf_tests.pb.h
+
+BUILT_SOURCES +=			\
+  $(PROTOBUF_TESTS_PROTOS)
+
+nodist_stout_tests_SOURCES =		\
+  $(PROTOBUF_TESTS_PROTOS)
+
+CLEANFILES =				\
+  $(PROTOBUF_TESTS_PROTOS)
 
 # We use a check-local target for now to avoid the parallel test
 # runner that ships with newer versions of autotools.

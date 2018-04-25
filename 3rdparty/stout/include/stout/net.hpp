@@ -48,6 +48,7 @@
 #include <string>
 
 #include <stout/bytes.hpp>
+#include <stout/duration.hpp>
 #include <stout/error.hpp>
 #include <stout/ip.hpp>
 #include <stout/option.hpp>
@@ -135,8 +136,12 @@ inline Try<Bytes> contentLength(const std::string& url)
 
 // Returns the HTTP response code resulting from attempting to
 // download the specified HTTP or FTP URL into a file at the specified
-// path.
-inline Try<int> download(const std::string& url, const std::string& path)
+// path. The `stall_timeout` parameter controls how long the download
+// waits before aborting when the download speed keeps below 1 byte/sec.
+inline Try<int> download(
+    const std::string& url,
+    const std::string& path,
+    const Option<Duration>& stall_timeout = None())
 {
   initialize();
 
@@ -164,7 +169,8 @@ inline Try<int> download(const std::string& url, const std::string& path)
   // We don't bother introducing a `os::fdopen` since this is the only place
   // we use `fdopen` in the entire codebase as of writing this comment.
 #ifdef __WINDOWS__
-  FILE* file = ::_fdopen(fd->crt(), "w");
+  // We open in "binary" mode on Windows to avoid line-ending translation.
+  FILE* file = ::_fdopen(fd->crt(), "wb");
 #else
   FILE* file = ::fdopen(fd.get(), "w");
 #endif
@@ -174,6 +180,16 @@ inline Try<int> download(const std::string& url, const std::string& path)
     return ErrnoError("Failed to open file handle of '" + path + "'");
   }
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
+
+  if (stall_timeout.isSome()) {
+    // Set the options to abort the download if the speed keeps below
+    // 1 byte/sec during the timeout. See:
+    // https://curl.haxx.se/libcurl/c/CURLOPT_LOW_SPEED_LIMIT.html
+    // https://curl.haxx.se/libcurl/c/CURLOPT_LOW_SPEED_TIME.html
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(
+        curl, CURLOPT_LOW_SPEED_TIME, static_cast<long>(stall_timeout->secs()));
+  }
 
   CURLcode curlErrorCode = curl_easy_perform(curl);
   if (curlErrorCode != 0) {

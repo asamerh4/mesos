@@ -74,6 +74,50 @@ struct TaskState;
 Try<State> recover(const std::string& rootDir, bool strict);
 
 
+// Reads the protobuf message(s) from the given path.
+// `T` may be either a single protobuf message or a sequence of messages
+// if `T` is a specialization of `google::protobuf::RepeatedPtrField`.
+template <typename T>
+Result<T> read(const std::string& path)
+{
+  Result<T> result = ::protobuf::read<T>(path);
+  if (result.isSome()) {
+    upgradeResources(&result.get());
+  }
+
+  return result;
+}
+
+
+// While we return a `Result<string>` here in order to keep the return
+// type of `state::read` consistent, the `None` case does not arise here.
+// That is, an empty file will result in an empty string, rather than
+// the `Result` ending up in a `None` state.
+template <>
+inline Result<std::string> read<std::string>(const std::string& path)
+{
+  return os::read(path);
+}
+
+
+template <>
+inline Result<Resources> read<Resources>(const std::string& path)
+{
+  Result<google::protobuf::RepeatedPtrField<Resource>> resources =
+    read<google::protobuf::RepeatedPtrField<Resource>>(path);
+
+  if (resources.isError()) {
+    return Error(resources.error());
+  }
+
+  if (resources.isNone()) {
+    return None();
+  }
+
+  return std::move(resources.get());
+}
+
+
 namespace internal {
 
 inline Try<Nothing> checkpoint(
@@ -84,36 +128,49 @@ inline Try<Nothing> checkpoint(
 }
 
 
-inline Try<Nothing> checkpoint(
-    const std::string& path,
-    const google::protobuf::Message& message)
+template <
+    typename T,
+    typename std::enable_if<
+        std::is_convertible<T*, google::protobuf::Message*>::value,
+        int>::type = 0>
+inline Try<Nothing> checkpoint(const std::string& path, T message)
 {
+  // If the `Try` from `downgradeResources` returns an `Error`, we currently
+  // continue to checkpoint the resources in a partially downgraded state.
+  // This implies that an agent with refined reservations cannot be downgraded
+  // to versions before reservation refinement support, which was introduced
+  // in 1.4.0.
+  //
+  // TODO(mpark): Do something smarter with the result once
+  // something like an agent recovery capability is introduced.
+  downgradeResources(&message);
   return ::protobuf::write(path, message);
 }
 
 
-template <typename T>
-Try<Nothing> checkpoint(
+inline Try<Nothing> checkpoint(
     const std::string& path,
-    const google::protobuf::RepeatedPtrField<T>& messages)
+    google::protobuf::RepeatedPtrField<Resource> resources)
 {
-  return ::protobuf::write(path, messages);
+  // If the `Try` from `downgradeResources` returns an `Error`, we currently
+  // continue to checkpoint the resources in a partially downgraded state.
+  // This implies that an agent with refined reservations cannot be downgraded
+  // to versions before reservation refinement support, which was introduced
+  // in 1.4.0.
+  //
+  // TODO(mpark): Do something smarter with the result once
+  // something like an agent recovery capability is introduced.
+  downgradeResources(&resources);
+  return ::protobuf::write(path, resources);
 }
 
 
 inline Try<Nothing> checkpoint(
     const std::string& path,
-    const Resources& resources_)
+    const Resources& resources)
 {
-  google::protobuf::RepeatedPtrField<Resource> resources = resources_;
-
-  // We ignore the `Try` from `downgradeResources` here because for now,
-  // we checkpoint the result either way.
-  // TODO(mpark): Do something smarter with the result once something like
-  // an agent recovery capability is introduced.
-  downgradeResources(&resources);
-
-  return checkpoint(path, resources);
+  const google::protobuf::RepeatedPtrField<Resource>& messages = resources;
+  return checkpoint(path, messages);
 }
 
 }  // namespace internal {
@@ -199,7 +256,7 @@ struct TaskState
   TaskID id;
   Option<Task> info;
   std::vector<StatusUpdate> updates;
-  hashset<UUID> acks;
+  hashset<id::UUID> acks;
   unsigned int errors;
 };
 
@@ -280,11 +337,6 @@ struct ResourcesState
   static Try<ResourcesState> recover(
       const std::string& rootDir,
       bool strict);
-
-  static Try<Resources> recoverResources(
-      const std::string& path,
-      bool strict,
-      unsigned int& errors);
 
   Resources resources;
   Option<Resources> target;

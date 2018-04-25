@@ -14,21 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+include(CMakePushCheckState)
+
 # GENERAL OPTIONS.
 ##################
-option(VERBOSE "Enable verbose CMake statements and compilation output" ON)
+option(VERBOSE
+  "Enable verbose CMake statements and compilation output."
+  TRUE)
 set(CMAKE_VERBOSE_MAKEFILE ${VERBOSE})
 
 if (NOT WIN32)
-  set(DEFAULT_BUILD_SHARED_LIBS ON)
+  set(DEFAULT_BUILD_SHARED_LIBS TRUE)
 else ()
-  set(DEFAULT_BUILD_SHARED_LIBS OFF)
+  set(DEFAULT_BUILD_SHARED_LIBS FALSE)
 endif ()
 
-option(BUILD_SHARED_LIBS "Build shared libraries." ${DEFAULT_BUILD_SHARED_LIBS})
+option(BUILD_SHARED_LIBS
+  "Build shared libraries."
+  ${DEFAULT_BUILD_SHARED_LIBS})
 
 option(ENABLE_PRECOMPILED_HEADERS
-  "Enable auto-generated precompiled headers using cotire" ${WIN32})
+  "Enable auto-generated precompiled headers using cotire"
+  ${WIN32})
 
 if (NOT WIN32 AND ENABLE_PRECOMPILED_HEADERS)
   message(
@@ -45,7 +52,7 @@ if (ENABLE_PRECOMPILED_HEADERS)
   set(COTIRE_VERBOSE ${VERBOSE})
 endif ()
 
-if (WIN32)
+if (CMAKE_GENERATOR MATCHES "Visual Studio")
   # In MSVC 1900, there are two bugs in the linker, one that causes linking
   # libmesos to occasionally take hours, and one that causes us to be able to
   # fail to open the `mesos-x.lib` file. These have been confirmed as bugs with
@@ -55,8 +62,7 @@ if (WIN32)
     message(
       FATAL_ERROR
       "The x64 toolset MUST be used. See MESOS-6720 for details. "
-      "Please use `cmake -T ${PREFERRED_TOOLSET}`."
-  )
+      "Please use `cmake -T ${PREFERRED_TOOLSET}`.")
   endif ()
 endif ()
 
@@ -65,35 +71,116 @@ endif ()
 ###################
 option(
   REBUNDLED
-  "Use dependencies from the 3rdparty folder (instead of internet)"
+  "Use dependencies from the 3rdparty folder (instead of internet)."
   TRUE)
 
 option(
+  ENABLE_GRPC
+  "Build libprocess with gRPC support."
+  FALSE)
+
+option(
   ENABLE_LIBEVENT
-  "Use libevent instead of libev as the core event loop implementation"
+  "Use libevent instead of libev as the core event loop implementation."
   FALSE)
 
 option(
   ENABLE_SSL
-  "Build libprocess with SSL support"
+  "Build libprocess with SSL support."
   FALSE)
 
 option(
   ENABLE_LOCK_FREE_RUN_QUEUE
-  "Build libprocess with lock free run queue"
+  "Build libprocess with lock free run queue."
   FALSE)
 
 option(
-  HAS_AUTHENTICATION
-  "Build Mesos against authentication libraries"
-  TRUE)
+  ENABLE_LOCK_FREE_EVENT_QUEUE
+  "Build libprocess with lock free event queue."
+  FALSE)
 
-if (WIN32 AND HAS_AUTHENTICATION)
-  message(
-    FATAL_ERROR
-    "Windows builds of Mesos currently do not support agent to master "
-    "authentication. To build without this capability, pass "
-    "`-DHAS_AUTHENTICATION=0` as an argument when you run CMake.")
+option(
+  ENABLE_LAST_IN_FIRST_OUT_FIXED_SIZE_SEMAPHORE
+  "Build libprocess with LIFO fixed size semaphore."
+  FALSE)
+
+option(
+  ENABLE_NEW_CLI
+  "Build the new CLI instead of the old one."
+  FALSE)
+
+if (ENABLE_NEW_CLI)
+  find_package(PythonInterp)
+  find_package(PythonLibs)
+
+  if (NOT PYTHON_LIBRARY)
+    message(
+      FATAL_ERROR
+      "Python not found.\n"
+      "The new CLI requires Python version 2.6 or 2.7 in order to build.\n"
+      "Your Python version is ${PYTHONLIBS_VERSION_STRING}.\n"
+      "You may wish to set the PYTHON environment variable to an "
+      "appropriate value if Python is not installed in your PATH.")
+  endif ()
+
+  if (${PYTHONLIBS_VERSION_STRING} VERSION_LESS "2.6.0")
+    message(
+      FATAL_ERROR
+      "Python version too old.\n"
+      "The new CLI requires Python version 2.6 or 2.7 in order to build.\n"
+      "Your Python version is ${PYTHONLIBS_VERSION_STRING}.\n"
+      "You may wish to set the PYTHON environment variable to an "
+      "appropriate value to assure the right Python executable is found.")
+  endif ()
+
+  if (${PYTHONLIBS_VERSION_STRING} VERSION_EQUAL "3.0.0" OR
+      ${PYTHONLIBS_VERSION_STRING} VERSION_GREATER "3.0.0")
+    message(
+      FATAL_ERROR
+      "Python version too new.\n"
+      "The new CLI requires Python version 2.6 or 2.7 in order to build.\n"
+      "Your Python version is ${PYTHONLIBS_VERSION_STRING}.\n"
+      "You may wish to set the PYTHON environment variable to an "
+      "appropriate value to assure the right Python executable is found.")
+  endif ()
+
+  find_program(VIRTUALENV virtualenv)
+  if (NOT VIRTUALENV)
+    message(
+      FATAL_ERROR
+      "Cannot find virtualenv.\n"
+      "The new CLI requires 'virtualenv' be installed as part of your "
+      "Python ${PYTHONLIBS_VERSION_STRING} installation.\n"
+      "You may wish to install it via 'pip install virtualenv'.")
+  endif ()
+endif ()
+
+option(
+  ENABLE_JAVA
+  "Build Java components. Warning: this is SLOW."
+  FALSE)
+
+if (ENABLE_JAVA)
+  include(FindJava)
+  find_package(Java COMPONENTS Development)
+
+  if (NOT JAVA_FOUND)
+    message(FATAL_ERROR "Java was not found!")
+  endif ()
+
+  include(FindJNI)
+  if (NOT JNI_FOUND)
+    message(FATAL_ERROR "JNI Java libraries were not found!")
+  endif ()
+
+  find_program(MVN mvn)
+  if (NOT MVN)
+    message(FATAL_ERROR "Maven was not found!")
+  endif ()
+
+  if (Java_FOUND AND JNI_FOUND AND MVN)
+    set(HAS_JAVA TRUE)
+  endif ()
 endif ()
 
 # If 'REBUNDLED' is set to FALSE, this will cause Mesos to build against the
@@ -101,7 +188,7 @@ endif ()
 # builds, because building on MSVC 1900 requires newer versions of some
 # dependencies than the ones bundled in the Mesos repository.
 set(
-  3RDPARTY_DEPENDENCIES "https://github.com/3rdparty/mesos-3rdparty/raw/master"
+  3RDPARTY_DEPENDENCIES "https://github.com/mesos/3rdparty/raw/master"
   CACHE STRING
     "URL or filesystem path with a fork of the canonical 3rdparty repository")
 
@@ -109,13 +196,10 @@ if (WIN32 AND REBUNDLED)
   message(
     WARNING
     "On Windows, the required versions of:\n"
-    "  * ZooKeeper\n"
-    "  * protobuf\n"
-    "  * glog\n"
-    "  * libevent\n"
     "  * curl\n"
-    "  * libapr\n"
+    "  * apr\n"
     "  * zlib\n"
+    "  * glog\n"
     "do not come rebundled in the Mesos repository.  They will be downloaded from "
     "the Internet, even though the `REBUNDLED` flag was set.")
 endif ()
@@ -137,6 +221,13 @@ endif ()
 
 # SYSTEM CHECKS.
 ################
+
+# Set the default standard to C++11 for all targets.
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Do not use, for example, `-std=gnu++11`.
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # Check that we are targeting a 64-bit architecture.
 if (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
   message(
@@ -151,12 +242,6 @@ if (NOT (CMAKE_SIZEOF_VOID_P EQUAL 8))
     "    `cmake -DCMAKE_OSX_ARCHITECTURES=x86_64`.\n")
 endif ()
 
-# Make sure C++ 11 features we need are supported.
-# This is split into two cases: Windows and "other platforms".
-#   * For "other platforms", we simply check if the C++11 flags work
-#   * For Windows, C++11 is enabled by default on MSVC 1900.
-#     We just check the MSVC version.
-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
 if (WIN32)
   # Versions of Visual Studio older than 2017 do not support all core features
   # of C++14, which prevents Mesos from moving past C++11. This adds a
@@ -165,9 +250,8 @@ if (WIN32)
   if (NOT CMAKE_GENERATOR MATCHES ${PREFERRED_GENERATOR})
     message(
       WARNING
-      "Mesos is deprecating support for ${CMAKE_GENERATOR}. "
-      "Please use ${PREFERRED_GENERATOR}."
-  )
+      "Mesos does not officially support ${CMAKE_GENERATOR}. "
+      "Please use ${PREFERRED_GENERATOR}.")
   endif ()
 
   # We don't support compilation against mingw headers (which, e.g., Clang on
@@ -190,18 +274,51 @@ if (WIN32)
   endif ()
 endif ()
 
+# GLOBAL WARNINGS.
+##################
+if (CMAKE_CXX_COMPILER_ID MATCHES GNU
+    OR CMAKE_CXX_COMPILER_ID MATCHES Clang) # Also matches AppleClang.
+  # TODO(andschwa): Add `-Wextra`, `-Wpedantic`, `-Wconversion`.
+  add_compile_options(
+    -Wall
+    -Wsign-compare)
+elseif (CMAKE_CXX_COMPILER_ID MATCHES MSVC)
+  # TODO(andschwa): Switch to `/W4` and re-enable possible-loss-of-data warnings.
+  #
+  # The last two warnings are disabled (well, put into `/W4`) because
+  # there is no easy equivalent to enable them for GCC/Clang without
+  # also fixing all the warnings from `-Wconversion`.
+  add_compile_options(
+    # Like `-Wall`; `/W4` is more like `-Wall -Wextra`.
+    /W3
+    # Disable permissiveness.
+    /permissive-
+    # C4244 is a possible loss of data warning for integer conversions.
+    /w44244
+    # C4267 is a possible loss of data warning when converting from `size_t`.
+    /w44267)
+endif ()
+
 
 # POSIX CONFIGURATION.
 ######################
 if (NOT WIN32)
-  if (NOT COMPILER_SUPPORTS_CXX11)
-    message(
-      FATAL_ERROR
-      "The compiler ${CMAKE_CXX_COMPILER} does not support the `-std=c++11` "
-      "flag. Please use a different C++ compiler.")
-  endif ()
+  # Warn about use of format functions that can produce security issues.
+  add_compile_options(-Wformat-security)
 
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+  # Protect many of the functions with stack guards. The exact flag
+  # depends on compiler support.
+  CHECK_CXX_COMPILER_FLAG(-fstack-protector-strong STRONG_STACK_PROTECTORS)
+  CHECK_CXX_COMPILER_FLAG(-fstack-protector STACK_PROTECTORS)
+  if (STRONG_STACK_PROTECTORS)
+    add_compile_options(-fstack-protector-strong)
+  elseif (STACK_PROTECTORS)
+    add_compile_options(-fstack-protector)
+  else ()
+    message(
+      WARNING
+      "The compiler ${CMAKE_CXX_COMPILER} cannot apply stack protectors.")
+  endif ()
 
   # Directory structure for some build artifacts.
   # This is defined for use in tests.
@@ -214,57 +331,107 @@ if (NOT WIN32)
   set(LIB_INSTALL_DIR         ${EXEC_INSTALL_PREFIX}/libmesos)
 endif ()
 
+option(ENABLE_GC_UNUSED
+  "Enable garbage collection of unused program segments"
+  FALSE)
+
+if (ENABLE_GC_UNUSED)
+  CMAKE_PUSH_CHECK_STATE()
+
+  set(CMAKE_REQUIRED_FLAGS "-ffunction-sections -fdata-sections -Wl,--gc-sections")
+  CHECK_CXX_COMPILER_FLAG("" GC_FUNCTION_SECTIONS)
+  if (GC_FUNCTION_SECTIONS)
+    add_compile_options(-ffunction-sections -fdata-sections)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--gc-sections")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--gc-sections")
+  else ()
+    message(
+      FATAL_ERROR
+      "The compiler ${CMAKE_CXX_COMPILER} does not support the necessary options to "
+      "enable garbage collection of unused sections.")
+  endif()
+
+  CMAKE_POP_CHECK_STATE()
+endif()
 
 # LINUX CONFIGURATION.
 ######################
 string(COMPARE EQUAL ${CMAKE_SYSTEM_NAME} "Linux" LINUX)
 
+if (LINUX)
+  # We currenty only support using the bundled jemalloc on linux.
+  # While building it and linking against is actually not a problem
+  # on other platforms, to make it actually *useful* we need some
+  # additional platform-specific code in the mesos binaries that re-routes
+  # all existing malloc/free calls through jemalloc.
+  # On linux, that is not necessary because the default malloc implementation
+  # explicitly supports replacement via symbol interposition.
+  option(
+    ENABLE_JEMALLOC_ALLOCATOR
+    "Use jemalloc as memory allocator for the master and agent binaries."
+    FALSE)
+endif ()
+
+# FREEBSD CONFIGURATION.
+######################
+string(COMPARE EQUAL ${CMAKE_SYSTEM_NAME} "FreeBSD" FREEBSD)
+
+# There is a problem linking with BFD linkers when using Clang on
+# FreeBSD (MESOS-8761). CMake uses the compiler to link, and the
+# compiler uses `/usr/bin/ld` by default. On FreeBSD the default
+# compiler is Clang but the default linker is GNU ld (BFD). Since LLD
+# is available in the base system, and GOLD is available from
+# `devel/binutils`, we look for a more modern linker and tell Clang to
+# use that instead.
+#
+# TODO(dforsyth): Understand why this is failing and add a check to
+# make sure we have a compatible linker (MESOS-8765), or wait until
+# FreeBSD makes lld the default linker.
+if (${CMAKE_SYSTEM_NAME} MATCHES FreeBSD
+    AND CMAKE_CXX_COMPILER_ID MATCHES Clang)
+
+  find_program(LD_PROGRAM
+    NAMES ld.lld ld.gold)
+
+  if (NOT LD_PROGRAM)
+    message(FATAL_ERROR
+      "Please set LD_PROGRAM to a working (non-BFD) linker (MESOS-8761) to \
+      build on FreeBSD.")
+  endif ()
+
+  foreach (type EXE SHARED STATIC MODULE)
+    string(APPEND CMAKE_${type}_LINKER_FLAGS " -fuse-ld=${LD_PROGRAM}")
+  endforeach ()
+endif ()
 
 # WINDOWS CONFIGURATION.
 ########################
 if (WIN32)
-  # Speed up incremental linking for the VS compiler/linker, for more info, see:
-  # https://blogs.msdn.microsoft.com/vcblog/2014/11/12/speeding-up-the-incremental-developer-build-scenario/
-  foreach (type EXE SHARED STATIC MODULE)
-    string(APPEND CMAKE_${type}_LINKER_FLAGS_DEBUG " /debug:fastlink")
-  endforeach ()
-
   # COFF/PE and friends are somewhat limited in the number of sections they
   # allow for an object file. We use this to avoid those problems.
-  string(APPEND CMAKE_CXX_FLAGS " /bigobj -DGOOGLE_GLOG_DLL_DECL= /vd2 /permissive-")
+  add_compile_options(/bigobj /vd2)
+
+  # Fix Warning C4530: C++ exception handler used, but unwind semantics are not
+  # enabled.
+  add_compile_options(/EHsc)
 
   # Build against the multi-threaded version of the C runtime library (CRT).
   if (BUILD_SHARED_LIBS)
     message(WARNING "Building with shared libraries is a work-in-progress.")
-
-    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-
-    # Use dynamic CRT.
-    set(CRT " /MD")
-  else ()
-    # Use static CRT.
-    set(CRT " /MT")
-
-    # TODO(andschwa): Define this closer to its usage; anything that includes
-    # `curl.h` has to set this so that the declspec is correct.
-    string(APPEND CMAKE_CXX_FLAGS " -DCURL_STATICLIB")
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
   endif ()
 
-  # NOTE: We APPEND ${CRT} rather than REPLACE so it gets picked up by
-  # dependencies.
-  foreach (lang C CXX)
-    # Enable multi-threaded and UNICODE compilation.
-    # NOTE: We do not add CRT here because dependencies will use it incorrectly.
-    string(APPEND CMAKE_${lang}_FLAGS " /MP -DUNICODE -D_UNICODE")
+  if (ENABLE_SSL)
+    # NOTE: We don't care about using the debug version because OpenSSL includes
+    # an adapter. However, we prefer OpenSSL to use the multi-threaded CRT.
+    set(OPENSSL_MSVC_STATIC_RT TRUE)
+  endif ()
 
-    # Debug library for debug configuration.
-    string(APPEND CMAKE_${lang}_FLAGS_DEBUG "${CRT}d")
+  # Enable multi-threaded compilation for `cl.exe`.
+  add_compile_options(/MP)
 
-    # All other configurations.
-    foreach (config RELEASE RELWITHDEBINFO MINSIZEREL)
-      string(APPEND CMAKE_${lang}_FLAGS_${config} ${CRT})
-    endforeach ()
-  endforeach ()
+  # Force use of Unicode C and C++ Windows APIs.
+  add_definitions(-DUNICODE -D_UNICODE)
 
   # Convenience flags to simplify Windows support in C++ source; used to
   # `#ifdef` out some platform-specific parts of Mesos.  We choose to define
@@ -272,17 +439,16 @@ if (WIN32)
   # to give the build system fine-grained control over what code is #ifdef'd
   # out in the future.  Using only flags defined by our build system to control
   # this logic is the clearest and most stable way of accomplishing this.
-  list(APPEND MESOS_CPPFLAGS -D__WINDOWS__ -DHAVE_LIBZ)
+  add_definitions(-D__WINDOWS__)
 
   # Defines to disable warnings generated by Visual Studio when using
   # deprecated functions in CRT and the use of insecure functions in CRT.
   # TODO(dpravat): Once the entire codebase is changed to use secure CRT
   # functions, these defines should be removed.
-  list(APPEND MESOS_CPPFLAGS
+  add_definitions(
     -D_SCL_SECURE_NO_WARNINGS
     -D_CRT_SECURE_NO_WARNINGS
-    -D_CRT_NONSTDC_NO_WARNINGS
-    )
+    -D_CRT_NONSTDC_NO_WARNINGS)
 
   # Directory structure definitions.
   # TODO(hausdorff): (MESOS-5455) These are placeholder values.
@@ -294,60 +460,56 @@ if (WIN32)
   set(TEST_LIB_EXEC_DIR       "WARNINGDONOTUSEME")
   set(PKG_MODULE_DIR          "WARNINGDONOTUSEME")
   set(S_BIN_DIR               "WARNINGDONOTUSEME")
-
-  # Windows-specific workaround for a glog issue documented here[1].
-  # Basically, Windows.h and glog/logging.h both define ERROR. Since we don't
-  # need the Windows ERROR, we can use this flag to avoid defining it at all.
-  # Unlike the other fix (defining GLOG_NO_ABBREVIATED_SEVERITIES), this fix
-  # is guaranteed to require no changes to the original Mesos code. See also
-  # the note in the code itself[2].
-  #
-  # [1] https://google-glog.googlecode.com/svn/trunk/doc/glog.html#windows
-  # [2] https://code.google.com/p/google-glog/source/browse/trunk/src/windows/glog/logging.h?r=113
-  list(APPEND MESOS_CPPFLAGS -DNOGDI -DNOMINMAX)
 endif ()
+
 
 # GLOBAL CONFIGURATION.
 #######################
-if (HAS_AUTHENTICATION)
-  # NOTE: This conditional is required. It is not sufficient to set
-  # `-DHAS_AUTHENTICATION=${HAS_AUTHENTICATION}`, as this will define the
-  # symbol, and our intention is to only define it if the CMake variable
-  # `HAS_AUTHENTICATION` is set.
-  list(APPEND MESOS_CPPFLAGS -DHAS_AUTHENTICATION=1)
-endif ()
+# Produce position independent libraries/executables so that we take
+# better advantage of Address space layout randomization (ASLR).
+# This helps guard against ROP and return-to-libc attacks,
+# and other general exploits that rely on deterministic offsets.
+set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 
-# Enable the INT64 support for PicoJSON.
-# NOTE: PicoJson requires __STDC_FORMAT_MACROS to be defined before importing
-# 'inttypes.h'.  Since other libraries may also import this header, it must
-# be globally defined so that PicoJson has access to the macros, regardless
-# of the order of inclusion.
-list(APPEND MESOS_CPPFLAGS -DPICOJSON_USE_INT64 -D__STDC_FORMAT_MACROS)
-
-list(APPEND MESOS_CPPFLAGS
+# TODO(andschwa): Make these non-global.
+add_definitions(
   -DPKGLIBEXECDIR="${PKG_LIBEXEC_INSTALL_DIR}"
   -DLIBDIR="${LIB_INSTALL_DIR}"
   -DVERSION="${PACKAGE_VERSION}"
-  -DPKGDATADIR="${DATA_INSTALL_PREFIX}"
-  )
+  -DPKGDATADIR="${DATA_INSTALL_PREFIX}")
+
+if (ENABLE_GRPC)
+  # TODO(chhsiao): Make this non-global.
+  add_definitions(-DENABLE_GRPC=1)
+endif ()
 
 if (ENABLE_SSL)
-  list(APPEND MESOS_CPPFLAGS -DUSE_SSL_SOCKET=1)
+  # TODO(andschwa): Make this non-global.
+  add_definitions(-DUSE_SSL_SOCKET=1)
 endif ()
 
 # Calculate some build information.
 string(TIMESTAMP BUILD_DATE "%Y-%m-%d %H:%M:%S UTC" UTC)
+string(TIMESTAMP BUILD_TIME "%s" UTC)
 if (WIN32)
-  string(TIMESTAMP BUILD_TIME "%s" UTC)
-  set(BUILD_USER "$ENV{USERNAME}")
+  set(BUILD_USER $ENV{USERNAME})
 else ()
-  execute_process(
-    COMMAND date +%s
-    OUTPUT_VARIABLE BUILD_TIME
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-  set(BUILD_USER "$ENV{USER}")
+  set(BUILD_USER $ENV{USER})
 endif ()
+
+# NOTE: This is not quite the same as the Autotools build, as most definitions,
+# include directories, etc. are embedded as target properties within the CMake
+# graph. However, this is simply a "helper" variable anyway, so providing the
+# "global" compile definitions (at least, those of this directory), is close
+# enough to the intent.
+#
+# This code sets the variable `BUILD_FLAGS_RAW` to the content of the
+# directory's `COMPILE_DEFINITIONS` property. The backslashes are then escaped
+# and the final string is saved into the `BUILD_FLAGS` variable.
+get_directory_property(BUILD_FLAGS_RAW COMPILE_DEFINITIONS)
+string(REPLACE "\"" "\\\"" BUILD_FLAGS "${BUILD_FLAGS_RAW}")
+
+set(BUILD_JAVA_JVM_LIBRARY ${JAVA_JVM_LIBRARY})
 
 # When building from source, from a git clone, emit some extra build info.
 if (IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git")
@@ -380,21 +542,4 @@ endif ()
 configure_file(
   "${CMAKE_SOURCE_DIR}/src/common/build_config.hpp.in"
   "${CMAKE_BINARY_DIR}/src/common/build_config.hpp"
-  @ONLY
-  )
-
-# TODO(hausdorff): (MESOS-5902) Populate this value when we integrate Java
-# support.
-set(BUILD_JAVA_JVM_LIBRARY "")
-
-# NOTE: The quotes in these definitions are necessary. Without them, the
-# preprocessor will interpret the symbols as (e.g.) int literals and uquoted
-# identifiers, rather than the string values our code expects.
-list(APPEND MESOS_CPPFLAGS
-  -DUSE_STATIC_LIB
-  -DUSE_CMAKE_BUILD_CONFIG
-  -DBUILD_JAVA_JVM_LIBRARY="${BUILD_JAVA_JVM_LIBRARY}"
-  )
-
-# TODO(hausdorff): (MESOS-5455) `BUILD_FLAGS` is currently a placeholder value.
-add_definitions(${MESOS_CPPFLAGS} -DBUILD_FLAGS="")
+  @ONLY)

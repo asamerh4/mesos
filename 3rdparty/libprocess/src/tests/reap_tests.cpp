@@ -58,8 +58,8 @@ TEST(ReapTest, NonChildProcess)
                                Fork(Exec(SLEEP_COMMAND(10))),
                                Exec("exit 0"))();
   ASSERT_SOME(tree);
-  ASSERT_EQ(1u, tree.get().children.size());
-  pid_t grandchild = tree.get().children.front();
+  ASSERT_EQ(1u, tree->children.size());
+  pid_t grandchild = tree->children.front();
 
   // Reap the grandchild process.
   Future<Option<int>> status = process::reap(grandchild);
@@ -83,10 +83,10 @@ TEST(ReapTest, NonChildProcess)
   AWAIT_READY(status);
 
   // The status is None because pid is not an immediate child.
-  ASSERT_NONE(status.get()) << status.get().get();
+  ASSERT_NONE(status.get()) << status->get();
 
   // Reap the child as well to clean up after ourselves.
-  status = process::reap(tree.get().process.pid);
+  status = process::reap(tree->process.pid);
 
   // Now advance time until the child is reaped.
   while (status.isPending()) {
@@ -103,7 +103,7 @@ TEST(ReapTest, NonChildProcess)
 
 // This test checks that the we can reap a child process and obtain
 // the correct exit status.
-TEST(ReapTest, THREADSAFE_ChildProcess)
+TEST(ReapTest, ChildProcess)
 {
   // The child process sleeps and will be killed by the parent.
   Try<ProcessTree> tree = Fork(None(),
@@ -134,7 +134,7 @@ TEST(ReapTest, THREADSAFE_ChildProcess)
 
 
 // Check that we can reap a child process that is already exited.
-TEST(ReapTest, THREADSAFE_TerminatedChildProcess)
+TEST(ReapTest, TerminatedChildProcess)
 {
   // The child process immediately exits.
   Try<ProcessTree> tree = Fork(None(),
@@ -151,7 +151,7 @@ TEST(ReapTest, THREADSAFE_TerminatedChildProcess)
     const Result<os::Process> process = os::process(child);
     ASSERT_SOME(process) << "Process " << child << " reaped unexpectedly";
 
-    if (process.get().zombie) {
+    if (process->zombie) {
       break;
     }
 

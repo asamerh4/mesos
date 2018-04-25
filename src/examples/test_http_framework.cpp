@@ -24,6 +24,8 @@
 #include <mesos/v1/resources.hpp>
 #include <mesos/v1/scheduler.hpp>
 
+#include <mesos/authorizer/acls.hpp>
+
 #include <process/delay.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
@@ -40,11 +42,15 @@
 #include <stout/option.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
+
+#include <stout/os/realpath.hpp>
 
 #include "common/status_utils.hpp"
 
-#include "logging/flags.hpp"
+#include "examples/flags.hpp"
+
 #include "logging/logging.hpp"
 
 using namespace mesos::v1;
@@ -74,22 +80,13 @@ class HTTPScheduler : public process::Process<HTTPScheduler>
 public:
   HTTPScheduler(const FrameworkInfo& _framework,
                 const ExecutorInfo& _executor,
-                const string& _master)
-    : framework(_framework),
-      executor(_executor),
-      master(_master),
-      state(INITIALIZING),
-      tasksLaunched(0),
-      tasksFinished(0),
-      totalTasks(5) {}
-
-  HTTPScheduler(const FrameworkInfo& _framework,
-                const ExecutorInfo& _executor,
                 const string& _master,
-                const Credential& credential)
+                const Option<Credential>& _credential)
     : framework(_framework),
+      role(_framework.roles(0)),
       executor(_executor),
       master(_master),
+      credential(_credential),
       state(INITIALIZING),
       tasksLaunched(0),
       tasksFinished(0),
@@ -152,6 +149,10 @@ public:
           statusUpdate(event.update().status());
           break;
         }
+
+        // TODO(greggomann): Implement handling of operation status updates.
+        case Event::UPDATE_OPERATION_STATUS:
+          break;
 
         case Event::MESSAGE: {
           cout << endl << "Received a MESSAGE event" << endl;
@@ -216,7 +217,7 @@ protected:
             process::defer(self(), &Self::connected),
             process::defer(self(), &Self::disconnected),
             process::defer(self(), &Self::received, lambda::_1),
-            None()));
+            credential));
   }
 
 private:
@@ -229,7 +230,7 @@ private:
       Resources taskResources = Resources::parse(
           "cpus:" + stringify(CPUS_PER_TASK) +
           ";mem:" + stringify(MEM_PER_TASK)).get();
-      taskResources.allocate(framework.role());
+      taskResources.allocate(role);
 
       Resources remaining = offer.resources();
 
@@ -249,12 +250,12 @@ private:
         task.mutable_executor()->MergeFrom(executor);
 
         Option<Resources> resources = [&]() {
-          if (framework.role() == "*") {
+          if (role == "*") {
             return remaining.find(taskResources);
           } else {
             Resource::ReservationInfo reservation;
             reservation.set_type(Resource::ReservationInfo::STATIC);
-            reservation.set_role(framework.role());
+            reservation.set_role(role);
 
             return remaining.find(taskResources.pushReservation(reservation));
           }
@@ -361,8 +362,10 @@ private:
   }
 
   FrameworkInfo framework;
+  const string role;
   const ExecutorInfo executor;
   const string master;
+  const Option<Credential> credential;
   process::Owned<scheduler::Mesos> mesos;
 
   enum State
@@ -387,18 +390,7 @@ void usage(const char* argv0, const flags::FlagsBase& flags)
 }
 
 
-class Flags : public virtual mesos::internal::logging::Flags
-{
-public:
-  Flags()
-  {
-    add(&Flags::role, "role", "Role to use when registering", "*");
-    add(&Flags::master, "master", "ip:port of master to connect");
-  }
-
-  string role;
-  Option<string> master;
-};
+class Flags : public virtual mesos::internal::examples::Flags {};
 
 
 int main(int argc, char** argv)
@@ -415,29 +407,32 @@ int main(int argc, char** argv)
 
   Flags flags;
 
-  Try<flags::Warnings> load = flags.load(None(), argc, argv);
+  Try<flags::Warnings> load = flags.load("MESOS_EXAMPLE_", argc, argv);
 
-  if (load.isError()) {
-    cerr << load.error() << endl;
-    usage(argv[0], flags);
-    EXIT(EXIT_FAILURE);
-  } else if (flags.master.isNone()) {
-    cerr << "Missing --master" << endl;
-    usage(argv[0], flags);
-    EXIT(EXIT_FAILURE);
+  if (flags.help) {
+    cout << flags.usage() << endl;
+    return EXIT_SUCCESS;
   }
 
-  process::initialize();
-  mesos::internal::logging::initialize(argv[0], flags, true); // Catch signals.
+  if (load.isError()) {
+    cerr << flags.usage(load.error()) << endl;
+    return EXIT_FAILURE;
+  }
 
-  // Log any flag warnings (after logging is initialized).
+  mesos::internal::logging::initialize(argv[0], true, flags); // Catch signals.
+
+  // Log any flag warnings.
   foreach (const flags::Warning& warning, load->warnings) {
     LOG(WARNING) << warning.message;
   }
 
   FrameworkInfo framework;
+  framework.set_principal(flags.principal);
   framework.set_name(FRAMEWORK_NAME);
-  framework.set_role(flags.role);
+  framework.set_checkpoint(flags.checkpoint);
+  framework.add_roles(flags.role);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
@@ -446,26 +441,43 @@ int main(int argc, char** argv)
   CHECK_SOME(user);
   framework.set_user(user.get());
 
-  value = os::getenv("MESOS_CHECKPOINT");
-  if (value.isSome()) {
-    framework.set_checkpoint(numify<bool>(value.get()).get());
-  }
-
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
   executor.mutable_command()->set_value(uri);
   executor.set_name(EXECUTOR_NAME);
 
-  value = os::getenv("DEFAULT_PRINCIPAL");
-  if (value.isNone()) {
-    EXIT(EXIT_FAILURE)
-      << "Expecting authentication principal in the environment";
+  Option<Credential> credential = None();
+
+  if (flags.authenticate) {
+    LOG(INFO) << "Enabling authentication for the framework";
+
+    Credential credential_;
+    credential_.set_principal(flags.principal);
+    if (flags.secret.isSome()) {
+      credential_.set_secret(flags.secret.get());
+    }
+    credential = credential_;
   }
 
-  framework.set_principal(value.get());
+  if (flags.master == "local") {
+    // Configure master.
+    os::setenv("MESOS_ROLES", flags.role);
+
+    os::setenv(
+        "MESOS_AUTHENTICATE_HTTP_FRAMEWORKS",
+        stringify(flags.authenticate));
+
+    os::setenv("MESOS_HTTP_FRAMEWORK_AUTHENTICATORS", "basic");
+
+    mesos::ACLs acls;
+    mesos::ACL::RegisterFramework* acl = acls.add_register_frameworks();
+    acl->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    acl->mutable_roles()->add_values("*");
+    os::setenv("MESOS_ACLS", stringify(JSON::protobuf(acls)));
+  }
 
   process::Owned<HTTPScheduler> scheduler(
-      new HTTPScheduler(framework, executor, flags.master.get()));
+      new HTTPScheduler(framework, executor, flags.master, credential));
 
   process::spawn(scheduler.get());
   process::wait(scheduler.get());

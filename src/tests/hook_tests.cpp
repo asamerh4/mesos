@@ -59,6 +59,7 @@ using mesos::internal::master::Master;
 
 using mesos::internal::protobuf::createLabel;
 
+using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::DockerContainerizer;
 using mesos::internal::slave::executorEnvironment;
 using mesos::internal::slave::Fetcher;
@@ -176,7 +177,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(HookTest, VerifyMasterLaunchTaskHook)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -318,14 +319,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   // Test hook adds a new environment variable "FOO" to the executor
   // with a value "bar". A '0' (success) exit status for the following
   // command validates the hook.
-  process::Future<bool> launch = containerizer->launch(
+  process::Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executorInfo, directory),
       environment,
       None());
 
-  AWAIT_READY(launch);
-  ASSERT_TRUE(launch.get());
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   // Wait on the container.
   Future<Option<ContainerTermination>> wait =
@@ -373,7 +373,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(HookTest, VerifySlaveLaunchExecutorHook)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // Launch a task with the command executor.
   TaskInfo task;
@@ -707,9 +707,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -717,6 +719,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   AWAIT_READY_FOR(statusFinished, Seconds(60));
@@ -732,13 +736,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   EXPECT_SOME(termination.get());
 
   Future<list<Docker::Container>> containers =
-    docker.get()->ps(true, slave::DOCKER_NAME_PREFIX);
+    docker->ps(true, slave::DOCKER_NAME_PREFIX);
 
   AWAIT_READY(containers);
 
   // Cleanup all mesos launched containers.
   foreach (const Docker::Container& container, containers.get()) {
-    AWAIT_READY_FOR(docker.get()->rm(container.id, true), Seconds(30));
+    AWAIT_READY_FOR(docker->rm(container.id, true), Seconds(30));
   }
 }
 
@@ -924,9 +928,11 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -934,6 +940,8 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   AWAIT_READY_FOR(statusFinished, Seconds(60));
@@ -949,13 +957,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   EXPECT_SOME(termination.get());
 
   Future<list<Docker::Container>> containers =
-    docker.get()->ps(true, slave::DOCKER_NAME_PREFIX);
+    docker->ps(true, slave::DOCKER_NAME_PREFIX);
 
   AWAIT_READY(containers);
 
   // Cleanup all mesos launched containers.
   foreach (const Docker::Container& container, containers.get()) {
-    AWAIT_READY_FOR(docker.get()->rm(container.id, true), Seconds(30));
+    AWAIT_READY_FOR(docker->rm(container.id, true), Seconds(30));
   }
 }
 
@@ -1039,13 +1047,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(HookTest, ROOT_DOCKER_VerifySlavePostFetchHook)
   ContainerInfo::DockerInfo* dockerInfo = containerInfo->mutable_docker();
   dockerInfo->set_image("alpine");
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -1103,7 +1116,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Resources resources = offers.get()[0].resources();
 
@@ -1119,7 +1132,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   EXPECT_EQ(TEST_HOOK_CPUS, resources.cpus().get());
 
-  const string allocationRole = DEFAULT_FRAMEWORK_INFO.role();
+  const string allocationRole = DEFAULT_FRAMEWORK_INFO.roles(0);
   EXPECT_TRUE(resources.contains(
       allocatedResources(TEST_HOOK_ADDITIONAL_RESOURCES, allocationRole)));
 

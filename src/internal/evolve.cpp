@@ -158,9 +158,25 @@ v1::OfferID evolve(const OfferID& offerId)
 }
 
 
+v1::OperationStatus evolve(const OperationStatus& status)
+{
+  return evolve<v1::OperationStatus>(status);
+}
+
+
 v1::Resource evolve(const Resource& resource)
 {
   return evolve<v1::Resource>(resource);
+}
+
+
+v1::ResourceProviderID evolve(
+    const ResourceProviderID& resourceProviderId)
+{
+  // NOTE: We do not use the common 'devolve' call for performance.
+  v1::ResourceProviderID id;
+  id.set_value(resourceProviderId.value());
+  return id;
 }
 
 
@@ -195,19 +211,25 @@ v1::TaskStatus evolve(const TaskStatus& status)
 }
 
 
-v1::agent::Call evolve(const mesos::agent::Call& call)
+v1::UUID evolve(const UUID& uuid)
+{
+  return evolve<v1::UUID>(uuid);
+}
+
+
+v1::agent::Call evolve(const agent::Call& call)
 {
   return evolve<v1::agent::Call>(call);
 }
 
 
-v1::agent::ProcessIO evolve(const mesos::agent::ProcessIO& processIO)
+v1::agent::ProcessIO evolve(const agent::ProcessIO& processIO)
 {
   return evolve<v1::agent::ProcessIO>(processIO);
 }
 
 
-v1::agent::Response evolve(const mesos::agent::Response& response)
+v1::agent::Response evolve(const agent::Response& response)
 {
   return evolve<v1::agent::Response>(response);
 }
@@ -231,22 +253,34 @@ v1::master::Response evolve(const mesos::master::Response& response)
 }
 
 
-v1::resource_provider::Call evolve(const mesos::resource_provider::Call& call)
+v1::resource_provider::Call evolve(const resource_provider::Call& call)
 {
   return evolve<v1::resource_provider::Call>(call);
 }
 
 
-v1::resource_provider::Event evolve(
-    const mesos::resource_provider::Event& event)
+v1::resource_provider::Event evolve(const resource_provider::Event& event)
 {
   return evolve<v1::resource_provider::Event>(event);
 }
 
 
+// TODO(xujyan): Do we need this conversion when Mesos never sends out
+// `scheduler::Call` thus never needs to evovle internal call to a v1 call?
+// Perhaps we should remove the method so there's no need to maintain it.
 v1::scheduler::Call evolve(const scheduler::Call& call)
 {
-  return evolve<v1::scheduler::Call>(call);
+  v1::scheduler::Call _call = evolve<v1::scheduler::Call>(call);
+
+  // Certain conversions require special handling.
+  if (_call.type() == v1::scheduler::Call::SUBSCRIBE) {
+    // v1 Subscribe.suppressed_roles cannot be automatically converted
+    // because its tag is used by another field in the internal Subscribe.
+    *(_call.mutable_subscribe()->mutable_suppressed_roles()) =
+      call.subscribe().suppressed_roles();
+  }
+
+  return _call;
 }
 
 
@@ -442,6 +476,17 @@ v1::scheduler::Event evolve(const StatusUpdateMessage& message)
 }
 
 
+v1::scheduler::Event evolve(const UpdateOperationStatusMessage& message)
+{
+  v1::scheduler::Event event;
+  event.set_type(v1::scheduler::Event::UPDATE_OPERATION_STATUS);
+  event.mutable_update_operation_status()->mutable_status()->CopyFrom(
+      evolve(message.status()));
+
+  return event;
+}
+
+
 v1::executor::Call evolve(const executor::Call& call)
 {
   return evolve<v1::executor::Call>(call);
@@ -451,6 +496,12 @@ v1::executor::Call evolve(const executor::Call& call)
 v1::executor::Event evolve(const executor::Event& event)
 {
   return evolve<v1::executor::Event>(event);
+}
+
+
+v1::scheduler::Response evolve(const scheduler::Response& response)
+{
+  return evolve<v1::scheduler::Response>(response);
 }
 
 
@@ -562,7 +613,7 @@ v1::master::Response evolve<v1::master::Response::GET_FLAGS>(
 
   foreachpair (const string& key,
                const JSON::Value& value,
-               flags.get().values) {
+               flags->values) {
     v1::Flag* flag = getFlags->add_flags();
     flag->set_name(key);
 
@@ -591,7 +642,7 @@ v1::agent::Response evolve<v1::agent::Response::GET_FLAGS>(
 
   foreachpair (const string& key,
                const JSON::Value& value,
-               flags.get().values) {
+               flags->values) {
     v1::Flag* flag = getFlags->add_flags();
     flag->set_name(key);
 
@@ -657,24 +708,30 @@ v1::agent::Response evolve<v1::agent::Response::GET_CONTAINERS>(
       object.find<JSON::String>("container_id");
 
     CHECK_SOME(container_id);
-    container->mutable_container_id()->set_value(container_id.get().value);
+    container->mutable_container_id()->set_value(container_id->value);
 
     Result<JSON::String> framework_id =
       object.find<JSON::String>("framework_id");
 
-    CHECK_SOME(framework_id);
-    container->mutable_framework_id()->set_value(framework_id.get().value);
+    CHECK(!framework_id.isError());
+    if (framework_id.isSome()) {
+      container->mutable_framework_id()->set_value(framework_id->value);
+    }
 
     Result<JSON::String> executor_id = object.find<JSON::String>("executor_id");
 
-    CHECK_SOME(executor_id);
-    container->mutable_executor_id()->set_value(executor_id.get().value);
+    CHECK(!executor_id.isError());
+    if (executor_id.isSome()) {
+      container->mutable_executor_id()->set_value(executor_id->value);
+    }
 
     Result<JSON::String> executor_name =
       object.find<JSON::String>("executor_name");
 
-    CHECK_SOME(executor_name);
-    container->set_executor_name(executor_name.get().value);
+    CHECK(!executor_name.isError());
+    if (executor_name.isSome()) {
+      container->set_executor_name(executor_name->value);
+    }
 
     Result<JSON::Object> container_status = object.find<JSON::Object>("status");
     if (container_status.isSome()) {

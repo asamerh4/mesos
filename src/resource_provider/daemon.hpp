@@ -19,6 +19,10 @@
 
 #include <string>
 
+#include <mesos/mesos.hpp>
+
+#include <mesos/authentication/secret_generator.hpp>
+
 #include <process/http.hpp>
 #include <process/owned.hpp>
 
@@ -42,7 +46,8 @@ class LocalResourceProviderDaemon
 public:
   static Try<process::Owned<LocalResourceProviderDaemon>> create(
       const process::http::URL& url,
-      const slave::Flags& flags);
+      const slave::Flags& flags,
+      SecretGenerator* secretGenerator);
 
   ~LocalResourceProviderDaemon();
 
@@ -52,11 +57,21 @@ public:
   LocalResourceProviderDaemon& operator=(
       const LocalResourceProviderDaemon& other) = delete;
 
+  void start(const SlaveID& slaveId);
+
+  process::Future<bool> add(const ResourceProviderInfo& info);
+  process::Future<bool> update(const ResourceProviderInfo& info);
+  process::Future<Nothing> remove(
+      const std::string& type,
+      const std::string& name);
+
 private:
   LocalResourceProviderDaemon(
       const process::http::URL& url,
       const std::string& workDir,
-      const Option<std::string>& configDir);
+      const Option<std::string>& configDir,
+      SecretGenerator* secretGenerator,
+      bool strict);
 
   process::Owned<LocalResourceProviderDaemonProcess> process;
 };

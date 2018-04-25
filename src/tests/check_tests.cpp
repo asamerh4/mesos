@@ -77,7 +77,7 @@ namespace tests {
   string("rm ") + path + " || (touch " + path + "; exit 1)"
 #else
 #define FLAPPING_CHECK_COMMAND(path)                                    \
-  string("powershell -command ") +                                      \
+  string("powershell -NoProfile -Command ") +                           \
   "$ri_err = Remove-Item -ErrorAction SilentlyContinue"                 \
     " \"" + path + "\";"                                                \
   "if (-not $?) {"                                                      \
@@ -100,15 +100,15 @@ namespace tests {
 //   - Exit with a zero status.
 #ifndef __WINDOWS__
 #define STALLING_CHECK_COMMAND(path)                                    \
-  string("(ls ") + path + " && " + SLEEP_COMMAND(1000) +                \
+  string("(ls ") + path + " && " + "sleep 1000" +                       \
   ") || (touch " + path + "; exit 1)"
 #else
 #define STALLING_CHECK_COMMAND(path)                                    \
-  string("powershell -command ") +                                      \
+  string("powershell -NoProfile -Command ") +                           \
   "if (Test-Path \"" + path + "\") {" +                                 \
-     SLEEP_COMMAND(1000) +                                              \
+  "  Start-Sleep 1000 " +                                               \
   "} else {"                                                            \
-  "  Set-Content -Path (\"" + path + "\") -Value ($null);"              \
+  "  Set-Content -Path (\"" + path + "\") -Value $null;"                \
   "  exit 1"                                                            \
   "}"
 #endif // !__WINDOWS__
@@ -284,16 +284,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateExplicitReconciliation;
   Future<Event::Update> updateImplicitReconciliation;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateExplicitReconciliation))
@@ -301,7 +303,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::TaskInfo taskInfo =
     v1::createTask(agentId, resources, SLEEP_COMMAND(10000));
@@ -322,10 +324,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
   EXPECT_TRUE(taskRunning.has_check_status());
   EXPECT_TRUE(taskRunning.check_status().has_command());
@@ -336,7 +341,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -357,7 +362,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   const v1::TaskStatus& explicitReconciliation =
     updateExplicitReconciliation->status();
 
-  ASSERT_EQ(TASK_RUNNING, explicitReconciliation.state());
+  ASSERT_EQ(v1::TASK_RUNNING, explicitReconciliation.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_RECONCILIATION,
       explicitReconciliation.reason());
@@ -375,7 +380,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   const v1::TaskStatus& implicitReconciliation =
     updateImplicitReconciliation->status();
 
-  ASSERT_EQ(TASK_RUNNING, implicitReconciliation.state());
+  ASSERT_EQ(v1::TASK_RUNNING, implicitReconciliation.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_RECONCILIATION,
       implicitReconciliation.reason());
@@ -433,16 +438,18 @@ TEST_F(CommandExecutorCheckTest, CommandCheckStatusChange)
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateCheckResultChanged;
   Future<Event::Update> updateCheckResultBack;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateCheckResultChanged))
@@ -450,7 +457,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckStatusChange)
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::TaskInfo taskInfo =
       v1::createTask(agentId, resources, SLEEP_COMMAND(10000));
@@ -464,8 +471,11 @@ TEST_F(CommandExecutorCheckTest, CommandCheckStatusChange)
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
-  ASSERT_EQ(TASK_RUNNING, updateTaskRunning->status().state());
+  ASSERT_EQ(v1::TASK_RUNNING, updateTaskRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateTaskRunning->status().task_id());
 
   acknowledge(&mesos, frameworkId, updateTaskRunning->status());
@@ -473,7 +483,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckStatusChange)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -485,7 +495,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckStatusChange)
   AWAIT_READY(updateCheckResultChanged);
   const v1::TaskStatus& checkResultChanged = updateCheckResultChanged->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResultChanged.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResultChanged.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResultChanged.reason());
@@ -497,7 +507,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckStatusChange)
   AWAIT_READY(updateCheckResultBack);
   const v1::TaskStatus& checkResultBack = updateCheckResultBack->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResultBack.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResultBack.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResultBack.reason());
@@ -553,20 +563,22 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   const string envKey = "MESOS_CHECK_TASK_ENV";
   const int32_t envValue = 42;
@@ -590,10 +602,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
 
   acknowledge(&mesos, frameworkId, taskRunning);
@@ -601,7 +621,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -656,20 +676,22 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   const string filename = "nested_inherits_work_dir";
 
@@ -687,10 +709,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
 
   acknowledge(&mesos, frameworkId, taskRunning);
@@ -698,7 +728,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -722,7 +752,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
     AWAIT_READY(updateCheckResult2);
     const v1::TaskStatus& checkResult2 = updateCheckResult2->status();
 
-    ASSERT_EQ(TASK_RUNNING, checkResult2.state());
+    ASSERT_EQ(v1::TASK_RUNNING, checkResult2.state());
     ASSERT_EQ(
         v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
         checkResult2.reason());
@@ -777,22 +807,24 @@ TEST_F(CommandExecutorCheckTest, CommandCheckTimeout)
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateCheckResultTimeout;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateCheckResultTimeout))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::TaskInfo taskInfo =
       v1::createTask(agentId, resources, SLEEP_COMMAND(10000));
@@ -807,8 +839,14 @@ TEST_F(CommandExecutorCheckTest, CommandCheckTimeout)
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateTaskStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateTaskStarting->status().task_id());
+
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
-  ASSERT_EQ(TASK_RUNNING, updateTaskRunning->status().state());
+  ASSERT_EQ(v1::TASK_RUNNING, updateTaskRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateTaskRunning->status().task_id());
 
   acknowledge(&mesos, frameworkId, updateTaskRunning->status());
@@ -816,7 +854,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckTimeout)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -828,7 +866,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckTimeout)
   AWAIT_READY(updateCheckResultTimeout);
   const v1::TaskStatus& checkResultTimeout = updateCheckResultTimeout->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResultTimeout.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResultTimeout.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResultTimeout.reason());
@@ -882,16 +920,18 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateHealthResult;
   Future<Event::Update> updateImplicitReconciliation;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateHealthResult))
@@ -899,7 +939,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::TaskInfo taskInfo =
       v1::createTask(agentId, resources, SLEEP_COMMAND(10000));
@@ -928,8 +968,11 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
-  ASSERT_EQ(TASK_RUNNING, updateTaskRunning->status().state());
+  ASSERT_EQ(v1::TASK_RUNNING, updateTaskRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateTaskRunning->status().task_id());
 
   acknowledge(&mesos, frameworkId, updateTaskRunning->status());
@@ -937,7 +980,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -952,7 +995,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   AWAIT_READY(updateHealthResult);
   const v1::TaskStatus& healthResult = updateHealthResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, healthResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, healthResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
       healthResult.reason());
@@ -972,7 +1015,7 @@ TEST_F(CommandExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   const v1::TaskStatus& implicitReconciliation =
     updateImplicitReconciliation->status();
 
-  ASSERT_EQ(TASK_RUNNING, implicitReconciliation.state());
+  ASSERT_EQ(v1::TASK_RUNNING, implicitReconciliation.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_RECONCILIATION,
       implicitReconciliation.reason());
@@ -1034,13 +1077,15 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, HTTPCheckDelivered)
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<v1::scheduler::Event::Update> updateTaskStarting;
   Future<v1::scheduler::Event::Update> updateTaskRunning;
   Future<v1::scheduler::Event::Update> updateCheckResult;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
@@ -1056,7 +1101,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, HTTPCheckDelivered)
       testPort).get();
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::TaskInfo taskInfo = v1::createTask(agentId, resources, command);
 
@@ -1069,10 +1114,13 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, HTTPCheckDelivered)
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
   EXPECT_TRUE(taskRunning.has_check_status());
   EXPECT_TRUE(taskRunning.check_status().has_http());
@@ -1083,7 +1131,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, HTTPCheckDelivered)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -1108,14 +1156,14 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, HTTPCheckDelivered)
     AWAIT_READY(updateCheckResult2);
     const v1::TaskStatus& checkResult2 = updateCheckResult2->status();
 
-    ASSERT_EQ(TASK_RUNNING, checkResult2.state());
+    ASSERT_EQ(v1::TASK_RUNNING, checkResult2.state());
     ASSERT_EQ(
         v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
         checkResult2.reason());
     EXPECT_EQ(taskInfo.task_id(), checkResult2.task_id());
     EXPECT_TRUE(checkResult2.has_check_status());
     EXPECT_TRUE(checkResult2.check_status().http().has_status_code());
-    EXPECT_EQ(200, checkResult2.check_status().http().status_code());
+    EXPECT_EQ(200u, checkResult2.check_status().http().status_code());
   }
 }
 
@@ -1167,13 +1215,15 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, TCPCheckDelivered)
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<v1::scheduler::Event::Update> updateTaskStarting;
   Future<v1::scheduler::Event::Update> updateTaskRunning;
   Future<v1::scheduler::Event::Update> updateCheckResult;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
@@ -1189,7 +1239,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, TCPCheckDelivered)
       testPort).get();
 
   v1::Resources resources =
-      v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+      v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::TaskInfo taskInfo = v1::createTask(agentId, resources, command);
 
@@ -1201,10 +1251,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, TCPCheckDelivered)
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
   EXPECT_TRUE(taskRunning.has_check_status());
   EXPECT_TRUE(taskRunning.check_status().has_tcp());
@@ -1215,7 +1273,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, TCPCheckDelivered)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -1240,7 +1298,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(CommandExecutorCheckTest, TCPCheckDelivered)
     AWAIT_READY(updateCheckResult2);
     const v1::TaskStatus& checkResult2 = updateCheckResult2->status();
 
-    ASSERT_EQ(TASK_RUNNING, checkResult2.state());
+    ASSERT_EQ(v1::TASK_RUNNING, checkResult2.state());
     ASSERT_EQ(
         v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
         checkResult2.reason());
@@ -1277,12 +1335,6 @@ protected:
     slave::Flags flags = CheckTest::CreateSlaveFlags();
 
 #ifndef USE_SSL_SOCKET
-    // Disable operator API authentication for the default executor. Executor
-    // authentication currently has SSL as a dependency, so we cannot require
-    // executors to authenticate with the agent operator API if Mesos was not
-    // built with SSL support.
-    flags.authenticate_http_readwrite = false;
-
     // Set permissive ACLs in the agent so that the local authorizer will be
     // loaded and implicit executor authorization will be tested.
     ACLs acls;
@@ -1332,7 +1384,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -1377,16 +1429,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateExplicitReconciliation;
   Future<Event::Update> updateImplicitReconciliation;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateExplicitReconciliation))
@@ -1415,10 +1469,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
   EXPECT_TRUE(taskRunning.has_check_status());
   EXPECT_TRUE(taskRunning.check_status().has_command());
@@ -1429,7 +1491,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -1450,7 +1512,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   const v1::TaskStatus& explicitReconciliation =
     updateExplicitReconciliation->status();
 
-  ASSERT_EQ(TASK_RUNNING, explicitReconciliation.state());
+  ASSERT_EQ(v1::TASK_RUNNING, explicitReconciliation.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_RECONCILIATION,
       explicitReconciliation.reason());
@@ -1468,7 +1530,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   const v1::TaskStatus& implicitReconciliation =
     updateImplicitReconciliation->status();
 
-  ASSERT_EQ(TASK_RUNNING, implicitReconciliation.state());
+  ASSERT_EQ(v1::TASK_RUNNING, implicitReconciliation.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_RECONCILIATION,
       implicitReconciliation.reason());
@@ -1526,7 +1588,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -1571,16 +1633,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateCheckResultChanged;
   Future<Event::Update> updateCheckResultBack;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateCheckResultChanged))
@@ -1602,8 +1666,14 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateTaskStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateTaskStarting->status().task_id());
+
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
-  ASSERT_EQ(TASK_RUNNING, updateTaskRunning->status().state());
+  ASSERT_EQ(v1::TASK_RUNNING, updateTaskRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateTaskRunning->status().task_id());
 
   acknowledge(&mesos, frameworkId, updateTaskRunning->status());
@@ -1611,7 +1681,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -1623,7 +1693,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResultChanged);
   const v1::TaskStatus& checkResultChanged = updateCheckResultChanged->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResultChanged.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResultChanged.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResultChanged.reason());
@@ -1635,7 +1705,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResultBack);
   const v1::TaskStatus& checkResultBack = updateCheckResultBack->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResultBack.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResultBack.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResultBack.reason());
@@ -1687,7 +1757,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -1732,14 +1802,16 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
@@ -1769,10 +1841,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
 
   acknowledge(&mesos, frameworkId, taskRunning);
@@ -1780,7 +1860,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -1832,7 +1912,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -1877,14 +1957,16 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
@@ -1936,10 +2018,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
 
   acknowledge(&mesos, frameworkId, taskRunning);
@@ -1947,7 +2037,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -2000,7 +2090,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -2045,15 +2135,17 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateCheckResultTimeout;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateCheckResultTimeout))
@@ -2075,8 +2167,14 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateTaskStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateTaskStarting->status().task_id());
+
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
-  ASSERT_EQ(TASK_RUNNING, updateTaskRunning->status().state());
+  ASSERT_EQ(v1::TASK_RUNNING, updateTaskRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateTaskRunning->status().task_id());
 
   acknowledge(&mesos, frameworkId, updateTaskRunning->status());
@@ -2084,7 +2182,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -2096,7 +2194,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
   AWAIT_READY(updateCheckResultTimeout);
   const v1::TaskStatus& checkResultTimeout = updateCheckResultTimeout->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResultTimeout.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResultTimeout.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResultTimeout.reason());
@@ -2119,8 +2217,6 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, CommandCheckTimeout)
 // Verifies that when both command check and health check are specified,
 // health and check updates include both statuses. Also verifies that
 // both statuses are included upon reconciliation.
-//
-// TODO(gkleiman): Check if this test works on Windows.
 TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -2148,7 +2244,7 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -2193,16 +2289,18 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<Event::Update> updateTaskStarting;
   Future<Event::Update> updateTaskRunning;
   Future<Event::Update> updateCheckResult;
   Future<Event::Update> updateHealthResult;
   Future<Event::Update> updateImplicitReconciliation;
 
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillOnce(FutureArg<1>(&updateHealthResult))
@@ -2236,8 +2334,11 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
 
   launchTask(&mesos, offer, taskInfo);
 
+  AWAIT_READY(updateTaskStarting);
+  acknowledge(&mesos, frameworkId, updateTaskStarting->status());
+
   AWAIT_READY(updateTaskRunning);
-  ASSERT_EQ(TASK_RUNNING, updateTaskRunning->status().state());
+  ASSERT_EQ(v1::TASK_RUNNING, updateTaskRunning->status().state());
   EXPECT_EQ(taskInfo.task_id(), updateTaskRunning->status().task_id());
 
   acknowledge(&mesos, frameworkId, updateTaskRunning->status());
@@ -2245,7 +2346,7 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -2260,7 +2361,7 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   AWAIT_READY(updateHealthResult);
   const v1::TaskStatus& healthResult = updateHealthResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, healthResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, healthResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED,
       healthResult.reason());
@@ -2280,7 +2381,7 @@ TEST_F(DefaultExecutorCheckTest, CommandCheckAndHealthCheckNoShadowing)
   const v1::TaskStatus& implicitReconciliation =
     updateImplicitReconciliation->status();
 
-  ASSERT_EQ(TASK_RUNNING, implicitReconciliation.state());
+  ASSERT_EQ(v1::TASK_RUNNING, implicitReconciliation.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_RECONCILIATION,
       implicitReconciliation.reason());
@@ -2324,7 +2425,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -2366,15 +2467,16 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
-  Future<v1::scheduler::Event::Update> updates[4];
+  constexpr int EXPECTED_UPDATE_COUNT = 5;
+  Future<v1::scheduler::Event::Update> updates[EXPECTED_UPDATE_COUNT];
 
   {
     testing::InSequence dummy;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < EXPECTED_UPDATE_COUNT; i++) {
       EXPECT_CALL(*scheduler, update(_, _))
         .WillOnce(FutureArg<1>(&updates[i]));
     }
@@ -2401,12 +2503,12 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
-  enum class Stage { INITIAL, RUNNING, CHECKED };
+  enum class Stage { STARTING, INITIAL, RUNNING, CHECKED };
   hashmap<v1::TaskID, Stage> taskStages;
-  taskStages.put(taskInfo1.task_id(), Stage::INITIAL);
-  taskStages.put(taskInfo2.task_id(), Stage::INITIAL);
+  taskStages.put(taskInfo1.task_id(), Stage::STARTING);
+  taskStages.put(taskInfo2.task_id(), Stage::STARTING);
 
-  for (int i = 0; i < 4; i++ ) {
+  for (int i = 0; i < EXPECTED_UPDATE_COUNT; i++ ) {
     AWAIT_READY(updates[i]);
 
     const v1::TaskStatus& taskStatus = updates[i]->status();
@@ -2415,8 +2517,17 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
     ASSERT_SOME(taskStage);
 
     switch (taskStage.get()) {
+      case Stage::STARTING: {
+        v1::TaskState state = taskStatus.state();
+        ASSERT_TRUE(state == v1::TASK_STARTING);
+
+        taskStages.put(taskStatus.task_id(), Stage::INITIAL);
+
+        break;
+      }
       case Stage::INITIAL: {
-        ASSERT_EQ(TASK_RUNNING, taskStatus.state());
+        v1::TaskState state = taskStatus.state();
+        ASSERT_TRUE(state == v1::TASK_RUNNING);
         ASSERT_TRUE(taskStatus.check_status().has_tcp());
         ASSERT_FALSE(taskStatus.check_status().tcp().has_succeeded());
 
@@ -2425,7 +2536,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(
         break;
       }
       case Stage::RUNNING: {
-        ASSERT_EQ(TASK_RUNNING, taskStatus.state());
+        ASSERT_EQ(v1::TASK_RUNNING, taskStatus.state());
         ASSERT_EQ(
             v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
             taskStatus.reason());
@@ -2467,7 +2578,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, HTTPCheckDelivered)
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -2509,13 +2620,15 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, HTTPCheckDelivered)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<v1::scheduler::Event::Update> updateTaskStarting;
   Future<v1::scheduler::Event::Update> updateTaskRunning;
   Future<v1::scheduler::Event::Update> updateCheckResult;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
@@ -2544,10 +2657,18 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, HTTPCheckDelivered)
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+
+  // Acknowledge (to be able to get the next update).
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
   EXPECT_TRUE(taskRunning.has_check_status());
   EXPECT_TRUE(taskRunning.check_status().has_http());
@@ -2559,7 +2680,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, HTTPCheckDelivered)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -2584,14 +2705,14 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, HTTPCheckDelivered)
     AWAIT_READY(updateCheckResult2);
     const v1::TaskStatus& checkResult2 = updateCheckResult2->status();
 
-    ASSERT_EQ(TASK_RUNNING, checkResult2.state());
+    ASSERT_EQ(v1::TASK_RUNNING, checkResult2.state());
     ASSERT_EQ(
         v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
         checkResult2.reason());
     EXPECT_EQ(taskInfo.task_id(), checkResult2.task_id());
     EXPECT_TRUE(checkResult2.has_check_status());
     EXPECT_TRUE(checkResult2.check_status().http().has_status_code());
-    EXPECT_EQ(200, checkResult2.check_status().http().status_code());
+    EXPECT_EQ(200u, checkResult2.check_status().http().status_code());
   }
 }
 
@@ -2616,7 +2737,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, TCPCheckDelivered)
   v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
 
   const v1::Resources resources =
-    v1::Resources::parse("cpus:0.1;mem:32;disk:32").get();
+    v1::Resources::parse(defaultTaskResourcesString).get();
 
   v1::ExecutorInfo executorInfo;
   executorInfo.set_type(v1::ExecutorInfo::DEFAULT);
@@ -2658,13 +2779,15 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, TCPCheckDelivered)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
   const v1::Offer& offer = offers->offers(0);
   const v1::AgentID& agentId = offer.agent_id();
 
+  Future<v1::scheduler::Event::Update> updateTaskStarting;
   Future<v1::scheduler::Event::Update> updateTaskRunning;
   Future<v1::scheduler::Event::Update> updateCheckResult;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&updateTaskStarting))
     .WillOnce(FutureArg<1>(&updateTaskRunning))
     .WillOnce(FutureArg<1>(&updateCheckResult))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
@@ -2692,10 +2815,19 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, TCPCheckDelivered)
 
   launchTaskGroup(&mesos, offer, executorInfo, taskGroup);
 
+  AWAIT_READY(updateTaskStarting);
+  const v1::TaskStatus& taskStarting = updateTaskStarting->status();
+
+  ASSERT_EQ(v1::TASK_STARTING, taskStarting.state());
+  EXPECT_EQ(taskInfo.task_id(), taskStarting.task_id());
+
+  // Acknowledge (to be able to get the next update).
+  acknowledge(&mesos, frameworkId, taskStarting);
+
   AWAIT_READY(updateTaskRunning);
   const v1::TaskStatus& taskRunning = updateTaskRunning->status();
 
-  ASSERT_EQ(TASK_RUNNING, taskRunning.state());
+  ASSERT_EQ(v1::TASK_RUNNING, taskRunning.state());
   EXPECT_EQ(taskInfo.task_id(), taskRunning.task_id());
   EXPECT_TRUE(taskRunning.has_check_status());
   EXPECT_TRUE(taskRunning.check_status().has_tcp());
@@ -2707,7 +2839,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, TCPCheckDelivered)
   AWAIT_READY(updateCheckResult);
   const v1::TaskStatus& checkResult = updateCheckResult->status();
 
-  ASSERT_EQ(TASK_RUNNING, checkResult.state());
+  ASSERT_EQ(v1::TASK_RUNNING, checkResult.state());
   ASSERT_EQ(
       v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
       checkResult.reason());
@@ -2732,7 +2864,7 @@ TEST_F_TEMP_DISABLED_ON_WINDOWS(DefaultExecutorCheckTest, TCPCheckDelivered)
     AWAIT_READY(updateCheckResult2);
     const v1::TaskStatus& checkResult2 = updateCheckResult2->status();
 
-    ASSERT_EQ(TASK_RUNNING, checkResult2.state());
+    ASSERT_EQ(v1::TASK_RUNNING, checkResult2.state());
     ASSERT_EQ(
         v1::TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED,
         checkResult2.reason());

@@ -205,14 +205,31 @@ public:
   /**
    * Updates an agent.
    *
+   * TODO(bevers): Make `total` and `capabilities` non-optional.
+   *
+   * @param slaveInfo The current slave info of the agent.
    * @param total The new total resources on the agent.
    * @param capabilities The new capabilities of the agent.
    */
   virtual void updateSlave(
       const SlaveID& slave,
+      const SlaveInfo& slaveInfo,
       const Option<Resources>& total = None(),
       const Option<std::vector<SlaveInfo::Capability>>&
           capabilities = None()) = 0;
+
+  /**
+   * Add resources from a local resource provider to an agent.
+   *
+   * @param slave Id of the agent to modify.
+   * @param total The resources to add to the agent's total resources.
+   * @param used The resources to add to the resources tracked as used
+   *     for this agent.
+   */
+  virtual void addResourceProvider(
+      const SlaveID& slave,
+      const Resources& total,
+      const hashmap<FrameworkID, Resources>& used) = 0;
 
   /**
    * Activates an agent. This is invoked when an agent reregisters. Offers
@@ -268,7 +285,7 @@ public:
       const FrameworkID& frameworkId,
       const SlaveID& slaveId,
       const Resources& offeredResources,
-      const std::vector<Offer::Operation>& operations) = 0;
+      const std::vector<ResourceConversion>& conversions) = 0;
 
   /**
    * Updates available resources on an agent based on a sequence of offer

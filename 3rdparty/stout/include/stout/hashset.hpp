@@ -21,13 +21,34 @@
 
 #include "foreach.hpp"
 
+// Prior to C++14 we can't use an enum type as the key to any
+// hash-based collection because of a defect in the standard. See
+// www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2148 for more
+// details. The workaround for now is to use the following hash
+// function when using an enum.
+//
+// TODO(benh): Remove this once we move to C++14.
+struct EnumClassHash
+{
+  template <typename T>
+  std::size_t operator()(T t) const
+  {
+    static_assert(
+        sizeof(typename std::underlying_type<T>::type) <= sizeof(std::size_t),
+        "Expecting enum type to be convertible to std::size_t");
+    return static_cast<std::size_t>(t);
+  }
+};
+
 
 // Provides a hash set via 'std::unordered_set'. We inherit from it to add
 // new functions as well as to provide better naming for some of the
 // existing functions.
-
 template <typename Elem,
-          typename Hash = std::hash<Elem>,
+          typename Hash = typename std::conditional<
+            std::is_enum<Elem>::value,
+            EnumClassHash,
+            std::hash<Elem>>::type,
           typename Equal = std::equal_to<Elem>>
 class hashset : public std::unordered_set<Elem, Hash, Equal>
 {
@@ -138,6 +159,32 @@ hashset<Elem, Hash, Equal>& operator|=(
     const hashset<Elem, Hash, Equal>& right)
 {
   left.insert(right.begin(), right.end());
+  return left;
+}
+
+
+// Difference operator.
+template <typename Elem, typename Hash, typename Equal>
+hashset<Elem, Hash, Equal> operator-(
+    const hashset<Elem, Hash, Equal>& left,
+    const hashset<Elem, Hash, Equal>& right)
+{
+  hashset<Elem, Hash, Equal> result = left;
+  result -= right;
+  return result;
+}
+
+
+// Difference assignment operator.
+template <typename Elem, typename Hash, typename Equal>
+hashset<Elem, Hash, Equal>& operator-=(
+    hashset<Elem, Hash, Equal>& left,
+    const hashset<Elem, Hash, Equal>& right)
+{
+  foreach (const Elem& elem, right) {
+    left.erase(elem);
+  }
+
   return left;
 }
 

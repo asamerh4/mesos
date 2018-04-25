@@ -14,6 +14,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include <stout/base64.hpp>
 #include <stout/duration.hpp>
@@ -54,12 +55,14 @@ using process::Failure;
 using process::Future;
 using process::PID;
 using process::Process;
+using process::Promise;
 using process::READONLY_HTTP_AUTHENTICATION_REALM;
 using process::Statistics;
 using process::UPID;
 
 using std::map;
 using std::string;
+using std::vector;
 
 class GaugeProcess : public Process<GaugeProcess>
 {
@@ -76,8 +79,12 @@ public:
 
   Future<double> pending()
   {
-    return Future<double>();
+    return promise.future();
   }
+
+  // Need to use a promise for the call to pending instead of just a
+  // `Future<double>()` so we don't return an abandoned future.
+  Promise<double> promise;
 };
 
 
@@ -183,17 +190,17 @@ TEST_F(MetricsTest, Statistics)
   Option<Statistics<double>> statistics = counter.statistics();
   EXPECT_SOME(statistics);
 
-  EXPECT_EQ(11u, statistics.get().count);
+  EXPECT_EQ(11u, statistics->count);
 
-  EXPECT_FLOAT_EQ(0.0, statistics.get().min);
-  EXPECT_FLOAT_EQ(10.0, statistics.get().max);
+  EXPECT_DOUBLE_EQ(0.0, statistics->min);
+  EXPECT_DOUBLE_EQ(10.0, statistics->max);
 
-  EXPECT_FLOAT_EQ(5.0, statistics.get().p50);
-  EXPECT_FLOAT_EQ(9.0, statistics.get().p90);
-  EXPECT_FLOAT_EQ(9.5, statistics.get().p95);
-  EXPECT_FLOAT_EQ(9.9, statistics.get().p99);
-  EXPECT_FLOAT_EQ(9.99, statistics.get().p999);
-  EXPECT_FLOAT_EQ(9.999, statistics.get().p9999);
+  EXPECT_DOUBLE_EQ(5.0, statistics->p50);
+  EXPECT_DOUBLE_EQ(9.0, statistics->p90);
+  EXPECT_DOUBLE_EQ(9.5, statistics->p95);
+  EXPECT_DOUBLE_EQ(9.9, statistics->p99);
+  EXPECT_DOUBLE_EQ(9.99, statistics->p999);
+  EXPECT_DOUBLE_EQ(9.999, statistics->p9999);
 
   AWAIT_READY(metrics::remove(counter));
 }
@@ -228,20 +235,19 @@ TEST_F(MetricsTest, THREADSAFE_Snapshot)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // Parse the response.
-  Try<JSON::Object> responseJSON =
-      JSON::parse<JSON::Object>(response.get().body);
+  Try<JSON::Object> responseJSON = JSON::parse<JSON::Object>(response->body);
   ASSERT_SOME(responseJSON);
 
-  map<string, JSON::Value> values = responseJSON.get().values;
+  map<string, JSON::Value> values = responseJSON->values;
 
   EXPECT_EQ(1u, values.count("test/counter"));
-  EXPECT_FLOAT_EQ(0.0, values["test/counter"].as<JSON::Number>().as<double>());
+  EXPECT_DOUBLE_EQ(0.0, values["test/counter"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(1u, values.count("test/gauge"));
-  EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
+  EXPECT_DOUBLE_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(1u, values.count("test/gauge_const"));
-  EXPECT_FLOAT_EQ(
+  EXPECT_DOUBLE_EQ(
       99.0, values["test/gauge_const"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
@@ -263,10 +269,10 @@ TEST_F(MetricsTest, THREADSAFE_Snapshot)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // Parse the response.
-  responseJSON = JSON::parse<JSON::Object>(response.get().body);
+  responseJSON = JSON::parse<JSON::Object>(response->body);
   ASSERT_SOME(responseJSON);
 
-  values = responseJSON.get().values;
+  values = responseJSON->values;
   EXPECT_EQ(0u, values.count("test/counter"));
   EXPECT_EQ(0u, values.count("test/gauge"));
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
@@ -274,6 +280,56 @@ TEST_F(MetricsTest, THREADSAFE_Snapshot)
 
   terminate(process);
   wait(process);
+}
+
+
+// Ensure the response string has the JSON keys sorted
+// alphabetically, we do this for easier human consumption.
+TEST_F(MetricsTest, SnapshotAlphabetical)
+{
+  UPID upid("metrics", process::address());
+
+  Clock::pause();
+
+  vector<Counter> counters = {
+    Counter("test/f"),
+    Counter("test/e"),
+    Counter("test/d"),
+    Counter("test/c"),
+    Counter("test/b"),
+    Counter("test/a"),
+  };
+
+  foreach (const Counter& counter, counters) {
+    AWAIT_READY(metrics::add(counter));
+  }
+
+  // Advance the clock to avoid rate limit.
+  Clock::advance(Seconds(1));
+
+  // Get the snapshot.
+  Future<Response> response = http::get(upid, "snapshot");
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+  // Ensure the response is ordered alphabetically.
+  EXPECT_LT(response->body.find("test\\/e"),
+            response->body.find("test\\/f"));
+
+  EXPECT_LT(response->body.find("test\\/d"),
+            response->body.find("test\\/e"));
+
+  EXPECT_LT(response->body.find("test\\/c"),
+            response->body.find("test\\/d"));
+
+  EXPECT_LT(response->body.find("test\\/b"),
+            response->body.find("test\\/c"));
+
+  EXPECT_LT(response->body.find("test\\/a"),
+            response->body.find("test\\/b"));
+
+  foreach (const Counter& counter, counters) {
+    AWAIT_READY(metrics::remove(counter));
+  }
 }
 
 
@@ -330,20 +386,19 @@ TEST_F(MetricsTest, THREADSAFE_SnapshotTimeout)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // Parse the response.
-  Try<JSON::Object> responseJSON =
-      JSON::parse<JSON::Object>(response.get().body);
+  Try<JSON::Object> responseJSON = JSON::parse<JSON::Object>(response->body);
   ASSERT_SOME(responseJSON);
 
   // We can't use simple JSON equality testing here as initializing
   // libprocess adds metrics to the system. We want to only check if
   // the metrics from this test are correctly handled.
-  map<string, JSON::Value> values = responseJSON.get().values;
+  map<string, JSON::Value> values = responseJSON->values;
 
   EXPECT_EQ(1u, values.count("test/counter"));
-  EXPECT_FLOAT_EQ(0.0, values["test/counter"].as<JSON::Number>().as<double>());
+  EXPECT_DOUBLE_EQ(0.0, values["test/counter"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(1u, values.count("test/gauge"));
-  EXPECT_FLOAT_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
+  EXPECT_DOUBLE_EQ(42.0, values["test/gauge"].as<JSON::Number>().as<double>());
 
   EXPECT_EQ(0u, values.count("test/gauge_fail"));
   EXPECT_EQ(0u, values.count("test/gauge_timeout"));
@@ -365,10 +420,10 @@ TEST_F(MetricsTest, THREADSAFE_SnapshotTimeout)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
   // Parse the response.
-  responseJSON = JSON::parse<JSON::Object>(response.get().body);
+  responseJSON = JSON::parse<JSON::Object>(response->body);
   ASSERT_SOME(responseJSON);
 
-  values = responseJSON.get().values;
+  values = responseJSON->values;
 
   ASSERT_SOME(responseJSON);
   EXPECT_EQ(0u, values.count("test/counter"));
@@ -420,8 +475,7 @@ TEST_F(MetricsTest, SnapshotStatistics)
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
 
-  Try<JSON::Object> responseJSON =
-      JSON::parse<JSON::Object>(response.get().body);
+  Try<JSON::Object> responseJSON = JSON::parse<JSON::Object>(response->body);
 
   ASSERT_SOME(responseJSON);
 
@@ -429,7 +483,7 @@ TEST_F(MetricsTest, SnapshotStatistics)
   hashmap<string, double> responseValues;
   foreachpair (const string& key,
                const JSON::Value& value,
-               responseJSON.get().values) {
+               responseJSON->values) {
     if (value.is<JSON::Number>()) {
       // "test/counter/count" is an integer, everything else is a double.
       JSON::Number number = value.as<JSON::Number>();
@@ -440,7 +494,7 @@ TEST_F(MetricsTest, SnapshotStatistics)
   // Ensure the expected keys are in the response and that the values match
   // expectations.
   foreachkey (const string& key, expected) {
-    EXPECT_FLOAT_EQ(expected[key], responseValues[key]);
+    EXPECT_DOUBLE_EQ(expected[key], responseValues[key]);
   }
 
   AWAIT_READY(metrics::remove(counter));
@@ -465,7 +519,7 @@ TEST_F(MetricsTest, Timer)
 
   Future<double> value = timer.value();
   AWAIT_READY(value);
-  EXPECT_FLOAT_EQ(value.get(), Microseconds(1).ns());
+  EXPECT_DOUBLE_EQ(value.get(), static_cast<double>(Microseconds(1).ns()));
 
   // It is not an error to stop a timer that has already been stopped.
   timer.stop();
@@ -501,7 +555,7 @@ TEST_F(MetricsTest, AsyncTimer)
 
   // The future should have taken zero time.
   AWAIT_READY(t.value());
-  EXPECT_FLOAT_EQ(t.value().get(), 0.0);
+  EXPECT_DOUBLE_EQ(t.value().get(), 0.0);
 
   AWAIT_READY(metrics::remove(t));
 }

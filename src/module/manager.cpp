@@ -72,6 +72,7 @@ void ModuleManager::initialize()
   kindToVersion["Authorizer"] = MESOS_VERSION;
   kindToVersion["ContainerLogger"] = MESOS_VERSION;
   kindToVersion["Hook"] = MESOS_VERSION;
+  kindToVersion["HttpAuthenticatee"] = MESOS_VERSION;
   kindToVersion["HttpAuthenticator"] = MESOS_VERSION;
   kindToVersion["Isolator"] = MESOS_VERSION;
   kindToVersion["MasterContender"] = MESOS_VERSION;
@@ -80,6 +81,7 @@ void ModuleManager::initialize()
   kindToVersion["ResourceEstimator"] = MESOS_VERSION;
   kindToVersion["SecretResolver"] = MESOS_VERSION;
   kindToVersion["TestModule"] = MESOS_VERSION;
+  kindToVersion["DiskProfileAdaptor"] = MESOS_VERSION;
 
   // What happens then when Mesos is built with a certain version,
   // 'kindToVersion' states a certain other minimum version, and a

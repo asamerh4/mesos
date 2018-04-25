@@ -307,8 +307,8 @@ protected:
       EXIT(EXIT_FAILURE) << "Failed to detect a master: " << _master.failure();
     }
 
-    if (_master.get().isSome()) {
-      master = _master.get().get();
+    if (_master->isSome()) {
+      master = _master->get();
     } else {
       master = None();
     }
@@ -333,15 +333,14 @@ protected:
     connected = false;
 
     if (master.isSome()) {
-      LOG(INFO) << "New master detected at " << master.get().pid();
-      link(master.get().pid());
+      LOG(INFO) << "New master detected at " << master->pid();
+      link(master->pid());
 
       // Cancel the pending registration timer to avoid spurious attempts
       // at reregistration. `Clock::cancel` is idempotent, so this call
       // is safe even if no timer is active or pending.
       Clock::cancel(frameworkRegistrationTimer);
 
-#ifdef HAS_AUTHENTICATION
       if (credential.isSome()) {
         // Authenticate with the master.
         // TODO(adam-mesos): Consider adding an initial delay like we do for
@@ -358,15 +357,6 @@ protected:
         // (e.g., rate limiting tests).
         doReliableRegistration(flags.registration_backoff_factor);
       }
-#else
-      // Authentication not enabled on this platform. Proceed with registration
-      // without authentication.
-      reauthenticate = false;
-      LOG(INFO) << "Authentication is not available on this platform. "
-                   "Attempting to register without authentication";
-
-      doReliableRegistration(flags.registration_backoff_factor);
-#endif // HAS_AUTHENTICATION
     } else {
       // In this case, we don't actually invoke Scheduler::error
       // since we might get reconnected to a master imminently.
@@ -378,7 +368,6 @@ protected:
       .onAny(defer(self(), &SchedulerProcess::detected, lambda::_1));
   }
 
-#ifdef HAS_AUTHENTICATION
   void authenticate()
   {
     if (!running.load()) {
@@ -404,7 +393,7 @@ protected:
       return;
     }
 
-    LOG(INFO) << "Authenticating with master " << master.get().pid();
+    LOG(INFO) << "Authenticating with master " << master->pid();
 
     CHECK_SOME(credential);
 
@@ -439,7 +428,7 @@ protected:
     // --> '~Authenticatee()' is invoked by 'AuthenticateeProcess'.
     // TODO(vinod): Consider using 'Shared' to 'Owned' upgrade.
     authenticating =
-      authenticatee->authenticate(master.get().pid(), self(), credential.get())
+      authenticatee->authenticate(master->pid(), self(), credential.get())
         .onAny(defer(self(), &Self::_authenticate));
 
     delay(flags.authentication_timeout,
@@ -475,7 +464,7 @@ protected:
 
     if (reauthenticate || !future.isReady()) {
       LOG(INFO)
-        << "Failed to authenticate with master " << master.get().pid() << ": "
+        << "Failed to authenticate with master " << master->pid() << ": "
         << (reauthenticate ? "master changed" :
            (future.isFailed() ? future.failure() : "future discarded"));
 
@@ -504,14 +493,12 @@ protected:
     }
 
     if (!future.get()) {
-      LOG(ERROR) << "Master " << master.get().pid()
-                 << " refused authentication";
+      LOG(ERROR) << "Master " << master->pid() << " refused authentication";
       error("Master refused authentication");
       return;
     }
 
-    LOG(INFO) << "Successfully authenticated with master "
-              << master.get().pid();
+    LOG(INFO) << "Successfully authenticated with master " << master->pid();
 
     authenticated = true;
     authenticating = None();
@@ -537,7 +524,6 @@ protected:
       LOG(WARNING) << "Authentication timed out";
     }
   }
-#endif // HAS_AUTHENTICATION
 
   void drop(const Event& event, const string& message)
   {
@@ -667,6 +653,10 @@ protected:
         break;
       }
 
+      // TODO(greggomann): Implement handling of operation status updates.
+      case Event::UPDATE_OPERATION_STATUS:
+        break;
+
       case Event::MESSAGE: {
         if (!event.has_message()) {
           drop(event, "Expecting 'message' to be present");
@@ -748,11 +738,11 @@ protected:
       return;
     }
 
-    if (master.isNone() || from != master.get().pid()) {
+    if (master.isNone() || from != master->pid()) {
       LOG(WARNING)
         << "Ignoring framework registered message because it was sent "
         << "from '" << from << "' instead of the leading master '"
-        << (master.isSome() ? UPID(master.get().pid()) : UPID()) << "'";
+        << (master.isSome() ? UPID(master->pid()) : UPID()) << "'";
       return;
     }
 
@@ -779,26 +769,26 @@ protected:
       const MasterInfo& masterInfo)
   {
     if (!running.load()) {
-      VLOG(1) << "Ignoring framework re-registered message because "
+      VLOG(1) << "Ignoring framework reregistered message because "
               << "the driver is not running!";
       return;
     }
 
     if (connected) {
-      VLOG(1) << "Ignoring framework re-registered message because "
+      VLOG(1) << "Ignoring framework reregistered message because "
               << "the driver is already connected!";
       return;
     }
 
-    if (master.isNone() || from != master.get().pid()) {
+    if (master.isNone() || from != master->pid()) {
       LOG(WARNING)
-        << "Ignoring framework re-registered message because it was sent "
+        << "Ignoring framework reregistered message because it was sent "
         << "from '" << from << "' instead of the leading master '"
-        << (master.isSome() ? UPID(master.get().pid()) : UPID()) << "'";
+        << (master.isSome() ? UPID(master->pid()) : UPID()) << "'";
       return;
     }
 
-    LOG(INFO) << "Framework re-registered with " << frameworkId;
+    LOG(INFO) << "Framework reregistered with " << frameworkId;
 
     CHECK(framework.id() == frameworkId);
 
@@ -825,15 +815,11 @@ protected:
       return;
     }
 
-#ifdef HAS_AUTHENTICATION
     if (credential.isSome() && !authenticated) {
       return;
     }
-#else
-    authenticated = false;
-#endif // HAS_AUTHENTICATION
 
-    VLOG(1) << "Sending SUBSCRIBE call to " << master.get().pid();
+    VLOG(1) << "Sending SUBSCRIBE call to " << master->pid();
 
     Call call;
     call.set_type(Call::SUBSCRIBE);
@@ -846,7 +832,7 @@ protected:
       call.mutable_framework_id()->CopyFrom(framework.id());
     }
 
-    send(master.get().pid(), call);
+    send(master->pid(), call);
 
     // Bound the maximum backoff by 'REGISTRATION_RETRY_INTERVAL_MAX'.
     maxBackoff =
@@ -856,7 +842,7 @@ protected:
     // by 1/10th of the failover timeout.
     if (framework.has_failover_timeout()) {
       Try<Duration> duration = Duration::create(framework.failover_timeout());
-      if (duration.isSome()) {
+      if (duration.isSome() && duration.get() > Duration::zero()) {
         maxBackoff = std::min(maxBackoff, duration.get() / 10);
       }
     }
@@ -892,10 +878,10 @@ protected:
 
     CHECK_SOME(master);
 
-    if (from != master.get().pid()) {
+    if (from != master->pid()) {
       VLOG(1) << "Ignoring resource offers message because it was sent "
               << "from '" << from << "' instead of the leading master '"
-              << master.get().pid() << "'";
+              << master->pid() << "'";
       return;
     }
 
@@ -949,10 +935,10 @@ protected:
 
     CHECK_SOME(master);
 
-    if (from != master.get().pid()) {
+    if (from != master->pid()) {
       VLOG(1) << "Ignoring rescind offer message because it was sent "
               << "from '" << from << "' instead of the leading master '"
-              << master.get().pid() << "'";
+              << master->pid() << "'";
       return;
     }
 
@@ -991,10 +977,10 @@ protected:
 
       CHECK_SOME(master);
 
-      if (from != master.get().pid()) {
+      if (from != master->pid()) {
         VLOG(1) << "Ignoring status update message because it was sent "
                 << "from '" << from << "' instead of the leading master '"
-                << master.get().pid() << "'";
+                << master->pid() << "'";
         return;
       }
     }
@@ -1058,7 +1044,7 @@ protected:
         CHECK_SOME(master);
 
         VLOG(2) << "Sending ACK for status update " << update
-                << " to " << master.get().pid();
+                << " to " << master->pid();
 
         Call call;
 
@@ -1072,7 +1058,7 @@ protected:
         acknowledge->set_uuid(update.uuid());
 
         CHECK_SOME(master);
-        send(master.get().pid(), call);
+        send(master->pid(), call);
       }
     }
   }
@@ -1093,10 +1079,10 @@ protected:
 
     CHECK_SOME(master);
 
-    if (from != master.get().pid()) {
+    if (from != master->pid()) {
       VLOG(1) << "Ignoring lost agent message because it was sent "
               << "from '" << from << "' instead of the leading master '"
-              << master.get().pid() << "'";
+              << master->pid() << "'";
       return;
     }
 
@@ -1133,10 +1119,10 @@ protected:
     }
 
     CHECK_SOME(master);
-    if (from != master.get().pid()) {
+    if (from != master->pid()) {
       VLOG(1) << "Ignoring lost executor message because it was sent "
               << "from '" << from << "' instead of the leading master '"
-              << master.get().pid() << "'";
+              << master->pid() << "'";
       return;
     }
 
@@ -1214,7 +1200,7 @@ protected:
       call.set_type(Call::TEARDOWN);
 
       CHECK_SOME(master);
-      send(master.get().pid(), call);
+      send(master->pid(), call);
     }
 
     synchronized (mutex) {
@@ -1240,7 +1226,7 @@ protected:
       DeactivateFrameworkMessage message;
       message.mutable_framework_id()->MergeFrom(framework.id());
       CHECK_SOME(master);
-      send(master.get().pid(), message);
+      send(master->pid(), message);
     }
 
     synchronized (mutex) {
@@ -1265,7 +1251,7 @@ protected:
     kill->mutable_task_id()->CopyFrom(taskId);
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
   void requestResources(const vector<Request>& requests)
@@ -1287,7 +1273,7 @@ protected:
     }
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
   void launchTasks(const vector<OfferID>& offerIds,
@@ -1398,7 +1384,7 @@ protected:
     accept->mutable_filters()->CopyFrom(filters);
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
   void declineOffer(
@@ -1429,7 +1415,7 @@ protected:
     decline->mutable_filters()->CopyFrom(filters);
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
   void reviveOffers()
@@ -1446,7 +1432,7 @@ protected:
     call.set_type(Call::REVIVE);
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
   void suppressOffers()
@@ -1463,7 +1449,7 @@ protected:
     call.set_type(Call::SUPPRESS);
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
   void acknowledgeStatusUpdate(
@@ -1496,7 +1482,7 @@ protected:
       VLOG(2) << "Sending ACK for status update " << status.uuid()
               << " of task " << status.task_id()
               << " on agent " << status.slave_id()
-              << " to " << master.get().pid();
+              << " to " << master->pid();
 
       Call call;
 
@@ -1509,7 +1495,7 @@ protected:
       acknowledge->mutable_task_id()->CopyFrom(status.task_id());
       acknowledge->set_uuid(status.uuid());
 
-      send(master.get().pid(), call);
+      send(master->pid(), call);
     } else {
       VLOG(2) << "Received ACK for status update"
               << (status.has_uuid() ? " " + status.uuid() : "")
@@ -1531,7 +1517,7 @@ protected:
     VLOG(2) << "Asked to send framework message to agent "
             << slaveId;
 
-    // TODO(benh): After a scheduler has re-registered it won't have
+    // TODO(benh): After a scheduler has reregistered it won't have
     // any saved slave PIDs, maybe it makes sense to try and save each
     // PID that this scheduler tries to send a message to? Or we can
     // just wait for them to recollect as new offers come in and get
@@ -1565,7 +1551,7 @@ protected:
       message->set_data(data);
 
       CHECK_SOME(master);
-      send(master.get().pid(), call);
+      send(master->pid(), call);
     }
   }
 
@@ -1593,7 +1579,7 @@ protected:
     }
 
     CHECK_SOME(master);
-    send(master.get().pid(), call);
+    send(master->pid(), call);
   }
 
 private:
@@ -1735,7 +1721,7 @@ void MesosSchedulerDriver::initialize() {
   // Initialize logging.
   // TODO(benh): Replace whitespace in framework.name() with '_'?
   if (flags.initialize_driver_logging) {
-    logging::initialize(framework.name(), flags);
+    logging::initialize(framework.name(), false, flags);
   } else {
     VLOG(1) << "Disabling initialization of GLOG logging";
   }
@@ -1808,7 +1794,7 @@ MesosSchedulerDriver::MesosSchedulerDriver(
     status(DRIVER_NOT_STARTED),
     implicitAcknowlegements(true),
     credential(nullptr),
-    schedulerId("scheduler-" + UUID::random().toString())
+    schedulerId("scheduler-" + id::UUID::random().toString())
 {
   initialize();
 }
@@ -1828,7 +1814,7 @@ MesosSchedulerDriver::MesosSchedulerDriver(
     status(DRIVER_NOT_STARTED),
     implicitAcknowlegements(true),
     credential(new Credential(_credential)),
-    schedulerId("scheduler-" + UUID::random().toString())
+    schedulerId("scheduler-" + id::UUID::random().toString())
 {
   initialize();
 }
@@ -1848,7 +1834,7 @@ MesosSchedulerDriver::MesosSchedulerDriver(
     status(DRIVER_NOT_STARTED),
     implicitAcknowlegements(_implicitAcknowlegements),
     credential(nullptr),
-    schedulerId("scheduler-" + UUID::random().toString())
+    schedulerId("scheduler-" + id::UUID::random().toString())
 {
   initialize();
 }
@@ -1869,7 +1855,7 @@ MesosSchedulerDriver::MesosSchedulerDriver(
     status(DRIVER_NOT_STARTED),
     implicitAcknowlegements(_implicitAcknowlegements),
     credential(new Credential(_credential)),
-    schedulerId("scheduler-" + UUID::random().toString())
+    schedulerId("scheduler-" + id::UUID::random().toString())
 {
   initialize();
 }

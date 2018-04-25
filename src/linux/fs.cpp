@@ -38,17 +38,18 @@ extern "C" {
 #include <stout/adaptor.hpp>
 #include <stout/check.hpp>
 #include <stout/error.hpp>
+#include <stout/fs.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
 #include <stout/numify.hpp>
+#include <stout/option.hpp>
+#include <stout/os.hpp>
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
 #include <stout/synchronized.hpp>
 
-#include <stout/fs.hpp>
-#include <stout/os.hpp>
-
 #include <stout/os/read.hpp>
+#include <stout/os/realpath.hpp>
 #include <stout/os/shell.hpp>
 #include <stout/os/stat.hpp>
 
@@ -95,6 +96,38 @@ Try<bool> supported(const string& fsname)
   }
 
   return false;
+}
+
+
+Try<bool> dtypeSupported(const string& directory)
+{
+  DIR* dir = ::opendir(directory.c_str());
+
+  if (dir == nullptr) {
+    return ErrnoError("Failed to open '" + directory + "'");
+  }
+
+  bool result = true;
+  struct dirent* entry;
+
+  errno = 0;
+  while ((entry = ::readdir(dir)) != nullptr) {
+    if (entry->d_type == DT_UNKNOWN) {
+      result = false;
+    }
+  }
+
+  if (errno != 0) {
+    Error error = ErrnoError("Failed to read '" + directory + "'");
+    ::closedir(dir);
+    return error;
+  }
+
+  if (::closedir(dir) == -1) {
+    return ErrnoError("Failed to close '" + directory + "'");
+  }
+
+  return result;
 }
 
 
@@ -230,6 +263,44 @@ Try<MountInfoTable> MountInfoTable::read(
   }
 
   return MountInfoTable::read(lines.get(), hierarchicalSort);
+}
+
+
+Try<MountInfoTable::Entry> MountInfoTable::findByTarget(
+    const std::string& target)
+{
+  Result<string> realTarget = os::realpath(target);
+  if (!realTarget.isSome()) {
+    return Error(
+        "Failed to get the realpath of '" + target + "'"
+        ": " + (realTarget.isError() ? realTarget.error() : "Not found"));
+  }
+
+  Try<MountInfoTable> table = read(None(), true);
+  if (table.isError()) {
+    return Error("Failed to get mount table: " + table.error());
+  }
+
+  // Trying to find the mount entry that contains the 'realTarget'. We
+  // achieve that by doing a reverse traverse of the mount table to
+  // find the first entry whose target is a prefix of the specified
+  // 'realTarget'.
+  foreach (const Entry& entry, adaptor::reverse(table->entries)) {
+    if (entry.target == realTarget.get()) {
+      return entry;
+    }
+
+    // NOTE: We have to use `path::join(entry.target, "")` here
+    // to make sure the parent is a directory.
+    if (strings::startsWith(realTarget.get(), path::join(entry.target, ""))) {
+      return entry;
+    }
+  }
+
+  // It's unlikely that we cannot find the immediate parent because
+  // '/' is always mounted and will be the immediate parent if no
+  // other mounts found in between.
+  return Error("Not found");
 }
 
 
@@ -424,11 +495,11 @@ Try<Nothing> mount(const Option<string>& source,
   //           unsigned long mountflags,
   //           const void *data);
   if (::mount(
-        (source.isSome() ? source.get().c_str() : nullptr),
-        target.c_str(),
-        (type.isSome() ? type.get().c_str() : nullptr),
-        flags,
-        data) < 0) {
+          (source.isSome() ? source->c_str() : nullptr),
+          target.c_str(),
+          (type.isSome() ? type->c_str() : nullptr),
+          flags,
+          data) < 0) {
     return ErrnoError();
   }
 
@@ -447,7 +518,7 @@ Try<Nothing> mount(const Option<string>& source,
       target,
       type,
       flags,
-      options.isSome() ? options.get().c_str() : nullptr);
+      options.isSome() ? options->c_str() : nullptr);
 }
 
 
@@ -471,7 +542,7 @@ Try<Nothing> unmountAll(const string& target, int flags)
   }
 
   foreach (const MountTable::Entry& entry,
-           adaptor::reverse(mountTable.get().entries)) {
+           adaptor::reverse(mountTable->entries)) {
     if (strings::startsWith(entry.dir, target)) {
       Try<Nothing> unmount = fs::unmount(entry.dir, flags);
       if (unmount.isError()) {
@@ -483,17 +554,18 @@ Try<Nothing> unmountAll(const string& target, int flags)
       // still catch the error here in case there's an error somewhere
       // else while running this command.
       // TODO(xujyan): Consider using `setmntent(3)` to implement this.
-      int status = os::spawn("umount", {"umount", "--fake", entry.dir});
+      const Option<int> status =
+        os::spawn("umount", {"umount", "--fake", entry.dir});
 
       const string message =
         "Failed to clean up '" + entry.dir + "' in /etc/mtab";
 
-      if (status == -1) {
+      if (status.isNone()) {
         return ErrnoError(message);
       }
 
-      if (!WSUCCEEDED(status)) {
-        return Error(message + ": " + WSTRINGIFY(status));
+      if (!WSUCCEEDED(status.get())) {
+        return Error(message + ": " + WSTRINGIFY(status.get()));
       }
     }
   }
@@ -544,7 +616,12 @@ namespace chroot {
 
 namespace internal {
 
-Try<Nothing> copyDeviceNode(const string& source, const string& target)
+// Make the source device node appear at the target path. We prefer to
+// `mknod` the device node since that avoids an otherwise unnecessary
+// mount table entry. The `mknod` can fail if we are in a user namespace
+// or if the devices cgroup is restricting that device. In that case, we
+// bind mount the device to the target path.
+Try<Nothing> importDeviceNode(const string& source, const string& target)
 {
   // We are likely to be operating in a multi-threaded environment so
   // it's not safe to change the umask. Instead, we'll explicitly set
@@ -560,13 +637,23 @@ Try<Nothing> copyDeviceNode(const string& source, const string& target)
   }
 
   Try<Nothing> mknod = os::mknod(target, mode.get(), dev.get());
-  if (mknod.isError()) {
-    return Error("Failed to create device:" + mknod.error());
+  if (mknod.isSome()) {
+    Try<Nothing> chmod = os::chmod(target, mode.get());
+    if (chmod.isError()) {
+      return Error("Failed to chmod device: " + chmod.error());
+    }
+
+    return Nothing();
   }
 
-  Try<Nothing> chmod = os::chmod(target, mode.get());
-  if (chmod.isError()) {
-    return Error("Failed to chmod device: " + chmod.error());
+  Try<Nothing> touch = os::touch(target);
+  if (touch.isError()) {
+    return Error("Failed to create device mount point: " + touch.error());
+  }
+
+  Try<Nothing> mnt = fs::mount(source, target, None(), MS_BIND, None());
+  if (mnt.isError()) {
+    return Error("Failed to bind device: " + touch.error());
   }
 
   return Nothing();
@@ -595,14 +682,124 @@ Try<Nothing> mountSpecialFilesystems(const string& root)
   // List of special filesystems useful for a chroot environment.
   // NOTE: This list is ordered, e.g., mount /proc before bind
   // mounting /proc/sys and then making it read-only.
-  vector<Mount> mounts = {
-    {"proc",      "/proc",     "proc",   None(),      MS_NOSUID | MS_NOEXEC | MS_NODEV},             // NOLINT(whitespace/line_length)
-    {"/proc/sys", "/proc/sys", None(),   None(),      MS_BIND},
-    {None(),      "/proc/sys", None(),   None(),      MS_BIND | MS_RDONLY | MS_REMOUNT},             // NOLINT(whitespace/line_length)
-    {"sysfs",     "/sys",      "sysfs",  None(),      MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV}, // NOLINT(whitespace/line_length)
-    {"tmpfs",     "/dev",      "tmpfs",  "mode=755",  MS_NOSUID | MS_STRICTATIME},                   // NOLINT(whitespace/line_length)
-    {"devpts",    "/dev/pts",  "devpts", "newinstance,ptmxmode=0666", MS_NOSUID | MS_NOEXEC},        // NOLINT(whitespace/line_length)
-    {"tmpfs",     "/dev/shm",  "tmpfs",  "mode=1777", MS_NOSUID | MS_NODEV | MS_STRICTATIME},        // NOLINT(whitespace/line_length)
+  //
+  // TODO(jasonlai): These special filesystem mount points need to be
+  // bind-mounted prior to all other mount points specified in
+  // `ContainerLaunchInfo`.
+  //
+  // One example of the known issues caused by this behavior is:
+  // https://issues.apache.org/jira/browse/MESOS-6798
+  // There will be follow-up efforts on moving the logic below to
+  // proper isolators.
+  //
+  // TODO(jasonlai): Consider adding knobs to allow write access to
+  // those system files if configured by the operator.
+  static const vector<Mount> mounts = {
+    {
+      "proc",
+      "/proc",
+      "proc",
+      None(),
+      MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "/proc/bus",
+      "/proc/bus",
+      None(),
+      None(),
+      MS_BIND
+    },
+    {
+      None(),
+      "/proc/bus",
+      None(),
+      None(),
+      MS_BIND | MS_RDONLY | MS_REMOUNT | MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "/proc/fs",
+      "/proc/fs",
+      None(),
+      None(),
+      MS_BIND
+    },
+    {
+      None(),
+      "/proc/fs",
+      None(),
+      None(),
+      MS_BIND | MS_RDONLY | MS_REMOUNT | MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "/proc/irq",
+      "/proc/irq",
+      None(),
+      None(),
+      MS_BIND
+    },
+    {
+      None(),
+      "/proc/irq",
+      None(),
+      None(),
+      MS_BIND | MS_RDONLY | MS_REMOUNT | MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "/proc/sys",
+      "/proc/sys",
+      None(),
+      None(),
+      MS_BIND
+    },
+    {
+      None(),
+      "/proc/sys",
+      None(),
+      None(),
+      MS_BIND | MS_RDONLY | MS_REMOUNT | MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "/proc/sysrq-trigger",
+      "/proc/sysrq-trigger",
+      None(),
+      None(),
+      MS_BIND
+    },
+    {
+      None(),
+      "/proc/sysrq-trigger",
+      None(),
+      None(),
+      MS_BIND | MS_RDONLY | MS_REMOUNT | MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "sysfs",
+      "/sys",
+      "sysfs",
+      None(),
+      MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV
+    },
+    {
+      "tmpfs",
+      "/dev",
+      "tmpfs",
+      "mode=755",
+      MS_NOSUID | MS_STRICTATIME | MS_NOEXEC
+    },
+    {
+      "devpts",
+      "/dev/pts",
+      "devpts",
+      "newinstance,ptmxmode=0666",
+      MS_NOSUID | MS_NOEXEC
+    },
+    {
+      "tmpfs",
+      "/dev/shm",
+      "tmpfs",
+      "mode=1777",
+      MS_NOSUID | MS_NODEV | MS_STRICTATIME
+    },
   };
 
   foreach (const Mount& mount, mounts) {
@@ -674,24 +871,25 @@ Try<Nothing> createStandardDevices(const string& root)
     }
   }
 
-  // Inject each device into the chroot environment. Copy both the
+  // Import each device into the chroot environment. Copy both the
   // mode and the device itself from the corresponding host device.
   foreach (const string& device, devices) {
-    Try<Nothing> copy = copyDeviceNode(
+    Try<Nothing> import = importDeviceNode(
         path::join("/",  "dev", device),
         path::join(root, "dev", device));
 
-    if (copy.isError()) {
-      return Error("Failed to copy device '" + device + "': " + copy.error());
+    if (import.isError()) {
+      return Error(
+          "Failed to import device '" + device + "': " + import.error());
     }
   }
 
-  vector<SymLink> symlinks = {
+  const vector<SymLink> symlinks = {
     {"/proc/self/fd",   path::join(root, "dev", "fd")},
     {"/proc/self/fd/0", path::join(root, "dev", "stdin")},
     {"/proc/self/fd/1", path::join(root, "dev", "stdout")},
     {"/proc/self/fd/2", path::join(root, "dev", "stderr")},
-    {"pts/ptmx",       path::join(root, "dev", "ptmx")}
+    {"pts/ptmx",        path::join(root, "dev", "ptmx")}
   };
 
   foreach (const SymLink& symlink, symlinks) {
@@ -813,7 +1011,7 @@ Try<Nothing> enter(const string& root)
   // The old root is now relative to chroot so remove the chroot path.
   const string relativeOld = strings::remove(old.get(), root, strings::PREFIX);
 
-  foreach (const fs::MountTable::Entry& entry, mountTable.get().entries) {
+  foreach (const fs::MountTable::Entry& entry, mountTable->entries) {
     // TODO(idownes): sort the entries and remove depth first so we
     // don't rely on the lazy umount and can check the status.
     if (strings::startsWith(entry.dir, relativeOld)) {

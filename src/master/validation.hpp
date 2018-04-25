@@ -66,16 +66,8 @@ namespace message {
 // guarantees at the libprocess level that would prevent arbitrary UPID
 // impersonation (MESOS-7424).
 
-Option<Error> registerSlave(
-    const SlaveInfo& slaveInfo,
-    const std::vector<Resource>& checkpointedResources);
-
-Option<Error> reregisterSlave(
-    const SlaveInfo& slaveInfo,
-    const std::vector<Task>& tasks,
-    const std::vector<Resource>& resources,
-    const std::vector<ExecutorInfo>& executorInfos,
-    const std::vector<FrameworkInfo>& frameworkInfos);
+Option<Error> registerSlave(const RegisterSlaveMessage& message);
+Option<Error> reregisterSlave(const ReregisterSlaveMessage& message);
 
 } // namespace message {
 } // namespace master {
@@ -132,6 +124,14 @@ Option<Error> validate(
 
 
 namespace resource {
+
+// Functions in this namespace are only exposed for testing.
+namespace internal {
+
+Option<Error> validateSingleResourceProvider(
+    const google::protobuf::RepeatedPtrField<Resource>& resources);
+
+} // namespace internal {
 
 // Validates resources specified by frameworks.
 // NOTE: We cannot take 'Resources' here because invalid resources are
@@ -297,6 +297,12 @@ Option<Error> validate(
     const hashmap<FrameworkID, Resources>& usedResources,
     const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks,
     const Option<FrameworkInfo>& frameworkInfo = None());
+
+
+Option<Error> validate(const Offer::Operation::CreateVolume& createVolume);
+Option<Error> validate(const Offer::Operation::DestroyVolume& destroyVolume);
+Option<Error> validate(const Offer::Operation::CreateBlock& createBlock);
+Option<Error> validate(const Offer::Operation::DestroyBlock& destroyBlock);
 
 } // namespace operation {
 

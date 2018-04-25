@@ -21,7 +21,7 @@
 
 #include <google/protobuf/message.h>
 
-#include <grpc++/grpc++.h>
+#include <grpcpp/grpcpp.h>
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
@@ -64,12 +64,30 @@ public:
             ::grpc::InsecureChannelCredentials())
     : channel(::grpc::CreateChannel(uri, credentials)) {}
 
+  explicit Channel(std::shared_ptr<::grpc::Channel> _channel)
+    : channel(std::move(_channel)) {}
+
 private:
   std::shared_ptr<::grpc::Channel> channel;
 
   friend class client::Runtime;
 };
 
+
+/**
+ * The response of a RPC call. It includes the gRPC `Status`
+ * (https://grpc.io/grpc/cpp/classgrpc_1_1_status.html), and
+ * the actual protobuf response body.
+ */
+template <typename T>
+struct RpcResult
+{
+  RpcResult(const ::grpc::Status& _status, const T& _response)
+    : status(_status), response(_response) {}
+
+  ::grpc::Status status;
+  T response;
+};
 
 namespace client {
 
@@ -101,7 +119,7 @@ public:
    * @return a `Future` waiting for a response protobuf.
    */
   template <typename Stub, typename Request, typename Response>
-  Future<Response> call(
+  Future<RpcResult<Response>> call(
       const Channel& channel,
       std::unique_ptr<::grpc::ClientAsyncResponseReader<Response>>(Stub::*rpc)(
           ::grpc::ClientContext*,
@@ -125,11 +143,18 @@ public:
       context->set_deadline(
           std::chrono::system_clock::now() + std::chrono::seconds(5));
 
+      // Enable the gRPC wait-for-ready semantics by default. See:
+      // https://github.com/grpc/grpc/blob/master/doc/wait-for-ready.md
+      // TODO(chhsiao): Allow the caller to set the option.
+      context->set_wait_for_ready(true);
+
       // Create a `Promise` and a callback lambda as a tag and invokes
       // an asynchronous gRPC call through the `CompletionQueue`
       // managed by `data`. The `Promise` will be set by the callback
       // upon server response.
-      std::shared_ptr<Promise<Response>> promise(new Promise<Response>);
+      std::shared_ptr<Promise<RpcResult<Response>>> promise(
+          new Promise<RpcResult<Response>>);
+
       promise->future().onDiscard([=] { context->TryCancel(); });
 
       std::shared_ptr<Response> response(new Response());
@@ -150,11 +175,10 @@ public:
                 CHECK(promise->future().isPending());
                 if (promise->future().hasDiscard()) {
                   promise->discard();
-                } else if (status->ok()) {
-                  promise->set(*response);
-                } else {
-                  promise->fail(status->error_message());
+                  return;
                 }
+
+                promise->set(RpcResult<Response>(*status, *response));
               }));
 
       return promise->future();
@@ -188,8 +212,8 @@ private:
     std::unique_ptr<std::thread> looper;
     ::grpc::CompletionQueue queue;
     ProcessBase process;
-    std::atomic_flag lock;
-    bool terminating;
+    std::atomic_flag lock = ATOMIC_FLAG_INIT;
+    bool terminating = false;
     Promise<Nothing> terminated;
   };
 

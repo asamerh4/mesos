@@ -13,20 +13,18 @@
 #ifndef __STOUT_WINDOWS_OS_HPP__
 #define __STOUT_WINDOWS_OS_HPP__
 
-#include <direct.h>
-#include <io.h>
-#include <Psapi.h>
-#include <TlHelp32.h>
-#include <Userenv.h>
-
 #include <sys/utime.h>
 
+#include <algorithm>
 #include <list>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <set>
 #include <string>
+#include <vector>
 
+#include <stout/bytes.hpp>
 #include <stout/duration.hpp>
 #include <stout/none.hpp>
 #include <stout/nothing.hpp>
@@ -46,21 +44,17 @@
 #include <stout/os/raw/environment.hpp>
 #include <stout/os/windows/fd.hpp>
 
+// NOTE: These system headers must be included after `stout/windows.hpp`
+// as they may include `Windows.h`. See comments in `stout/windows.hpp`
+// for why this ordering is important.
+#include <direct.h>
+#include <io.h>
+#include <Psapi.h>
+#include <TlHelp32.h>
+#include <Userenv.h>
+
 namespace os {
 namespace internal {
-
-inline Try<OSVERSIONINFOEXW> os_version()
-{
-  OSVERSIONINFOEXW os_version;
-  os_version.dwOSVersionInfoSize = sizeof(os_version);
-  if (!::GetVersionExW(reinterpret_cast<LPOSVERSIONINFO>(&os_version))) {
-    return WindowsError(
-        "os::internal::os_version: Call to `GetVersionEx` failed");
-  }
-
-  return os_version;
-}
-
 
 inline Try<std::string> nodename()
 {
@@ -74,7 +68,7 @@ inline Try<std::string> nodename()
   COMPUTER_NAME_FORMAT format = ComputerNamePhysicalDnsHostname;
   DWORD size = 0;
   if (::GetComputerNameExW(format, nullptr, &size) == 0) {
-    if (GetLastError() != ERROR_MORE_DATA) {
+    if (::GetLastError() != ERROR_MORE_DATA) {
       return WindowsError();
     }
   }
@@ -87,58 +81,6 @@ inline Try<std::string> nodename()
   }
 
   return stringify(std::wstring(buffer.data()));
-}
-
-
-inline std::string machine()
-{
-  SYSTEM_INFO system_info;
-  ::GetNativeSystemInfo(&system_info);
-
-  switch (system_info.wProcessorArchitecture) {
-    case PROCESSOR_ARCHITECTURE_AMD64:
-      return "AMD64";
-    case PROCESSOR_ARCHITECTURE_ARM:
-      return "ARM";
-    case PROCESSOR_ARCHITECTURE_IA64:
-      return "IA64";
-    case PROCESSOR_ARCHITECTURE_INTEL:
-      return "x86";
-    default:
-      return "Unknown";
-  }
-}
-
-
-inline std::string sysname(OSVERSIONINFOEXW os_version)
-{
-  switch (os_version.wProductType) {
-    case VER_NT_DOMAIN_CONTROLLER:
-    case VER_NT_SERVER:
-      return "Windows Server";
-    default:
-      return "Windows";
-  }
-}
-
-
-inline std::string release(OSVERSIONINFOEXW os_version)
-{
-  return stringify(
-      Version(os_version.dwMajorVersion, os_version.dwMinorVersion, 0));
-}
-
-
-inline std::string version(OSVERSIONINFOEXW os_version)
-{
-  std::string version = std::to_string(os_version.dwBuildNumber);
-
-  if (os_version.szCSDVersion[0] != L'\0') {
-    version.append(" ");
-    version.append(stringify(os_version.szCSDVersion));
-  }
-
-  return version;
 }
 
 } // namespace internal {
@@ -179,7 +121,16 @@ inline Try<std::set<pid_t>> pids(Option<pid_t> group, Option<pid_t> session)
     max_items *= 2;
   } while (bytes_returned >= size_in_bytes);
 
-  return std::set<pid_t>(processes.begin(), processes.end());
+  std::set<pid_t> pids_set(processes.begin(), processes.end());
+
+  // NOTE: The PID `0` will always be returned by `EnumProcesses`; however, it
+  // is the PID of Windows' System Idle Process. While the PID is valid, using
+  // it for anything is almost always invalid. For instance, `OpenProcess` will
+  // fail with an invalid parameter error if the user tries to get a handle for
+  // PID `0`. In the interest of safety, we prevent the `pids` API from ever
+  // including the PID `0`.
+  pids_set.erase(0);
+  return pids_set;
 }
 
 
@@ -198,10 +149,10 @@ inline void setenv(
 {
   // Do not set the variable if already set and `overwrite` was not specified.
   //
-  // Per MSDN[1], `GetEnvironmentVariable` returns 0 on error and sets the
+  // Per MSDN, `GetEnvironmentVariable` returns 0 on error and sets the
   // error code to `ERROR_ENVVAR_NOT_FOUND` if the variable was not found.
   //
-  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/ms683188(v=vs.85).aspx
+  // https://msdn.microsoft.com/en-us/library/windows/desktop/ms683188(v=vs.85).aspx // NOLINT(whitespace/line_length)
   if (!overwrite &&
       ::GetEnvironmentVariableW(wide_stringify(key).data(), nullptr, 0) != 0 &&
       ::GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
@@ -221,6 +172,13 @@ inline void unsetenv(const std::string& key)
   // Per MSDN documentation[1], passing `nullptr` as the value will cause
   // `SetEnvironmentVariable` to delete the key from the process's environment.
   ::SetEnvironmentVariableW(wide_stringify(key).data(), nullptr);
+}
+
+
+// NOTE: This exists for compatibility with the POSIX API.
+inline void eraseenv(const std::string& key)
+{
+  unsetenv(key);
 }
 
 
@@ -390,9 +348,9 @@ inline Try<std::list<std::string>> glob(const std::string& pattern) = delete;
 // Returns the total number of cpus (cores).
 inline Try<long> cpus()
 {
-  SYSTEM_INFO sysInfo;
-  ::GetSystemInfo(&sysInfo);
-  return static_cast<long>(sysInfo.dwNumberOfProcessors);
+  SYSTEM_INFO sys_info;
+  ::GetSystemInfo(&sys_info);
+  return static_cast<long>(sys_info.dwNumberOfProcessors);
 }
 
 // Returns load struct with average system loads for the last
@@ -429,43 +387,11 @@ inline Try<Memory> memory()
 }
 
 
-inline Try<Version> release()
-{
-  OSVERSIONINFOEXW os_version;
-  os_version.dwOSVersionInfoSize = sizeof(os_version);
-  if (!::GetVersionExW(reinterpret_cast<LPOSVERSIONINFO>(&os_version))) {
-    return WindowsError("os::release: Call to `GetVersionEx` failed");
-  }
-
-  return Version(os_version.dwMajorVersion, os_version.dwMinorVersion, 0);
-}
+inline Try<Version> release() = delete;
 
 
 // Return the system information.
-inline Try<UTSInfo> uname()
-{
-  Try<OSVERSIONINFOEXW> os_version = internal::os_version();
-  if (os_version.isError()) {
-    return Error(os_version.error());
-  }
-
-  // Add nodename to `UTSInfo` object.
-  Try<std::string> nodename = internal::nodename();
-  if (nodename.isError()) {
-    return Error(nodename.error());
-  }
-
-  // Populate `UTSInfo`.
-  UTSInfo info;
-
-  info.sysname = internal::sysname(os_version.get());
-  info.release = internal::release(os_version.get());
-  info.version = internal::version(os_version.get());
-  info.nodename = nodename.get();
-  info.machine = internal::machine();
-
-  return info;
-}
+inline Try<UTSInfo> uname() = delete;
 
 
 inline tm* gmtime_r(const time_t* timep, tm* result)
@@ -501,7 +427,7 @@ inline Result<PROCESSENTRY32W> process_entry(pid_t pid)
     // should return `None`, since we won't find the PID we're looking for, but
     // we elect to return `Error` because something terrible has probably
     // happened.
-    if (GetLastError() != ERROR_SUCCESS) {
+    if (::GetLastError() != ERROR_SUCCESS) {
       return WindowsError("os::process_entry: Call to `Process32First` failed");
     } else {
       return Error("os::process_entry: Call to `Process32First` failed");
@@ -517,7 +443,7 @@ inline Result<PROCESSENTRY32W> process_entry(pid_t pid)
 
     has_next = Process32Next(safe_snapshot_handle.get(), &process_entry);
     if (has_next == FALSE) {
-      DWORD last_error = GetLastError();
+      DWORD last_error = ::GetLastError();
       if (last_error != ERROR_NO_MORE_FILES && last_error != ERROR_SUCCESS) {
         return WindowsError(
             "os::process_entry: Call to `Process32Next` failed");
@@ -534,6 +460,13 @@ inline Result<PROCESSENTRY32W> process_entry(pid_t pid)
 // something went wrong.
 inline Result<Process> process(pid_t pid)
 {
+  if (pid == 0) {
+    // The 0th PID is that of the System Idle Process on Windows. However, it is
+    // invalid to attempt to get a proces handle or else perform any operation
+    // on this pseudo-process.
+    return Error("os::process: Invalid parameter: pid == 0");
+  }
+
   // Find process with pid.
   Result<PROCESSENTRY32W> entry = process_entry(pid);
 
@@ -548,7 +481,8 @@ inline Result<Process> process(pid_t pid)
       false,
       pid);
 
-  if (process_handle == INVALID_HANDLE_VALUE) {
+  // ::OpenProcess returns `NULL`, not `INVALID_HANDLE_VALUE` on failure.
+  if (process_handle == nullptr) {
     return WindowsError("os::process: Call to `OpenProcess` failed");
   }
 
@@ -615,143 +549,6 @@ inline int random()
 }
 
 
-// `name_job` maps a `pid` to a `wstring` name for a job object.
-// Only named job objects are accessible via `OpenJobObject`.
-// Thus all our job objects must be named. This is essentially a shim
-// to map the Linux concept of a process tree's root `pid` to a
-// named job object so that the process group can be treated similarly.
-inline Try<std::wstring> name_job(pid_t pid) {
-  Try<std::string> alpha_pid = strings::internal::format("MESOS_JOB_%X", pid);
-  if (alpha_pid.isError()) {
-    return Error(alpha_pid.error());
-  }
-  return wide_stringify(alpha_pid.get());
-}
-
-
-// `open_job` returns a safe shared handle to the named job object `name`.
-// `desired_access` is a job object access rights flag.
-// `inherit_handles` if true, processes created by this
-// process will inherit the handle. Otherwise, the processes
-// do not inherit this handle.
-inline Try<SharedHandle> open_job(
-    const DWORD desired_access,
-    BOOL inherit_handles,
-    const std::wstring& name)
-{
-  SharedHandle jobHandle(
-      ::OpenJobObjectW(
-          desired_access,
-          inherit_handles,
-          name.data()),
-      ::CloseHandle);
-
-  if (jobHandle.get() == nullptr) {
-    return WindowsError(
-        "os::open_job: Call to `OpenJobObject` failed for job: " +
-        stringify(name));
-  }
-
-  return jobHandle;
-}
-
-
-// `create_job` function creates a named job object using `name`.
-// This returns the safe job handle, which closes the job handle
-// when destructed. Because the job is destroyed when its last
-// handle is closed and all associated processes have exited,
-// a running process must be assigned to the created job
-// before the returned handle is closed.
-inline Try<SharedHandle> create_job(const std::wstring& name)
-{
-  SharedHandle jobHandle(
-      ::CreateJobObjectW(
-          nullptr,       // Use a default security descriptor, and
-                         // the created handle cannot be inherited.
-          name.data()),  // The name of the job.
-      ::CloseHandle);
-
-  if (jobHandle.get_handle() == nullptr) {
-    return WindowsError(
-        "os::create_job: Call to `CreateJobObject` failed for job: " +
-        stringify(name));
-  }
-
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = { { 0 }, 0 };
-
-  // The job object will be terminated when the job handle closes. This allows
-  // the job tree to be terminated in case of errors by closing the handle.
-  // We set this flag so that the death of the agent process will
-  // always kill any running jobs, as the OS will close the remaining open
-  // handles if all destructors failed to run (catastrophic death).
-  jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-  const BOOL setInformationResult = ::SetInformationJobObject(
-      jobHandle.get_handle(),
-      JobObjectExtendedLimitInformation,
-      &jeli,
-      sizeof(jeli));
-
-  if (setInformationResult == FALSE) {
-    return WindowsError(
-        "os::create_job: `SetInformationJobObject` failed for job: " +
-        stringify(name));
-  }
-
-  return jobHandle;
-}
-
-
-// `assign_job` assigns a process with `pid` to the job object `jobHandle`.
-// Every process started by the `pid` process using `CreateProcess`
-// will also be owned by the job object.
-inline Try<Nothing> assign_job(SharedHandle jobHandle, pid_t pid) {
-  // Get process handle for `pid`.
-  SharedHandle processHandle(
-      ::OpenProcess(
-          // Required access rights to assign to a Job Object.
-          PROCESS_SET_QUOTA | PROCESS_TERMINATE,
-          false, // Don't inherit handle.
-          pid),
-      ::CloseHandle);
-
-  if (processHandle.get_handle() == nullptr) {
-    return WindowsError(
-        "os::assign_job: Call to `OpenProcess` failed");
-  }
-
-  const BOOL assignResult = ::AssignProcessToJobObject(
-      jobHandle.get_handle(),
-      processHandle.get_handle());
-
-  if (assignResult == FALSE) {
-    return WindowsError(
-        "os::assign_job: Call to `AssignProcessToJobObject` failed");
-  };
-
-  return Nothing();
-}
-
-
-// The `kill_job` function wraps the Windows sytem call `TerminateJobObject`
-// for the job object `jobHandle`. This will call `TerminateProcess`
-// for every associated child process.
-inline Try<Nothing> kill_job(SharedHandle jobHandle)
-{
-  const BOOL terminateResult = ::TerminateJobObject(
-      jobHandle.get_handle(),
-      // The exit code to be used by all processes in the job object.
-      1);
-
-  if (terminateResult == FALSE) {
-    return WindowsError(
-        "os::kill_job: Call to `TerminateJobObject` failed");
-  }
-
-  return Nothing();
-}
-
-
 inline Try<std::string> var()
 {
   // Get the `ProgramData` path. First, find the size of the output buffer.
@@ -780,13 +577,17 @@ inline std::string host_default_path()
 {
   // NOTE: On Windows, this code must run on the host where we are
   // expecting to `exec` the task, because the value of
-  // `%SYSTEMROOT%` is not identical on all platforms.
-  const Option<std::string> systemRootEnv = os::getenv("SYSTEMROOT");
-  const std::string systemRoot = systemRootEnv.isSome()
-    ? systemRootEnv.get()
-    : "C:\\WINDOWS";
+  // `%SystemRoot%` is not identical on all platforms.
+  const Option<std::string> system_root_env = os::getenv("SystemRoot");
+  const std::string system_root = system_root_env.isSome()
+    ? system_root_env.get()
+    : path::join("C:", "Windows");
 
-  return strings::join(";", systemRoot, path::join(systemRoot, "system32"));
+  return strings::join(";",
+      path::join(system_root, "System32"),
+      system_root,
+      path::join(system_root, "System32", "Wbem"),
+      path::join(system_root, "System32", "WindowsPowerShell", "v1.0"));
 }
 
 } // namespace os {

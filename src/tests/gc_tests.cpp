@@ -28,6 +28,7 @@
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
+#include <process/gtest.hpp>
 #include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -39,6 +40,8 @@
 #include <stout/nothing.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+
+#include <stout/os/realpath.hpp>
 
 #ifdef __linux__
 #include "linux/fs.hpp"
@@ -281,7 +284,7 @@ TEST_F(GarbageCollectorTest, Prune)
 class GarbageCollectorIntegrationTest : public MesosTest {};
 
 
-// This test ensures that garbage collection removes
+// This test ensures that garbage collection does not remove
 // the slave working directory after a slave restart.
 TEST_F(GarbageCollectorIntegrationTest, Restart)
 {
@@ -325,7 +328,7 @@ TEST_F(GarbageCollectorIntegrationTest, Restart)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   // Ignore offerRescinded calls. The scheduler might receive it
-  // because the slave might re-register due to ping timeout.
+  // because the slave might reregister due to ping timeout.
   EXPECT_CALL(sched, offerRescinded(_, _))
     .WillRepeatedly(Return());
 
@@ -371,22 +374,21 @@ TEST_F(GarbageCollectorIntegrationTest, Restart)
 
   Clock::pause();
 
-  Future<Nothing> schedule =
-    FUTURE_DISPATCH(_, &GarbageCollectorProcess::schedule);
+  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
 
   slave = StartSlave(detector.get(), flags);
   ASSERT_SOME(slave);
 
-  AWAIT_READY(schedule);
-
-  Clock::settle(); // Wait for GarbageCollectorProcess::schedule to complete.
+  // Wait for the agent to finish recovery.
+  AWAIT_READY(__recover);
+  Clock::settle();
 
   Clock::advance(flags.gc_delay);
 
   Clock::settle();
 
-  // By this time the old slave directory should be cleaned up.
-  ASSERT_FALSE(os::exists(slaveDir));
+  // By this time the old slave directory should not be cleaned up.
+  ASSERT_TRUE(os::exists(slaveDir));
 
   Clock::resume();
 
@@ -554,7 +556,7 @@ TEST_F(GarbageCollectorIntegrationTest, ExitedExecutor)
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
   // Ignore offerRescinded calls. The scheduler might receive it
-  // because the slave might re-register due to ping timeout.
+  // because the slave might reregister due to ping timeout.
   EXPECT_CALL(sched, offerRescinded(_, _))
     .WillRepeatedly(Return());
 
@@ -593,7 +595,7 @@ TEST_F(GarbageCollectorIntegrationTest, ExitedExecutor)
 
   Clock::pause();
 
-  // Kiling the executor will cause the slave to schedule its
+  // Killing the executor will cause the slave to schedule its
   // directory to get garbage collected.
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -705,7 +707,7 @@ TEST_F(GarbageCollectorIntegrationTest, DiskUsage)
 
   Clock::pause();
 
-  // Kiling the executor will cause the slave to schedule its
+  // Killing the executor will cause the slave to schedule its
   // directory to get garbage collected.
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -932,7 +934,7 @@ TEST_F(GarbageCollectorIntegrationTest, ROOT_BusyMountPoint)
 
   AWAIT_READY(frameworkId);
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
   const SlaveID& slaveId = offer.slave_id();
@@ -953,9 +955,11 @@ TEST_F(GarbageCollectorIntegrationTest, ROOT_BusyMountPoint)
       "test-task123",
       "test-task123");
 
+  Future<TaskStatus> status0;
   Future<TaskStatus> status1;
   Future<TaskStatus> status2;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status0))
     .WillOnce(FutureArg<1>(&status1))
     .WillOnce(FutureArg<1>(&status2));
 
@@ -963,6 +967,10 @@ TEST_F(GarbageCollectorIntegrationTest, ROOT_BusyMountPoint)
       _, &GarbageCollectorProcess::schedule);
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(status0);
+  EXPECT_EQ(task.task_id(), status0->task_id());
+  EXPECT_EQ(TASK_STARTING, status0->state());
 
   AWAIT_READY(status1);
   EXPECT_EQ(task.task_id(), status1->task_id());
@@ -980,7 +988,7 @@ TEST_F(GarbageCollectorIntegrationTest, ROOT_BusyMountPoint)
   EXPECT_TRUE(os::exists(sandbox));
 
   // Wait for the task to create these paths.
-  Timeout timeout = Timeout::in(Seconds(15));
+  Timeout timeout = Timeout::in(process::TEST_AWAIT_TIMEOUT);
   while (!os::exists(path::join(sandbox, mountPoint)) ||
          !os::exists(path::join(sandbox, regularFile)) ||
          !timeout.expired()) {
@@ -1004,7 +1012,7 @@ TEST_F(GarbageCollectorIntegrationTest, ROOT_BusyMountPoint)
   EXPECT_TRUE(os::exists(path::join(sandbox, mountPoint)));
   EXPECT_FALSE(os::exists(path::join(sandbox, regularFile)));
 
-  // Verify that GC metrics show that we performed 1 path removal that failed.
+  // Verify that GC metrics show that a path removal failed.
   JSON::Object metrics = Metrics();
 
   ASSERT_EQ(1u, metrics.values.count("gc/path_removals_pending"));
@@ -1017,9 +1025,14 @@ TEST_F(GarbageCollectorIntegrationTest, ROOT_BusyMountPoint)
   EXPECT_SOME_EQ(
       0u,
       metrics.at<JSON::Number>("gc/path_removals_succeeded"));
-  EXPECT_SOME_EQ(
-      1u,
-      metrics.at<JSON::Number>("gc/path_removals_failed"));
+
+  // The sandbox path removal failure will cascade to cause failures to
+  // remove the executor and framework directories. For testing purposes
+  // it is sufficient to verify that some failure was detected.
+  ASSERT_SOME(metrics.at<JSON::Number>("gc/path_removals_failed"));
+  EXPECT_GT(
+      metrics.at<JSON::Number>("gc/path_removals_failed")->as<unsigned>(),
+      0u);
 
   Clock::resume();
   driver.stop();

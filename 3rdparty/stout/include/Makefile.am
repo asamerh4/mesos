@@ -20,6 +20,8 @@ nobase_include_HEADERS =			\
   stout/boundedhashmap.hpp			\
   stout/bits.hpp				\
   stout/bytes.hpp				\
+  stout/cpp14.hpp				\
+  stout/cpp17.hpp				\
   stout/cache.hpp				\
   stout/check.hpp				\
   stout/duration.hpp				\
@@ -67,6 +69,7 @@ nobase_include_HEADERS =			\
   stout/os/chroot.hpp				\
   stout/os/close.hpp				\
   stout/os/constants.hpp			\
+  stout/os/copyfile.hpp				\
   stout/os/dup.hpp				\
   stout/os/environment.hpp			\
   stout/os/exists.hpp				\
@@ -112,6 +115,7 @@ nobase_include_HEADERS =			\
   stout/os/touch.hpp				\
   stout/os/utime.hpp				\
   stout/os/wait.hpp				\
+  stout/os/which.hpp				\
   stout/os/write.hpp				\
   stout/os/xattr.hpp				\
   stout/os/posix/bootid.hpp			\
@@ -119,6 +123,7 @@ nobase_include_HEADERS =			\
   stout/os/posix/chown.hpp			\
   stout/os/posix/chroot.hpp			\
   stout/os/posix/close.hpp			\
+  stout/os/posix/copyfile.hpp			\
   stout/os/posix/dup.hpp			\
   stout/os/posix/environment.hpp		\
   stout/os/posix/exists.hpp			\
@@ -148,6 +153,7 @@ nobase_include_HEADERS =			\
   stout/os/posix/stat.hpp			\
   stout/os/posix/su.hpp				\
   stout/os/posix/temp.hpp			\
+  stout/os/posix/which.hpp			\
   stout/os/posix/write.hpp			\
   stout/os/posix/xattr.hpp			\
   stout/os/raw/argv.hpp				\
@@ -156,6 +162,7 @@ nobase_include_HEADERS =			\
   stout/os/windows/chdir.hpp			\
   stout/os/windows/chroot.hpp			\
   stout/os/windows/close.hpp			\
+  stout/os/windows/copyfile.hpp			\
   stout/os/windows/dup.hpp			\
   stout/os/windows/environment.hpp		\
   stout/os/windows/exists.hpp			\
@@ -166,6 +173,7 @@ nobase_include_HEADERS =			\
   stout/os/windows/ftruncate.hpp		\
   stout/os/windows/getcwd.hpp			\
   stout/os/windows/getenv.hpp			\
+  stout/os/windows/jobobject.hpp		\
   stout/os/windows/kill.hpp			\
   stout/os/windows/killtree.hpp			\
   stout/os/windows/ls.hpp			\
@@ -186,6 +194,7 @@ nobase_include_HEADERS =			\
   stout/os/windows/stat.hpp			\
   stout/os/windows/su.hpp			\
   stout/os/windows/temp.hpp			\
+  stout/os/windows/which.hpp			\
   stout/os/windows/write.hpp			\
   stout/os/windows/xattr.hpp			\
   stout/path.hpp				\
@@ -217,6 +226,7 @@ nobase_include_HEADERS =			\
   stout/traits.hpp				\
   stout/unimplemented.hpp			\
   stout/unreachable.hpp				\
+  stout/uri.hpp				\
   stout/utils.hpp				\
   stout/uuid.hpp				\
   stout/variant.hpp				\

@@ -31,6 +31,8 @@
 
 #include <mesos/v1/resources.hpp>
 
+#include "common/resources_utils.hpp"
+
 #include "internal/evolve.hpp"
 
 #include "master/master.hpp"
@@ -65,7 +67,7 @@ TEST(ResourcesTest, Parsing)
   Resource cpus = Resources::parse("cpus", "45.55", "*").get();
 
   ASSERT_EQ(Value::SCALAR, cpus.type());
-  EXPECT_FLOAT_EQ(45.55, cpus.scalar().value());
+  EXPECT_DOUBLE_EQ(45.55, cpus.scalar().value());
 
   Resource ports = Resources::parse(
       "ports", "[10000-20000, 30000-50000]", "*").get();
@@ -774,7 +776,7 @@ TEST(ResourcesTest, Resources)
       "cpus:45.55;mem:1024;ports:[10000-20000, 30000-50000];disk:512").get();
 
   EXPECT_SOME(r.cpus());
-  EXPECT_FLOAT_EQ(45.55, r.cpus().get());
+  EXPECT_DOUBLE_EQ(45.55, r.cpus().get());
   EXPECT_SOME_EQ(Megabytes(1024), r.mem());
   EXPECT_SOME_EQ(Megabytes(512), r.disk());
 
@@ -788,7 +790,7 @@ TEST(ResourcesTest, Resources)
   r = Resources::parse("cpus:45.55;disk:512").get();
 
   EXPECT_SOME(r.cpus());
-  EXPECT_FLOAT_EQ(45.55, r.cpus().get());
+  EXPECT_DOUBLE_EQ(45.55, r.cpus().get());
   EXPECT_SOME_EQ(Megabytes(512), r.disk());
   EXPECT_TRUE(r.mem().isNone());
   EXPECT_TRUE(r.ports().isNone());
@@ -2248,6 +2250,105 @@ TEST(DiskResourcesTest, DiskSourceEquals)
 }
 
 
+class DiskResourcesSourceTest
+  : public ::testing::Test,
+    public ::testing::WithParamInterface<std::tr1::tuple<
+        Resource::DiskInfo::Source::Type,
+        bool,
+        bool>> {};
+
+
+INSTANTIATE_TEST_CASE_P(
+    TypeIdentityProfile,
+    DiskResourcesSourceTest,
+    ::testing::Combine(
+        // We test all source types.
+        ::testing::Values(
+            Resource::DiskInfo::Source::RAW,
+            Resource::DiskInfo::Source::PATH,
+            Resource::DiskInfo::Source::BLOCK,
+            Resource::DiskInfo::Source::MOUNT),
+        // We test the case where the source has identity (i.e., has
+        // an `id` set) and where not.
+        ::testing::Bool(),
+        // We test the case where the source has profile (i.e., has
+        // an `profile` set) and where not.
+        ::testing::Bool()));
+
+
+TEST_P(DiskResourcesSourceTest, SourceIdentity)
+{
+  auto parameters = GetParam();
+
+  Resource::DiskInfo::Source::Type type = std::tr1::get<0>(parameters);
+  bool hasIdentity = std::tr1::get<1>(parameters);
+  bool hasProfile = std::tr1::get<2>(parameters);
+
+  // Create a disk, possibly with an id to signify identiy.
+  Resource::DiskInfo::Source source;
+  source.set_type(type);
+
+  if (hasIdentity) {
+    source.set_id("id");
+  }
+
+  if (hasProfile) {
+    source.set_profile("profile");
+  }
+
+  // Create two disk resources with the created source.
+  Resource disk1 = Resources::parse("disk", "1", "*").get();
+  disk1.mutable_disk()->mutable_source()->CopyFrom(source);
+  const Resources r1 = disk1;
+
+  EXPECT_TRUE(r1.contains(r1));
+
+  Resource disk2 = Resources::parse("disk", "2", "*").get();
+  disk2.mutable_disk()->mutable_source()->CopyFrom(source);
+  const Resources r2 = disk2;
+
+  // We perform three checks here: checks involving `r1` and `r2`
+  // test subtraction semantics while tests of the size of the
+  // resources test addition semantics.
+  switch (type) {
+    case Resource::DiskInfo::Source::RAW: {
+      if (hasIdentity) {
+        // `RAW` resources with source identity cannot be added or split.
+        EXPECT_FALSE(r2.contains(r1));
+        EXPECT_NE(r2, r1 + r1);
+        EXPECT_EQ(2u, (r1 + r1).size());
+      } else {
+        // `RAW` resources without source identity can be added and split.
+        EXPECT_TRUE(r2.contains(r1));
+        EXPECT_EQ(r2, r1 + r1);
+        EXPECT_EQ(1u, (r1 + r1).size());
+      }
+      break;
+    }
+    case Resource::DiskInfo::Source::BLOCK:
+    case Resource::DiskInfo::Source::MOUNT: {
+      // `BLOCK` or `MOUNT` resources cannot be added or split,
+      // regardless of identity.
+      EXPECT_FALSE(r2.contains(r1));
+      EXPECT_NE(r2, r1 + r1);
+      EXPECT_EQ(2u, (r1 + r1).size());
+      break;
+    }
+    case Resource::DiskInfo::Source::PATH: {
+      // `PATH` resources can be added and split, regardless of identity.
+      EXPECT_TRUE(r2.contains(r1));
+      EXPECT_EQ(r2, r1 + r1);
+      EXPECT_EQ(1u, (r1 + r1).size());
+      break;
+    }
+    case Resource::DiskInfo::Source::UNKNOWN: {
+      FAIL() << "Unexpected source type";
+      break;
+    }
+  }
+}
+
+
 TEST(DiskResourcesTest, Addition)
 {
   Resources r1 = createDiskResource("10", "role", None(), "path");
@@ -2511,7 +2612,7 @@ TEST(ResourcesOperationTest, StrippedResourcesVolume)
   Resource strippedVolume = *(stripped.begin());
 
   ASSERT_EQ(Value::SCALAR, strippedVolume.type());
-  EXPECT_FLOAT_EQ(200, strippedVolume.scalar().value());
+  EXPECT_DOUBLE_EQ(200, strippedVolume.scalar().value());
   EXPECT_EQ("role", Resources::reservationRole(strippedVolume));
   EXPECT_EQ("disk", strippedVolume.name());
   EXPECT_EQ(1, strippedVolume.reservations_size());
@@ -2789,6 +2890,26 @@ TEST(RevocableResourceTest, Filter)
 }
 
 
+// This test verifies that `Resources::find()` correctly distinguishes
+// between revocable and non-revocable resources.
+TEST(RevocableResourceTest, Find)
+{
+  Resources r1 = createRevocableResource("cpus", "1", "*", true);
+  EXPECT_EQ(r1, r1.revocable());
+  EXPECT_TRUE(r1.nonRevocable().empty());
+
+  Resources r2 = Resources::parse("cpus:1").get();
+  EXPECT_EQ(r2, r2.nonRevocable());
+  EXPECT_TRUE(r2.revocable().empty());
+
+  EXPECT_SOME_EQ(r1, (r1 + r2).find(r1));
+  EXPECT_SOME_EQ(r2, (r1 + r2).find(r2));
+
+  EXPECT_NONE(r1.find(r2));
+  EXPECT_NONE(r2.find(r1));
+}
+
+
 // This test checks that the resources in the "pre-reservation-refinement"
 // format are valid. In the "pre-reservation-refinement" format, the reservation
 // state is represented by `Resource.role` and `Resource.reservation` fields.
@@ -2912,6 +3033,176 @@ TEST(ResourceFormatTest, Endpoint)
   refinedReservation2->set_principal("principal1");
 
   EXPECT_SOME(Resources::validate(resource));
+}
+
+
+TEST(ResourceFormatTest, DowngradeWithoutResources)
+{
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  EXPECT_SOME(downgradeResources(&frameworkInfo));
+  EXPECT_EQ(DEFAULT_FRAMEWORK_INFO, frameworkInfo);
+}
+
+
+TEST(ResourceFormatTest, DowngradeWithResourcesWithoutRefinedReservations)
+{
+  SlaveID slaveId;
+  slaveId.set_value("agent");
+
+  TaskInfo actual;
+  {
+    actual.set_name("task");
+    actual.mutable_task_id()->set_value("task_id");
+    actual.mutable_slave_id()->CopyFrom(slaveId);
+
+    Resource resource;
+    resource.set_name("cpus");
+    resource.set_type(Value::SCALAR);
+    resource.mutable_scalar()->set_value(555.5);
+
+    // Add "post-reservation-refinement" resources.
+
+    // Unreserved resource.
+    actual.add_resources()->CopyFrom(resource);
+
+    Resource::ReservationInfo* reservation = resource.add_reservations();
+
+    // Statically reserved resource.
+    reservation->set_type(Resource::ReservationInfo::STATIC);
+    reservation->set_role("foo");
+    actual.add_resources()->CopyFrom(resource);
+
+    // Dynamically reserved resource.
+    reservation->set_type(Resource::ReservationInfo::DYNAMIC);
+    reservation->set_role("bar");
+    reservation->set_principal("principal1");
+    actual.add_resources()->CopyFrom(resource);
+  }
+
+  TaskInfo expected;
+  {
+    expected.set_name("task");
+    expected.mutable_task_id()->set_value("task_id");
+    expected.mutable_slave_id()->CopyFrom(slaveId);
+
+    Resource resource;
+    resource.set_name("cpus");
+    resource.set_type(Value::SCALAR);
+    resource.mutable_scalar()->set_value(555.5);
+
+    // Add "pre-reservation-refinement" resources.
+
+    // Unreserved resource.
+    resource.set_role("*");
+    expected.add_resources()->CopyFrom(resource);
+
+    // Statically reserved resource.
+    resource.set_role("foo");
+    expected.add_resources()->CopyFrom(resource);
+
+    // Dynamically reserved resource.
+    resource.set_role("bar");
+    Resource::ReservationInfo* reservation = resource.mutable_reservation();
+    reservation->set_principal("principal1");
+    expected.add_resources()->CopyFrom(resource);
+  }
+
+  EXPECT_SOME(downgradeResources(&actual));
+  EXPECT_EQ(expected, actual);
+}
+
+
+TEST(ResourceFormatTest, DowngradeWithResourcesWithRefinedReservations)
+{
+  SlaveID slaveId;
+  slaveId.set_value("agent");
+
+  TaskInfo actual;
+  {
+    actual.set_name("task");
+    actual.mutable_task_id()->set_value("task_id");
+    actual.mutable_slave_id()->CopyFrom(slaveId);
+
+    Resource resource;
+    resource.set_name("cpus");
+    resource.set_type(Value::SCALAR);
+    resource.mutable_scalar()->set_value(555.5);
+
+    // Add "post-reservation-refinement" resources.
+
+    // Unreserved resource.
+    actual.add_resources()->CopyFrom(resource);
+
+    Resource::ReservationInfo* reservation = resource.add_reservations();
+
+    // Statically reserved resource.
+    reservation->set_type(Resource::ReservationInfo::STATIC);
+    reservation->set_role("foo");
+    actual.add_resources()->CopyFrom(resource);
+
+    // Dynamically reserved resource.
+    reservation->set_type(Resource::ReservationInfo::DYNAMIC);
+    reservation->set_role("bar");
+    reservation->set_principal("principal1");
+    actual.add_resources()->CopyFrom(resource);
+
+    // Dynamically refined reservation on top of dynamic reservation.
+    Resource::ReservationInfo* refinedReservation = resource.add_reservations();
+    refinedReservation->set_type(Resource::ReservationInfo::DYNAMIC);
+    refinedReservation->set_role("bar/baz");
+    refinedReservation->set_principal("principal2");
+    actual.add_resources()->CopyFrom(resource);
+  }
+
+  TaskInfo expected;
+  {
+    expected.set_name("task");
+    expected.mutable_task_id()->set_value("task_id");
+    expected.mutable_slave_id()->CopyFrom(slaveId);
+
+    Resource resource;
+    resource.set_name("cpus");
+    resource.set_type(Value::SCALAR);
+    resource.mutable_scalar()->set_value(555.5);
+
+    // Add "pre-reservation-refinement" resources.
+
+    // Unreserved resource.
+    resource.set_role("*");
+    expected.add_resources()->CopyFrom(resource);
+
+    // Statically reserved resource.
+    resource.set_role("foo");
+    expected.add_resources()->CopyFrom(resource);
+
+    // Dynamically reserved resource.
+    resource.set_role("bar");
+    Resource::ReservationInfo* reservation = resource.mutable_reservation();
+    reservation->set_principal("principal1");
+    expected.add_resources()->CopyFrom(resource);
+
+    // Add non-downgradable resources. Note that the non-downgradable
+    // resources remain in "post-reservation-refinement" format.
+
+    // Dynamically refined reservation on top of dynamic reservation.
+    resource.clear_role();
+    resource.clear_reservation();
+
+    Resource::ReservationInfo* dynamicReservation = resource.add_reservations();
+    dynamicReservation->set_type(Resource::ReservationInfo::DYNAMIC);
+    dynamicReservation->set_role("bar");
+    dynamicReservation->set_principal("principal1");
+
+    Resource::ReservationInfo* refinedReservation = resource.add_reservations();
+    refinedReservation->set_type(Resource::ReservationInfo::DYNAMIC);
+    refinedReservation->set_role("bar/baz");
+    refinedReservation->set_principal("principal2");
+
+    expected.add_resources()->CopyFrom(resource);
+  }
+
+  EXPECT_ERROR(downgradeResources(&actual));
+  EXPECT_EQ(expected, actual);
 }
 
 

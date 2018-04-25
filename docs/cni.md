@@ -28,6 +28,7 @@ default.
   - [A bridge network](#a-bridge-network)
   - [A port-mapper plugin for CNI networks](#a-port-mapper-plugin)
   - [A Calico network](#a-calico-network)
+  - [A Cilium network](#a-cilium-network)
   - [A Weave network](#a-weave-network)
 
 
@@ -105,8 +106,8 @@ isolator) will not affect container orchestration.
 #### <a name="adding-modifying-deleting"></a>Adding/Deleting/Modifying CNI networks
 
 The `network/cni` isolator learns about all the CNI networks by
-reading the CNI configuration specified in `--network_cni_config_dir`
-. Hence, if the operator wants to add a CNI network, the corresponding
+reading the CNI configuration specified in `--network_cni_config_dir`.
+Hence, if the operator wants to add a CNI network, the corresponding
 configuration needs to be added to `--network_cni_config_dir`.
 
 While the `network/cni` isolator learns the CNI networks by reading
@@ -126,13 +127,13 @@ destroyed, even if the CNI configuration is deleted.
 The fact that the `network/cni` isolator always reads the CNI
 configurations from the disk allows the operator to dynamically add,
 modify and delete CNI configurations without the need to restart the
-agent. Whenever the operator adds a new CNI configuration, or modifies
-an existing CNI configuration, the agent will pick up this new CNI
-configuration when the next container is launched on that specific CNI
-network. Similarly when the operator deletes a CNI network the
-`network/cni` isolator will "unlearn" the CNI network (since it will
-have a reference to this CNI network when it started) in case a
-framework tries to launch a container on the deleted CNI network.
+agent. Whenever the operator modifies an existing CNI configuration,
+the agent will pick up this new CNI configuration when the next
+container is launched on that specific CNI network. Similarly when the
+operator deletes a CNI network the `network/cni` isolator will
+"unlearn" the CNI network (since it will have a reference to this CNI
+network when it started) in case a framework tries to launch a
+container on the deleted CNI network.
 
 #### <a name="attaching-containers-to-cni-networks"></a>Attaching containers to CNI networks
 
@@ -391,7 +392,7 @@ that services running on the container can be exposed outside the host
 on which the container is running.
 
 Unfortunately, there is no CNI plugin available in the
-[containernetworking/cni](https://github.com/containernetwork/cni)
+[containernetworking/cni](https://github.com/containernetworking/cni)
 repository that provides port-mapping functionality.
 Hence, we have developed a port-mapper CNI plugin that resides
 within the Mesos code base called the `mesos-cni-port-mapper`. The
@@ -483,9 +484,20 @@ provide tenant isolation, security groups, and external reachability
 constraints.
 
 For information on setting up and using Calico-CNI, see [Calico's
-guide on adding Calico-CNI to
-Mesos](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/ManualInstallCalicoCNI.md).
+guide on integerating with
+Mesos](https://docs.projectcalico.org/v2.6/getting-started/mesos/).
 
+#### <a name="a-cilium-network">A Cilium network</a>
+
+[Cilium](https://www.cilium.io) provides a CNI plugin that works with Mesos.
+
+Cilium brings HTTP-aware network security filtering to Linux container
+frameworks. Using a new Linux kernel technology called BPF, Cilium
+provides a simple and efficient way to define and enforce both
+network-layer and HTTP-layer security policies.
+
+For more information on using Cilium with Mesos, check out the
+[Getting Started Using Mesos Guide](http://docs.cilium.io/try-mesos).
 
 #### <a name="a-weave-network">A Weave network</a>
 

@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 
+#include <mesos/mesos.hpp>
+
 #include <stout/bytes.hpp>
 #include <stout/duration.hpp>
 #include <stout/version.hpp>
@@ -61,9 +63,9 @@ constexpr Duration DEFAULT_AGENT_PING_TIMEOUT = Seconds(15);
 constexpr size_t DEFAULT_MAX_AGENT_PING_TIMEOUTS = 5;
 
 // The minimum timeout that can be used by a newly elected leader to
-// allow re-registration of slaves. Any slaves that do not re-register
+// allow re-registration of slaves. Any slaves that do not reregister
 // within this timeout will be marked unreachable; if/when the agent
-// re-registers, non-partition-aware tasks running on the agent will
+// reregisters, non-partition-aware tasks running on the agent will
 // be terminated.
 constexpr Duration MIN_AGENT_REREGISTER_TIMEOUT = Minutes(10);
 
@@ -148,6 +150,8 @@ constexpr char DEFAULT_HTTP_FRAMEWORK_AUTHENTICATION_REALM[] =
 
 // Agents older than this version are not allowed to register.
 const Version MINIMUM_AGENT_VERSION = Version(1, 0, 0);
+
+std::vector<MasterInfo::Capability> MASTER_CAPABILITIES();
 
 } // namespace master {
 } // namespace internal {

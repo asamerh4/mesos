@@ -43,7 +43,7 @@ Try<ImageManifest> parse(const string& value)
 
   Option<Error> error = validateManifest(manifest.get());
   if (error.isSome()) {
-    return Error("Schema validation failed: " + error.get().message);
+    return Error("Schema validation failed: " + error->message);
   }
 
   return manifest.get();
@@ -64,14 +64,20 @@ string getImageManifestPath(const string& imagePath)
 
 Try<ImageManifest> getManifest(const string& imagePath)
 {
-  Try<string> read = os::read(getImageManifestPath(imagePath));
+  const string path = getImageManifestPath(imagePath);
+
+  Try<string> read = os::read(path);
   if (read.isError()) {
-    return Error("Failed to read manifest file: " + read.error());
+    return Error(
+        "Failed to read manifest from '" + path + "': " +
+        read.error());
   }
 
   Try<ImageManifest> parseManifest = parse(read.get());
   if (parseManifest.isError()) {
-    return Error("Failed to parse manifest: " + parseManifest.error());
+    return Error(
+        "Failed to parse manifest from '" + path + "': " +
+        parseManifest.error());
   }
 
   return parseManifest.get();

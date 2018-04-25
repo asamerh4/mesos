@@ -84,8 +84,10 @@ static QuotaInfo makeQuotaInfo(
 class ROOT_XFS_TestBase : public MesosTest
 {
 public:
-  explicit ROOT_XFS_TestBase(const string& _xfsOptions)
-    : xfsOptions(_xfsOptions) {}
+  ROOT_XFS_TestBase(
+      const Option<std::string>& _mountOptions = None(),
+      const Option<std::string>& _mkfsOptions = None())
+    : mountOptions(_mountOptions), mkfsOptions(_mkfsOptions) {}
 
   virtual void SetUp()
   {
@@ -119,7 +121,10 @@ public:
     // Make an XFS filesystem (using the force flag). The defaults
     // should be good enough for tests.
     Try<Subprocess> mkfs = subprocess(
-        "mkfs.xfs -f " + loopDevice.get(),
+        "mkfs.xfs -f " +
+        mkfsOptions.getOrElse("") +
+        " " +
+        loopDevice.get(),
         Subprocess::PATH(os::DEV_NULL));
 
     ASSERT_SOME(mkfs);
@@ -131,7 +136,7 @@ public:
         mntPath,
         "xfs",
         0, // Flags.
-        xfsOptions));
+        mountOptions.getOrElse("")));
     mountPoint = mntPath;
 
     ASSERT_SOME(os::chdir(mountPoint.get()))
@@ -153,7 +158,7 @@ public:
           Subprocess::PATH(os::DEV_NULL));
 
       if (cmdProcess.isSome()) {
-        cmdProcess->status().await(Seconds(15));
+        cmdProcess->status().await(process::TEST_AWAIT_TIMEOUT);
       }
     }
 
@@ -212,7 +217,8 @@ public:
     return string("/dev/loop") + stringify(devno);
   }
 
-  string xfsOptions;
+  Option<string> mountOptions;
+  Option<string> mkfsOptions;
   Option<string> loopDevice; // The loop device we attached.
   Option<string> mountPoint; // XFS filesystem mountpoint.
 };
@@ -223,7 +229,8 @@ public:
 class ROOT_XFS_QuotaTest : public ROOT_XFS_TestBase
 {
 public:
-  ROOT_XFS_QuotaTest() : ROOT_XFS_TestBase("prjquota") {}
+  ROOT_XFS_QuotaTest()
+    : ROOT_XFS_TestBase("prjquota") {}
 };
 
 
@@ -232,7 +239,8 @@ public:
 class ROOT_XFS_NoQuota : public ROOT_XFS_TestBase
 {
 public:
-  ROOT_XFS_NoQuota() : ROOT_XFS_TestBase("noquota") {}
+  ROOT_XFS_NoQuota()
+    : ROOT_XFS_TestBase("noquota") {}
 };
 
 
@@ -241,7 +249,8 @@ public:
 class ROOT_XFS_NoProjectQuota : public ROOT_XFS_TestBase
 {
 public:
-  ROOT_XFS_NoProjectQuota() : ROOT_XFS_TestBase("usrquota,grpquota") {}
+  ROOT_XFS_NoProjectQuota()
+    : ROOT_XFS_TestBase("usrquota,grpquota") {}
 };
 
 
@@ -403,7 +412,7 @@ TEST_F(ROOT_XFS_QuotaTest, DiskUsageExceedsQuota)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -414,26 +423,32 @@ TEST_F(ROOT_XFS_QuotaTest, DiskUsageExceedsQuota)
       Resources::parse("cpus:1;mem:128;disk:1").get(),
       "dd if=/dev/zero of=file bs=1048576 count=2");
 
-  Future<TaskStatus> status1;
-  Future<TaskStatus> status2;
+  Future<TaskStatus> startingStatus;
+  Future<TaskStatus> runningStatus;
+  Future<TaskStatus> failedStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status1))
-    .WillOnce(FutureArg<1>(&status2));
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningStatus))
+    .WillOnce(FutureArg<1>(&failedStatus));
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY(status1);
-  EXPECT_EQ(task.task_id(), status1->task_id());
-  EXPECT_EQ(TASK_RUNNING, status1->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
 
-  AWAIT_READY(status2);
-  EXPECT_EQ(task.task_id(), status2->task_id());
-  EXPECT_EQ(TASK_FAILED, status2->state());
+  AWAIT_READY(runningStatus);
+  EXPECT_EQ(task.task_id(), runningStatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
+
+  AWAIT_READY(failedStatus);
+  EXPECT_EQ(task.task_id(), failedStatus->task_id());
+  EXPECT_EQ(TASK_FAILED, failedStatus->state());
 
   // Unlike the 'disk/du' isolator, the reason for task failure
   // should be that dd got an IO error.
-  EXPECT_EQ(TaskStatus::SOURCE_EXECUTOR, status2->source());
-  EXPECT_EQ("Command exited with status 1", status2->message());
+  EXPECT_EQ(TaskStatus::SOURCE_EXECUTOR, failedStatus->source());
+  EXPECT_EQ("Command exited with status 1", failedStatus->message());
 
   driver.stop();
   driver.join();
@@ -469,7 +484,7 @@ TEST_F(ROOT_XFS_QuotaTest, DiskUsageExceedsQuotaNoEnforce)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   const Offer& offer = offers.get()[0];
 
@@ -480,23 +495,29 @@ TEST_F(ROOT_XFS_QuotaTest, DiskUsageExceedsQuotaNoEnforce)
       Resources::parse("cpus:1;mem:128;disk:1").get(),
       "dd if=/dev/zero of=file bs=1048576 count=2");
 
-  Future<TaskStatus> status1;
-  Future<TaskStatus> status2;
+  Future<TaskStatus> startingStatus;
+  Future<TaskStatus> runningStatus;
+  Future<TaskStatus> finishedStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status1))
-    .WillOnce(FutureArg<1>(&status2));
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningStatus))
+    .WillOnce(FutureArg<1>(&finishedStatus));
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY(status1);
-  EXPECT_EQ(task.task_id(), status1->task_id());
-  EXPECT_EQ(TASK_RUNNING, status1->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+
+  AWAIT_READY(runningStatus);
+  EXPECT_EQ(task.task_id(), runningStatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
 
   // We expect the task to succeed even though it exceeded
   // the disk quota.
-  AWAIT_READY(status2);
-  EXPECT_EQ(task.task_id(), status2->task_id());
-  EXPECT_EQ(TASK_FINISHED, status2->state());
+  AWAIT_READY(finishedStatus);
+  EXPECT_EQ(task.task_id(), finishedStatus->task_id());
+  EXPECT_EQ(TASK_FINISHED, finishedStatus->state());
 
   driver.stop();
   driver.join();
@@ -540,7 +561,7 @@ TEST_F(ROOT_XFS_QuotaTest, ResourceStatistics)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -551,16 +572,22 @@ TEST_F(ROOT_XFS_QuotaTest, ResourceStatistics)
       Resources::parse("cpus:1;mem:128;disk:3").get(),
       "dd if=/dev/zero of=file bs=1048576 count=4 || sleep 1000");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> startingStatus;
+  Future<TaskStatus> runningStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status))
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningStatus))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status->task_id());
-  EXPECT_EQ(TASK_RUNNING, status->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+
+  AWAIT_READY(runningStatus);
+  EXPECT_EQ(task.task_id(), runningStatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
 
   Future<hashset<ContainerID>> containers = containerizer.get()->containers();
   AWAIT_READY(containers);
@@ -637,7 +664,7 @@ TEST_F(ROOT_XFS_QuotaTest, ResourceStatisticsNoEnforce)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -648,16 +675,22 @@ TEST_F(ROOT_XFS_QuotaTest, ResourceStatisticsNoEnforce)
       Resources::parse("cpus:1;mem:128;disk:3").get(),
       "dd if=/dev/zero of=file bs=1048576 count=4 && sleep 1000");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> startingStatus;
+  Future<TaskStatus> runningStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status))
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningStatus))
     .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status->task_id());
-  EXPECT_EQ(TASK_RUNNING, status->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+
+  AWAIT_READY(runningStatus);
+  EXPECT_EQ(task.task_id(), runningStatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
 
   Future<hashset<ContainerID>> containers = containerizer.get()->containers();
   AWAIT_READY(containers);
@@ -740,7 +773,7 @@ TEST_F(ROOT_XFS_QuotaTest, NoCheckpointRecovery)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -749,16 +782,22 @@ TEST_F(ROOT_XFS_QuotaTest, NoCheckpointRecovery)
       Resources::parse("cpus:1;mem:128;disk:1").get(),
       "dd if=/dev/zero of=file bs=1048576 count=1; sleep 1000");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> runningStatus;
+  Future<TaskStatus> startingStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status))
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningStatus))
     .WillOnce(Return());
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status->task_id());
-  EXPECT_EQ(TASK_RUNNING, status->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+
+  AWAIT_READY(runningStatus);
+  EXPECT_EQ(task.task_id(), runningStatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
 
   Future<ResourceUsage> usage1 =
     process::dispatch(slave.get()->pid, &Slave::usage);
@@ -864,7 +903,7 @@ TEST_F(ROOT_XFS_QuotaTest, CheckpointRecovery)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -873,15 +912,21 @@ TEST_F(ROOT_XFS_QuotaTest, CheckpointRecovery)
       Resources::parse("cpus:1;mem:128;disk:1").get(),
       "dd if=/dev/zero of=file bs=1048576 count=1; sleep 1000");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> startingStatus;
+  Future<TaskStatus> runningStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status));
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningStatus));
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status->task_id());
-  EXPECT_EQ(TASK_RUNNING, status->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), runningStatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningStatus->state());
 
   Future<ResourceUsage> usage1 =
     process::dispatch(slave.get()->pid, &Slave::usage);
@@ -899,7 +944,7 @@ TEST_F(ROOT_XFS_QuotaTest, CheckpointRecovery)
   slave = StartSlave(detector.get(), flags);
   ASSERT_SOME(slave);
 
-  // Wait for the slave to re-register.
+  // Wait for the slave to reregister.
   AWAIT_READY(slaveReregisteredMessage);
 
   Future<ResourceUsage> usage2 =
@@ -977,7 +1022,7 @@ TEST_F(ROOT_XFS_QuotaTest, RecoverOldContainers)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -986,15 +1031,21 @@ TEST_F(ROOT_XFS_QuotaTest, RecoverOldContainers)
       Resources::parse("cpus:1;mem:128;disk:1").get(),
       "dd if=/dev/zero of=file bs=1024 count=1; sleep 1000");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> startingStatus;
+  Future<TaskStatus> runningstatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status));
+    .WillOnce(FutureArg<1>(&startingStatus))
+    .WillOnce(FutureArg<1>(&runningstatus));
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status->task_id());
-  EXPECT_EQ(TASK_RUNNING, status->state());
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(task.task_id(), startingStatus->task_id());
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+
+  AWAIT_READY(runningstatus);
+  EXPECT_EQ(task.task_id(), runningstatus->task_id());
+  EXPECT_EQ(TASK_RUNNING, runningstatus->state());
 
   {
     Future<ResourceUsage> usage =
@@ -1019,7 +1070,7 @@ TEST_F(ROOT_XFS_QuotaTest, RecoverOldContainers)
   slave = StartSlave(detector.get(), CreateSlaveFlags());
   ASSERT_SOME(slave);
 
-  // Wait for the slave to re-register.
+  // Wait for the slave to reregister.
   AWAIT_READY(slaveReregisteredMessage);
 
   {
@@ -1113,6 +1164,76 @@ TEST(XFS_QuotaTest, BasicBlocks)
 
   EXPECT_EQ(BasicBlocks(1), BasicBlocks(1));
   EXPECT_EQ(BasicBlocks(1), BasicBlocks(Bytes(512)));
+}
+
+
+// TODO(mzhu): Ftype related tests should not be placed in XFS
+// quota tests. Move them to a more suitable place. They are
+// placed here at the moment due to the XFS dependency (checked by
+// `--enable-xfs-disk-isolator`) and we are not ready to introduce
+// another configuration flag.
+
+// ROOT_XFS_FtypeOffTest is our standard fixture that sets up
+// a XFS filesystem on loopback with ftype option turned on
+// (the default setting).
+class ROOT_XFS_FtypeOnTest : public ROOT_XFS_TestBase
+{
+public:
+  ROOT_XFS_FtypeOnTest()
+    : ROOT_XFS_TestBase(None(), "-n ftype=1 -m crc=1") {}
+};
+
+// ROOT_XFS_FtypeOffTest is our standard fixture that sets up a
+// XFS filesystem on loopback with ftype option turned off.
+class ROOT_XFS_FtypeOffTest : public ROOT_XFS_TestBase
+{
+public:
+  ROOT_XFS_FtypeOffTest()
+    : ROOT_XFS_TestBase(None(), "-n ftype=0 -m crc=0") {}
+};
+
+
+// This test verifies that overlayfs backend can be supported
+// on the default XFS with ftype option turned on.
+TEST_F(ROOT_XFS_FtypeOnTest, OverlayBackendEnabled)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "docker/runtime,filesystem/linux";
+  flags.work_dir = mountPoint.get();
+  flags.image_providers = "docker";
+  flags.containerizers = "mesos";
+  flags.image_provisioner_backend = "overlay";
+  flags.docker_registry = path::join(os::getcwd(), "archives");
+  flags.docker_store_dir = path::join(os::getcwd(), "store");
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
+  ASSERT_SOME(slave);
+}
+
+
+// This test verifies that the overlayfs backend should fail on
+// XFS with ftype turned off.
+TEST_F(ROOT_XFS_FtypeOffTest, OverlayBackendDisabled)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "docker/runtime,filesystem/linux";
+  flags.work_dir = mountPoint.get();
+  flags.image_providers = "docker";
+  flags.containerizers = "mesos";
+  flags.image_provisioner_backend = "overlay";
+  flags.docker_registry = path::join(os::getcwd(), "archives");
+  flags.docker_store_dir = path::join(os::getcwd(), "store");
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
+  ASSERT_ERROR(slave);
 }
 
 } // namespace tests {

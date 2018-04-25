@@ -57,6 +57,12 @@ struct SlaveState;
 class Containerizer
 {
 public:
+  enum class LaunchResult {
+    SUCCESS,
+    ALREADY_LAUNCHED,
+    NOT_SUPPORTED,
+  };
+
   // Attempts to create a containerizer as specified by 'isolation' in
   // flags.
   static Try<Containerizer*> create(
@@ -87,10 +93,7 @@ public:
   // a nested container.
   // NOTE: For nested containers, the required `directory` field of
   // the ContainerConfig will be determined by the containerizer.
-  //
-  // Returns true if launching this container is supported and it has
-  // been launched, otherwise false or a failure if something went wrong.
-  virtual process::Future<bool> launch(
+  virtual process::Future<LaunchResult> launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -132,12 +135,13 @@ public:
       const ContainerID& containerId) = 0;
 
   // Destroy a running container, killing all processes and releasing
-  // all resources. Returns false when the container cannot be found,
+  // all resources. Returns None when the container cannot be found,
   // or a failure if something went wrong.
   //
   // NOTE: You cannot wait() on containers that have been destroyed,
   // so you should always call wait() before destroy().
-  virtual process::Future<bool> destroy(const ContainerID& containerId) = 0;
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> destroy(
+      const ContainerID& containerId) = 0;
 
   // Sends a signal to a running container. Returns false when the container
   // cannot be found. The future may be failed if an error occurs in sending
@@ -162,6 +166,10 @@ public:
   {
     return process::Failure("Unsupported");
   }
+
+  // Prune unused images from supported image stores.
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& excludedImages) = 0;
 };
 
 } // namespace slave {

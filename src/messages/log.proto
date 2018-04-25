@@ -18,6 +18,7 @@ syntax = "proto2";
 
 package mesos.internal.log;
 
+option cc_enable_arenas = true;
 
 // Represents a "promise" that a replica has made. A promise is
 // *implicitly* valid for _all_ future actions that get performed on
@@ -53,7 +54,9 @@ message Action {
     TRUNCATE = 3;
   }
 
-  message Nop {}
+  message Nop {
+    optional bool tombstone = 1; // True if the position was truncated.
+  }
 
   message Append {
     required bytes bytes = 1;
@@ -64,7 +67,7 @@ message Action {
     required uint64 to = 1; // All positions before and exclusive of 'to'.
   }
 
-  optional Type type = 5; // Set iff performed is set.
+  optional Type type = 5; // Set if performed is set.
   optional Nop nop = 6;
   optional Append append = 7;
   optional Truncate truncate = 8;

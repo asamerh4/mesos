@@ -24,6 +24,8 @@
 #include <mesos/v1/resources.hpp>
 #include <mesos/v1/scheduler.hpp>
 
+#include <mesos/authorizer/acls.hpp>
+
 #include <process/clock.hpp>
 #include <process/defer.hpp>
 #include <process/help.hpp>
@@ -45,7 +47,13 @@
 #include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include "common/parse.hpp"
+
+#include "examples/flags.hpp"
+
+#include "logging/logging.hpp"
 
 using std::queue;
 using std::string;
@@ -114,12 +122,13 @@ public:
     : state(DISCONNECTED),
       master(_master),
       framework(_framework),
+      role(_framework.roles(0)),
       executor(_executor),
-      taskResources([&_framework]() {
+      taskResources([this]() {
         Resources resources = Resources::parse(
             "cpus:" + stringify(CPUS_PER_TASK) +
             ";mem:" + stringify(MEM_PER_TASK)).get();
-        resources.allocate(_framework.role());
+        resources.allocate(this->role);
         return resources;
       }()),
       tasksLaunched(0),
@@ -209,6 +218,10 @@ protected:
           break;
         }
 
+        // TODO(greggomann): Implement handling of operation status updates.
+        case Event::UPDATE_OPERATION_STATUS:
+          break;
+
         case Event::FAILURE: {
           const Event::Failure& failure = event.failure();
 
@@ -252,7 +265,7 @@ protected:
 
     const Resources executorResources = [this]() {
       Resources resources(executor.resources());
-      resources.allocate(framework.role());
+      resources.allocate(role);
       return resources;
     }();
 
@@ -325,7 +338,11 @@ protected:
         status.state() == TaskState::TASK_LOST ||
         status.state() == TaskState::TASK_FAILED ||
         status.state() == TaskState::TASK_ERROR) {
-      ++metrics.abnormal_terminations;
+      // Launch on an invalid offer should not be
+      // counted as abnormal termination.
+      if (status.reason() != TaskStatus::REASON_INVALID_OFFERS) {
+        ++metrics.abnormal_terminations;
+      }
     }
   }
 
@@ -413,6 +430,7 @@ private:
 
   const string master;
   FrameworkInfo framework;
+  const string role;
   const ExecutorInfo executor;
   const Resources taskResources;
   string uri;
@@ -482,22 +500,11 @@ private:
 };
 
 
-class Flags : public virtual flags::FlagsBase
+class Flags : public virtual mesos::internal::examples::Flags
 {
 public:
   Flags()
   {
-    add(&Flags::master,
-        "master",
-        "Master to connect to.",
-        [](const Option<string>& value) -> Option<Error> {
-          if (value.isNone()) {
-            return Error("Missing --master");
-          }
-
-          return None();
-        });
-
     add(&Flags::build_dir,
         "build_dir",
         "The build directory of Mesos. If set, the framework will assume\n"
@@ -534,22 +541,7 @@ public:
         "executor_command",
         "The command that should be used to start the executor.\n"
         "This will override the value set by `--build_dir`.");
-
-    add(&Flags::checkpoint,
-        "checkpoint",
-        "Whether this framework should be checkpointed.",
-        false);
-
-    add(&Flags::principal,
-        "principal",
-        "The principal to use for framework authentication.");
-
-    add(&Flags::secret,
-        "secret",
-        "The secret to use for framework authentication.");
   }
-
-  Option<string> master;
 
   // Flags for specifying the executor binary and other URIs.
   //
@@ -559,21 +551,25 @@ public:
   Option<string> executor_uri;
   Option<JSON::Array> executor_uris;
   Option<string> executor_command;
-
-  bool checkpoint;
-  Option<string> principal;
-  Option<string> secret;
 };
 
 
 int main(int argc, char** argv)
 {
   Flags flags;
-  Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
+  Try<flags::Warnings> load = flags.load("MESOS_EXAMPLE_", argc, argv);
+
+  if (flags.help) {
+    std::cout << flags.usage() << std::endl;
+    return EXIT_SUCCESS;
+  }
 
   if (load.isError()) {
-    EXIT(EXIT_FAILURE) << flags.usage(load.error());
+    std::cerr << flags.usage(load.error()) << std::endl;
+    return EXIT_FAILURE;
   }
+
+  mesos::internal::logging::initialize(argv[0], false);
 
   // Log any flag warnings.
   foreach (const flags::Warning& warning, load->warnings) {
@@ -640,30 +636,47 @@ int main(int argc, char** argv)
 
   FrameworkInfo framework;
   framework.set_user(os::user().get());
+  framework.set_principal(flags.principal);
   framework.set_name(FRAMEWORK_NAME);
   framework.set_checkpoint(flags.checkpoint);
+  framework.add_roles(flags.role);
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::RESERVATION_REFINEMENT);
 
   Option<Credential> credential = None();
 
-  if (flags.principal.isSome()) {
-    framework.set_principal(flags.principal.get());
-
+  if (flags.authenticate) {
+    Credential credential_;
+    credential_.set_principal(flags.principal);
     if (flags.secret.isSome()) {
-      Credential credential_;
-      credential_.set_principal(flags.principal.get());
       credential_.set_secret(flags.secret.get());
-      credential = credential_;
     }
+    credential = credential_;
   }
 
-  Owned<LongLivedScheduler> scheduler(
-      new LongLivedScheduler(
-        flags.master.get(),
-        framework,
-        executor,
-        credential));
+  if (flags.master == "local") {
+    // Configure master.
+    os::setenv("MESOS_ROLES", flags.role);
+    os::setenv(
+        "MESOS_AUTHENTICATE_HTTP_FRAMEWORKS",
+        stringify(flags.authenticate));
+
+    os::setenv("MESOS_HTTP_FRAMEWORK_AUTHENTICATORS", "basic");
+
+    mesos::ACLs acls;
+    mesos::ACL::RegisterFramework* acl = acls.add_register_frameworks();
+    acl->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    acl->mutable_roles()->add_values(flags.role);
+    os::setenv("MESOS_ACLS", stringify(JSON::protobuf(acls)));
+  }
+
+  Owned<LongLivedScheduler> scheduler(new LongLivedScheduler(
+      flags.master,
+      framework,
+      executor,
+      credential));
 
   process::spawn(scheduler.get());
   process::wait(scheduler.get());

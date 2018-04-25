@@ -480,8 +480,7 @@ Future<http::Response> Master::QuotaHandler::_set(
         " QuotaInfo with invalid resource: " + validate->message);
   }
 
-  convertResourceFormat(
-      quotaInfo.mutable_guarantee(), POST_RESERVATION_REFINEMENT);
+  upgradeResources(&quotaInfo);
 
   // Check that the `QuotaInfo` is a valid quota request.
   {
@@ -563,7 +562,7 @@ Future<http::Response> Master::QuotaHandler::__set(
     if (error.isSome()) {
       return Conflict(
           "Heuristic capacity check for set quota request failed: " +
-          error.get().message);
+          error->message);
     }
   }
 
@@ -577,7 +576,7 @@ Future<http::Response> Master::QuotaHandler::__set(
   master->quotas[quotaInfo.role()] = quota;
 
   // Update the registry with the new quota and acknowledge the request.
-  return master->registrar->apply(Owned<Operation>(
+  return master->registrar->apply(Owned<RegistryOperation>(
       new quota::UpdateQuota(quotaInfo)))
     .then(defer(master->self(), [=](bool result) -> Future<http::Response> {
       // See the top comment in "master/quota.hpp" for why this check is here.
@@ -692,7 +691,7 @@ Future<http::Response> Master::QuotaHandler::__remove(const string& role) const
   master->quotas.erase(role);
 
   // Update the registry with the removed quota and acknowledge the request.
-  return master->registrar->apply(Owned<Operation>(
+  return master->registrar->apply(Owned<RegistryOperation>(
       new quota::RemoveQuota(role)))
     .then(defer(master->self(), [=](bool result) -> Future<http::Response> {
       // See the top comment in "master/quota.hpp" for why this check is here.

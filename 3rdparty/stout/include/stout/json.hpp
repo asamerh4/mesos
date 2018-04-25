@@ -229,15 +229,13 @@ struct Null {};
 
 namespace internal {
 
-// Only Object and Array require recursive_wrapper, not sure
-// if there is a reason to wrap the others or not.
 // Null needs to be first so that it is the default value.
-typedef boost::variant<boost::recursive_wrapper<Null>,
-                       boost::recursive_wrapper<String>,
-                       boost::recursive_wrapper<Number>,
+typedef boost::variant<Null,
+                       String,
+                       Number,
                        boost::recursive_wrapper<Object>,
                        boost::recursive_wrapper<Array>,
-                       boost::recursive_wrapper<Boolean>> Variant;
+                       Boolean> Variant;
 
 } // namespace internal {
 
@@ -892,13 +890,26 @@ inline Try<Value> parse(const std::string& s)
   // Because PicoJson supports repeated parsing of multiple objects/arrays in a
   // stream, it will quietly ignore trailing non-whitespace characters. We would
   // rather throw an error, however, so use `last_char` to check for this.
+  //
+  // TODO(alexr): Address cases when `s` is empty or consists only of whitespace
+  // characters.
   const char* lastVisibleChar =
     parseBegin + s.find_last_not_of(strings::WHITESPACE);
 
-  // Parse the string, returning a pointer to the character
-  // immediately following the last one parsed.
-  const char* parseEnd =
-    picojson::parse(value, parseBegin, parseBegin + s.size(), &error);
+  // Parse the string, returning a pointer to the character immediately
+  // following the last one parsed. Convert exceptions to `Error`s.
+  //
+  // TODO(alexr): Remove `try-catch` wrapper once picojson stops throwing
+  // on parsing, see https://github.com/kazuho/picojson/issues/94
+  const char* parseEnd;
+  try {
+    parseEnd =
+      picojson::parse(value, parseBegin, parseBegin + s.size(), &error);
+  } catch (const std::overflow_error&) {
+    return Error("Value out of range");
+  } catch (...) {
+    return Error("Unknown JSON parse error");
+  }
 
   if (!error.empty()) {
     return Error(error);
@@ -921,11 +932,11 @@ Try<T> parse(const std::string& s)
     return Error(value.error());
   }
 
-  if (!value.get().is<T>()) {
+  if (!value->is<T>()) {
     return Error("Unexpected JSON type parsed");
   }
 
-  return value.get().as<T>();
+  return value->as<T>();
 }
 
 

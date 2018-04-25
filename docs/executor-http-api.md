@@ -206,7 +206,9 @@ Accept: application/json
     "value": "9aaa9d0d-e00d-444f-bfbd-23dd197939a0-0000"
   },
   "type": "MESSAGE",
-  "data": "t+Wonz5fRFKMzCnEptlv5A=="
+  "message": {
+    "data": "t+Wonz5fRFKMzCnEptlv5A=="
+  }
 }
 
 MESSAGE Response:
@@ -279,7 +281,7 @@ LAUNCH_GROUP Event (JSON)
   "launch_group": {
     "task_group" : {
       "tasks" : [
-        "task": {
+        {
           "name": "dummy-task",
           "task_id": {
             "value": "d40f3f3e-bbe3-44af-a230-4cb1eae72f67"

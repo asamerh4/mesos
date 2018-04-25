@@ -37,6 +37,7 @@ public:
   virtual ~VolumeSandboxPathIsolatorProcess();
 
   virtual bool supportsNesting();
+  virtual bool supportsStandalone();
 
   virtual process::Future<Nothing> recover(
       const std::list<mesos::slave::ContainerState>& states,
@@ -45,6 +46,9 @@ public:
   virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> prepare(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig);
+
+  virtual process::Future<Nothing> cleanup(
+      const ContainerID& containerId);
 
 private:
   VolumeSandboxPathIsolatorProcess(

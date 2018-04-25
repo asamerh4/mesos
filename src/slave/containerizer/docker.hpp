@@ -86,7 +86,7 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
 
-  virtual process::Future<bool> launch(
+  virtual process::Future<Containerizer::LaunchResult> launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -105,9 +105,13 @@ public:
   virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual process::Future<bool> destroy(const ContainerID& containerId);
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> destroy(
+      const ContainerID& containerId);
 
   virtual process::Future<hashset<ContainerID>> containers();
+
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& excludedImages);
 
 private:
   process::Owned<DockerContainerizerProcess> process;
@@ -134,7 +138,7 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
 
-  virtual process::Future<bool> launch(
+  virtual process::Future<Containerizer::LaunchResult> launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -156,7 +160,7 @@ public:
   virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual process::Future<bool> destroy(
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> destroy(
       const ContainerID& containerId,
       bool killed = true); // process is either killed or reaped.
 
@@ -176,7 +180,7 @@ private:
       const ContainerID& containerId,
       pid_t pid);
 
-  process::Future<bool> _launch(
+  process::Future<Containerizer::LaunchResult> _launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig);
 
@@ -201,7 +205,7 @@ private:
       const Docker::Container& dockerContainer);
 
   // Reaps on the executor pid.
-  process::Future<bool> reapExecutor(
+  process::Future<Nothing> reapExecutor(
       const ContainerID& containerId,
       pid_t pid);
 
@@ -471,7 +475,7 @@ private:
 
     // Future that tells us the return value of last launch stage (fetch, pull,
     // run, etc).
-    process::Future<bool> launch;
+    process::Future<Containerizer::LaunchResult> launch;
 
     // We keep track of the resources for each container so we can set
     // the ResourceStatistics limits in usage(). Note that this is

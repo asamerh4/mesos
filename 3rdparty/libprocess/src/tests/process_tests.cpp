@@ -31,13 +31,13 @@
 
 #include <process/async.hpp>
 #include <process/clock.hpp>
+#include <process/count_down_latch.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/dispatch.hpp>
 #include <process/executor.hpp>
 #include <process/filter.hpp>
 #include <process/future.hpp>
-#include <process/gc.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
 #include <process/network.hpp>
@@ -71,6 +71,7 @@ namespace inet4 = process::network::inet4;
 
 using process::async;
 using process::Clock;
+using process::CountDownLatch;
 using process::defer;
 using process::Deferred;
 using process::Event;
@@ -103,6 +104,7 @@ using std::vector;
 using testing::_;
 using testing::Assign;
 using testing::DoAll;
+using testing::InvokeWithoutArgs;
 using testing::Return;
 using testing::ReturnArg;
 
@@ -125,7 +127,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Spawn)
+TEST(ProcessTest, Spawn)
 {
   SpawnProcess process;
 
@@ -144,6 +146,18 @@ TEST(ProcessTest, THREADSAFE_Spawn)
 }
 
 
+struct MoveOnly
+{
+  MoveOnly() {}
+
+  MoveOnly(const MoveOnly&) = delete;
+  MoveOnly(MoveOnly&&) = default;
+
+  MoveOnly& operator=(const MoveOnly&) = delete;
+  MoveOnly& operator=(MoveOnly&&) = default;
+};
+
+
 class DispatchProcess : public Process<DispatchProcess>
 {
 public:
@@ -152,10 +166,16 @@ public:
   MOCK_METHOD1(func2, Future<bool>(bool));
   MOCK_METHOD1(func3, int(int));
   MOCK_METHOD2(func4, Future<bool>(bool, int));
+
+  void func5(MoveOnly&& mo) { func5_(mo); }
+  MOCK_METHOD1(func5_, void(const MoveOnly&));
+
+  bool func6(MoveOnly&& m1, MoveOnly&& m2, bool b) { return func6_(m1, m2, b); }
+  MOCK_METHOD3(func6_, bool(const MoveOnly&, const MoveOnly&, bool));
 };
 
 
-TEST(ProcessTest, THREADSAFE_Dispatch)
+TEST(ProcessTest, Dispatch)
 {
   DispatchProcess process;
 
@@ -167,11 +187,14 @@ TEST(ProcessTest, THREADSAFE_Dispatch)
   EXPECT_CALL(process, func2(_))
     .WillOnce(ReturnArg<0>());
 
+  EXPECT_CALL(process, func5_(_));
+
   PID<DispatchProcess> pid = spawn(&process);
 
   ASSERT_FALSE(!pid);
 
   dispatch(pid, &DispatchProcess::func0);
+  dispatch(pid, &DispatchProcess::func5, MoveOnly());
 
   Future<bool> future;
 
@@ -188,7 +211,7 @@ TEST(ProcessTest, THREADSAFE_Dispatch)
 }
 
 
-TEST(ProcessTest, THREADSAFE_Defer1)
+TEST(ProcessTest, Defer1)
 {
   DispatchProcess process;
 
@@ -202,6 +225,11 @@ TEST(ProcessTest, THREADSAFE_Defer1)
 
   EXPECT_CALL(process, func4(_, _))
     .WillRepeatedly(ReturnArg<0>());
+
+  EXPECT_CALL(process, func5_(_));
+
+  EXPECT_CALL(process, func6_(_, _, _))
+    .WillRepeatedly(ReturnArg<2>());
 
   PID<DispatchProcess> pid = spawn(&process);
 
@@ -250,6 +278,26 @@ TEST(ProcessTest, THREADSAFE_Defer1)
     EXPECT_TRUE(future.get());
   }
 
+  {
+    lambda::CallableOnce<void()> func5 =
+      defer(pid, &DispatchProcess::func5, MoveOnly());
+    std::move(func5)();
+  }
+
+  {
+    lambda::CallableOnce<Future<bool>(MoveOnly&&)> func6 =
+      defer(pid, &DispatchProcess::func6, MoveOnly(), lambda::_1, true);
+    future = std::move(func6)(MoveOnly());
+    EXPECT_TRUE(future.get());
+  }
+
+  {
+    lambda::CallableOnce<Future<bool>(MoveOnly&&)> func6 =
+      defer(pid, &DispatchProcess::func6, MoveOnly(), lambda::_1, false);
+    future = std::move(func6)(MoveOnly());
+    EXPECT_FALSE(future.get());
+  }
+
   // Only take const &!
 
   terminate(pid);
@@ -283,7 +331,7 @@ private:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Defer2)
+TEST(ProcessTest, Defer2)
 {
   DeferProcess process;
 
@@ -315,7 +363,7 @@ void set(T* t1, const T& t2)
 }
 
 
-TEST(ProcessTest, THREADSAFE_Defer3)
+TEST(ProcessTest, Defer3)
 {
   std::atomic_bool bool1(false);
   std::atomic_bool bool2(false);
@@ -347,7 +395,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Handlers)
+TEST(ProcessTest, Handlers)
 {
   HandlersProcess process;
 
@@ -370,7 +418,7 @@ TEST(ProcessTest, THREADSAFE_Handlers)
 
 // Tests DROP_MESSAGE and DROP_DISPATCH and in particular that an
 // event can get dropped before being processed.
-TEST(ProcessTest, THREADSAFE_Expect)
+TEST(ProcessTest, Expect)
 {
   HandlersProcess process;
 
@@ -399,7 +447,7 @@ TEST(ProcessTest, THREADSAFE_Expect)
 
 
 // Tests the FutureArg<N> action.
-TEST(ProcessTest, THREADSAFE_Action)
+TEST(ProcessTest, Action)
 {
   HandlersProcess process;
 
@@ -444,7 +492,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Inheritance)
+TEST(ProcessTest, Inheritance)
 {
   DerivedProcess process;
 
@@ -472,7 +520,7 @@ TEST(ProcessTest, THREADSAFE_Inheritance)
 }
 
 
-TEST(ProcessTest, THREADSAFE_Thunk)
+TEST(ProcessTest, Thunk)
 {
   struct Thunk
   {
@@ -515,7 +563,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Delegate)
+TEST(ProcessTest, Delegate)
 {
   DelegateeProcess delegatee;
   DelegatorProcess delegator(delegatee.self());
@@ -546,7 +594,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Delay)
+TEST(ProcessTest, Delay)
 {
   Clock::pause();
 
@@ -583,7 +631,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Order)
+TEST(ProcessTest, Order)
 {
   Clock::pause();
 
@@ -636,7 +684,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Donate)
+TEST(ProcessTest, Donate)
 {
   DonateProcess process;
   spawn(process);
@@ -712,7 +760,11 @@ TEST(ProcessTest, InjectExited)
 class MessageEventProcess : public Process<MessageEventProcess>
 {
 public:
-  MOCK_METHOD1(visit, void(const MessageEvent&));
+  // This is a workaround for mocking methods taking
+  // rvalue reference parameters.
+  // See https://github.com/google/googletest/issues/395
+  void consume(MessageEvent&& event) { consume_(event.message); }
+  MOCK_METHOD1(consume_, void(const Message&));
 };
 
 
@@ -727,9 +779,9 @@ protected:
     MessageEventProcess coordinator;
     spawn(coordinator);
 
-    Future<MessageEvent> event;
-    EXPECT_CALL(coordinator, visit(_))
-      .WillOnce(FutureArg<0>(&event));
+    Future<Message> message;
+    EXPECT_CALL(coordinator, consume_(_))
+      .WillOnce(FutureArg<0>(&message));
 
     Try<Subprocess> s = process::subprocess(
         path::join(BUILD_DIR, "test-linkee") +
@@ -738,10 +790,10 @@ protected:
     linkee = s.get();
 
     // Wait until the subprocess sends us a message.
-    AWAIT_ASSERT_READY(event);
+    AWAIT_ASSERT_READY(message);
 
     // Save the PID of the linkee.
-    pid = event->message.from;
+    pid = message->from;
 
     terminate(coordinator);
     wait(coordinator);
@@ -827,7 +879,7 @@ public:
 
   void ping_linkee()
   {
-    send(pid, "whatever", "", 0);
+    send(pid, "whatever");
   }
 
   MOCK_METHOD1(exited, void(const UPID&));
@@ -1130,7 +1182,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Settle)
+TEST(ProcessTest, Settle)
 {
   Clock::pause();
   SettleProcess process;
@@ -1143,7 +1195,7 @@ TEST(ProcessTest, THREADSAFE_Settle)
 }
 
 
-TEST(ProcessTest, THREADSAFE_Pid)
+TEST(ProcessTest, Pid)
 {
   TimeoutProcess process;
 
@@ -1176,7 +1228,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Listener)
+TEST(ProcessTest, Listener)
 {
   MultipleListenerProcess process;
 
@@ -1202,20 +1254,17 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Executor)
+TEST(ProcessTest, Executor_Defer)
 {
-  std::atomic_bool event1Called(false);
-  std::atomic_bool event2Called(false);
-
   EventReceiver receiver;
+  Executor executor;
+
+  CountDownLatch event1Called;
 
   EXPECT_CALL(receiver, event1(42))
-    .WillOnce(Assign(&event1Called, true));
-
-  EXPECT_CALL(receiver, event2("event2"))
-    .WillOnce(Assign(&event2Called, true));
-
-  Executor executor;
+    .WillOnce(InvokeWithoutArgs([&]() {
+      event1Called.decrement();
+    }));
 
   Deferred<void(int)> event1 =
     executor.defer([&receiver](int i) {
@@ -1224,6 +1273,15 @@ TEST(ProcessTest, THREADSAFE_Executor)
 
   event1(42);
 
+  AWAIT_READY(event1Called.triggered());
+
+  CountDownLatch event2Called;
+
+  EXPECT_CALL(receiver, event2("event2"))
+    .WillOnce(InvokeWithoutArgs([&]() {
+      event2Called.decrement();
+    }));
+
   Deferred<void(const string&)> event2 =
     executor.defer([&receiver](const string& s) {
       return receiver.event2(s);
@@ -1231,8 +1289,63 @@ TEST(ProcessTest, THREADSAFE_Executor)
 
   event2("event2");
 
-  while (event1Called.load() == false);
-  while (event2Called.load() == false);
+  AWAIT_READY(event2Called.triggered());
+}
+
+
+TEST(ProcessTest, Executor_Execute)
+{
+  Executor executor;
+
+  // A void immutable lambda.
+  CountDownLatch f1Result;
+  auto f1 = [&f1Result] {
+    f1Result.decrement();
+  };
+
+  // Specify the return type explicitly for type checking. Same below.
+  Future<Nothing> f1Called = executor.execute(f1);
+
+  AWAIT_READY(f1Called);
+  AWAIT_READY(f1Result.triggered());
+
+  // A void mutable bind.
+  CountDownLatch f2Result;
+  int f2State = 0;
+  auto f2 = [&f2Result, f2State](int) mutable -> void {
+    f2State++;
+    f2Result.decrement();
+  };
+
+  Future<Nothing> f2Called = executor.execute(std::bind(f2, 42));
+
+  AWAIT_READY(f2Called);
+  AWAIT_READY(f2Result.triggered());
+
+  // A non-void immutable lambda.
+  // NOTE: It appears that g++ throws away the cv-qualifiers when doing
+  // the lvalue-to-rvalue conversion for the returned string but clang
+  // does not, so `f3` should return a non-constant string.
+  string f3Result = "f3";
+  auto f3 = [&f3Result] {
+    return f3Result;
+  };
+
+  Future<string> f3Called = executor.execute(f3);
+
+  AWAIT_EXPECT_EQ(f3Result, f3Called);
+
+  // A mutable bind returning a future.
+  const string f4Result = "f4";
+  int f4State = 0;
+  auto f4 = [&f4Result, f4State](int) mutable -> Future<string> {
+    f4State++;
+    return f4Result;
+  };
+
+  Future<string> f4Called = executor.execute(std::bind(f4, 42));
+
+  AWAIT_EXPECT_EQ(f4Result, f4Called);
 }
 
 
@@ -1248,7 +1361,7 @@ public:
 };
 
 
-TEST(ProcessTest, THREADSAFE_Remote)
+TEST(ProcessTest, Remote)
 {
   RemoteProcess process;
   spawn(process);
@@ -1284,7 +1397,7 @@ TEST(ProcessTest, THREADSAFE_Remote)
 
 
 // Like the 'remote' test but uses http::connect.
-TEST(ProcessTest, THREADSAFE_Http1)
+TEST(ProcessTest, Http1)
 {
   RemoteProcess process;
   spawn(process);
@@ -1339,7 +1452,7 @@ TEST(ProcessTest, THREADSAFE_Http1)
 // also use http::post here since we expect a 202 response.
 //
 // TODO(neilc): This test currently does not work on Windows (MESOS-7527).
-TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, THREADSAFE_Http2)
+TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, Http2)
 {
   RemoteProcess process;
   spawn(process);
@@ -1449,7 +1562,7 @@ static string itoa2(int* const& i)
 }
 
 
-TEST(ProcessTest, THREADSAFE_Async)
+TEST(ProcessTest, Async)
 {
   // Non-void functions with different no.of args.
   EXPECT_EQ(1, async(&foo).get());
@@ -1463,7 +1576,7 @@ TEST(ProcessTest, THREADSAFE_Async)
   EXPECT_EQ("42", async(&itoa2, &i).get());
 
   // Non-void function that returns a future.
-  EXPECT_EQ("42", async(&itoa1, &i).get().get());
+  EXPECT_EQ("42", async(&itoa1, &i)->get());
 }
 
 
@@ -1509,7 +1622,7 @@ TEST_TEMP_DISABLED_ON_WINDOWS(ProcessTest, Provide)
 
   AWAIT_READY(response);
 
-  ASSERT_EQ(LOREM_IPSUM, response.get().body);
+  ASSERT_EQ(LOREM_IPSUM, response->body);
 
   terminate(server);
   wait(server);

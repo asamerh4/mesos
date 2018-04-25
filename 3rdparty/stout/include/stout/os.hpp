@@ -163,6 +163,9 @@ inline void appendPaths(const std::string& newPaths)
 } // namespace libraries {
 
 
+#ifdef __WINDOWS__
+inline Try<std::string> sysname() = delete;
+#else
 // Return the operating system name (e.g. Linux).
 inline Try<std::string> sysname()
 {
@@ -171,8 +174,9 @@ inline Try<std::string> sysname()
     return Error(info.error());
   }
 
-  return info.get().sysname;
+  return info->sysname;
 }
+#endif // __WINDOWS__
 
 
 inline Try<std::list<Process>> processes()

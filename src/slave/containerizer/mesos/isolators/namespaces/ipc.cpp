@@ -14,9 +14,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "linux/ns.hpp"
-
 #include "slave/containerizer/mesos/isolators/namespaces/ipc.hpp"
+
+#include <process/future.hpp>
+#include <process/id.hpp>
+
+#include "linux/ns.hpp"
 
 using process::Future;
 
@@ -36,7 +39,8 @@ Try<Isolator*> NamespacesIPCIsolatorProcess::create(const Flags& flags)
   }
 
   // Verify that IPC namespaces are available on this kernel.
-  if (ns::namespaces().count("ipc") == 0) {
+  Try<bool> ipcSupported = ns::supported(CLONE_NEWIPC);
+  if (ipcSupported.isError() || !ipcSupported.get()) {
     return Error("IPC namespaces are not supported by this kernel");
   }
 
@@ -57,6 +61,12 @@ NamespacesIPCIsolatorProcess::NamespacesIPCIsolatorProcess()
 
 
 bool NamespacesIPCIsolatorProcess::supportsNesting()
+{
+  return true;
+}
+
+
+bool NamespacesIPCIsolatorProcess::supportsStandalone()
 {
   return true;
 }

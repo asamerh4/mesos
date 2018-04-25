@@ -24,6 +24,8 @@ import "mesos/quota/quota.proto";
 
 package mesos.master;
 
+option cc_enable_arenas = true;
+
 option java_package = "org.apache.mesos.master";
 option java_outer_classname = "Protos";
 
@@ -60,6 +62,7 @@ message Call {
     GET_AGENTS = 10;
     GET_FRAMEWORKS = 11;
     GET_EXECUTORS = 12;     // Retrieves the information about all executors.
+    GET_OPERATIONS = 33;    // Retrieves the information about known operations.
     GET_TASKS = 13;         // Retrieves the information about all known tasks.
     GET_ROLES = 14;         // Retrieves the information about roles.
 
@@ -89,6 +92,8 @@ message Call {
     REMOVE_QUOTA = 30;       // See 'RemoveQuota' below.
 
     TEARDOWN = 31;       // See 'Teardown' below.
+
+    MARK_AGENT_GONE = 32; // See 'MarkAgentGone' below.
   }
 
   // Provides a snapshot of the current metrics tracked by the master.
@@ -196,6 +201,21 @@ message Call {
     required FrameworkID framework_id = 1;
   }
 
+  // Mark an agent as gone. This can be used by an operator to assert
+  // that the agent instance has failed and is never coming back (e.g.,
+  // ephemeral instance from cloud provider). The master would shutdown
+  // the agent and send 'TASK_GONE_BY_OPERATOR' updates for all the running
+  // tasks. The persistent volumes/reservations on the agent won't be
+  // accessible anymore.
+  //
+  // NOTE: It is possible that the tasks might still be running
+  // if the operator's assertion was wrong and the agent was partitioned
+  // away from the master. The agent would be shutdown when it tries to
+  // reregister with the master when the partition heals.
+  message MarkAgentGone {
+    required SlaveID slave_id = 1;
+  }
+
   optional Type type = 1;
 
   optional GetMetrics get_metrics = 2;
@@ -213,6 +233,7 @@ message Call {
   optional SetQuota set_quota = 14;
   optional RemoveQuota remove_quota = 15;
   optional Teardown teardown = 16;
+  optional MarkAgentGone mark_agent_gone = 17;
 }
 
 
@@ -240,6 +261,7 @@ message Response {
     GET_AGENTS = 9;
     GET_FRAMEWORKS = 10;
     GET_EXECUTORS = 11;            // See 'GetExecutors' below.
+    GET_OPERATIONS = 19;           // See 'GetOperations' below.
     GET_TASKS = 12;                // See 'GetTasks' below.
     GET_ROLES = 13;                // See 'GetRoles' below.
 
@@ -319,6 +341,13 @@ message Response {
       repeated Resource offered_resources = 9;
 
       repeated SlaveInfo.Capability capabilities = 10;
+
+      message ResourceProvider {
+        required ResourceProviderInfo resource_provider_info = 1;
+        repeated Resource total_resources = 2;
+      }
+
+      repeated ResourceProvider resource_providers = 11;
     }
 
     // Registered agents.
@@ -340,7 +369,7 @@ message Response {
       // If true, this framework was previously subscribed but hasn't
       // yet re-subscribed after a master failover. Recovered frameworks
       // are only reported if one or more agents running a task or
-      // executor for the framework have re-registered after master
+      // executor for the framework have reregistered after master
       // failover.
       required bool recovered = 11;
 
@@ -388,6 +417,12 @@ message Response {
     //
     // TODO(neilc): Remove this field in Mesos 2.0.
     repeated Executor orphan_executors = 2 [deprecated=true];
+  }
+
+  // Lists information about all operations known to the master at the
+  // current time.
+  message GetOperations {
+    repeated Operation operations = 1;
   }
 
   // Lists information about all the tasks known to the master at the current
@@ -438,6 +473,10 @@ message Response {
   // Contains the master's information.
   message GetMaster {
     optional MasterInfo master_info = 1;
+
+    optional double start_time = 2;
+
+    optional double elected_time = 3;
   }
 
   // Contains the cluster's maintenance status.
@@ -468,6 +507,7 @@ message Response {
   optional GetAgents get_agents = 10;
   optional GetFrameworks get_frameworks = 11;
   optional GetExecutors get_executors = 12;
+  optional GetOperations get_operations = 20;
   optional GetTasks get_tasks = 13;
   optional GetRoles get_roles = 14;
   optional GetWeights get_weights = 15;
@@ -541,7 +581,7 @@ message Event {
     required Response.GetFrameworks.Framework framework = 1;
   }
 
-  // Forwarded by the master when a framework re-registers with the master
+  // Forwarded by the master when a framework reregisters with the master
   // upon a disconnection (network error) or upon a master failover.
   message FrameworkUpdated {
     required Response.GetFrameworks.Framework framework = 1;
@@ -549,7 +589,7 @@ message Event {
 
   // Forwarded by the master when a framework is removed. This can happen when
   // a framework is explicitly teardown by the operator or if it fails to
-  // re-register with the master within the failover timeout.
+  // reregister with the master within the failover timeout.
   message FrameworkRemoved {
     required FrameworkInfo framework_info = 1;
   }

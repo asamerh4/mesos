@@ -24,10 +24,10 @@ MESOS_DIR=$(git rev-parse --show-toplevel)
 : ${USERNAME:?"Environment variable 'USERNAME' must be set to the username of the 'Mesos Reviewbot' Reviewboard account."}
 : ${PASSWORD:?"Environment variable 'PASSWORD' must be set to the password of the 'Mesos Reviewbot' Reviewboard account."}
 
-export OS='ubuntu:14.04'
+export OS='ubuntu:16.04'
 export BUILDTOOL='autotools'
 export COMPILER='gcc'
-export CONFIGURATION='--verbose'
+export CONFIGURATION='--verbose --disable-libtool-wrappers'
 export ENVIRONMENT='GLOG_v=1 MESOS_VERBOSE=1'
 
 # Build the HEAD first to ensure that there are no errors prior to applying

@@ -5,9 +5,6 @@ layout: documentation
 
 # Operator HTTP API
 
-Mesos 1.0.0 added **experimental** support for v1 Operator HTTP API.
-
-
 ## Overview
 
 Both masters and agents provide the `/api/v1` endpoint as the base URL for performing operator-related operations.
@@ -677,6 +674,10 @@ Content-Type: application/json
       },
       {
         "name": "master/tasks_lost",
+        "value": 0.0
+      },
+      {
+        "name": "master/messages_reconcile_operations",
         "value": 0.0
       },
       {
@@ -2324,6 +2325,41 @@ HTTP/1.1 202 Accepted
 
 ```
 
+### MARK_AGENT_GONE
+
+This call can be used by operators to assert that an agent instance has
+failed and is never coming back (e.g., ephemeral instance from cloud provider).
+The master would shutdown the agent and send `TASK_GONE_BY_OPERATOR` updates
+for all the running tasks. This signal can be used by stateful frameworks to
+re-schedule their workloads (volumes, reservations etc.) to other agent
+instances. It is possible that the tasks might still be running if the
+operator's assertion was wrong and the agent was partitioned away from
+the master. The agent would be shutdown when it tries to reregister with the
+master when the partition heals. This call is idempotent.
+
+```
+MARK_AGENT_GONE HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: masterhost:5050
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "MARK_AGENT_GONE",
+  "mark_agent_gone": {
+    "agent_id": {
+      "value": "3192b9d1-db71-4699-ae25-e28dfbf42de1"
+    }
+  }
+}
+
+MARK_AGENT_GONE HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
 ## Events
 
 Currently, the only call that results in a streaming response is the `SUBSCRIBE` call sent to the master API.
@@ -2381,7 +2417,7 @@ HEARTBEAT Event (JSON)
 
 ### TASK_ADDED
 
-Sent whenever a task has been added to the master. This can happen either when a new task launch is processed by the master or when an agent re-registers with a failed over master.
+Sent whenever a task has been added to the master. This can happen either when a new task launch is processed by the master or when an agent reregisters with a failed over master.
 
 ```
 TASK_ADDED Event (JSON)
@@ -2489,7 +2525,7 @@ FRAMEWORK_ADDED Event (JSON)
 
 ### FRAMEWORK_UPDATED
 
-Sent whenever a framework re-registers with the master upon a disconnection (network error) or upon a master failover.
+Sent whenever a framework reregisters with the master upon a disconnection (network error) or upon a master failover.
 
 ```
 FRAMEWORK_UPDATED Event (JSON)
@@ -2533,7 +2569,7 @@ FRAMEWORK_UPDATED Event (JSON)
 
 ### FRAMEWORK_REMOVED
 
-Sent whenever a framework is removed. This can happen when a framework is explicitly teardown by the operator or if it fails to re-register with the master within the failover timeout.
+Sent whenever a framework is removed. This can happen when a framework is explicitly teardown by the operator or if it fails to reregister with the master within the failover timeout.
 
 ```
 FRAMEWORK_REMOVED Event (JSON)
@@ -3137,6 +3173,11 @@ Content-Type: application/json
 This call retrieves information about containers running on this agent. It contains
 ContainerStatus and ResourceStatistics along with some metadata of the containers.
 
+There are two knobs in the request to control the types of the containers this
+API will return:
+* `show_nested`: Whether to show nested containers [default: false].
+* `show_standalone`: Whether to show standalone containers [default: false].
+
 ```
 GET_CONTAINERS HTTP Request (JSON):
 
@@ -3147,7 +3188,11 @@ Content-Type: application/json
 Accept: application/json
 
 {
-  "type": "GET_CONTAINERS"
+  "type": "GET_CONTAINERS",
+  "get_containers": {
+    "show_nested": true,
+    "show_standalone": false
+  }
 }
 
 
@@ -3804,6 +3849,234 @@ Accept: application/json
 }
 
 REMOVE_NESTED_CONTAINER HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+### ADD_RESOURCE_PROVIDER_CONFIG
+
+This call launches a Local Resource Provider on the agent with the specified
+`ResourceProviderInfo`.
+
+```
+ADD_RESOURCE_PROVIDER_CONFIG HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "ADD_RESOURCE_PROVIDER_CONFIG",
+  "add_resource_provider_config": {
+    "info": {
+      "type": "org.apache.mesos.rp.local.storage",
+      "name": "test_slrp",
+      "default_reservations": [
+        {
+          "type": "DYNAMIC",
+          "role": "test-role"
+        }
+      ],
+      "storage": {
+        "plugin": {
+          "type": "org.apache.mesos.csi.test",
+          "name": "test_plugin",
+          "containers": [
+            {
+              "services": [
+                "CONTROLLER_SERVICE",
+                "NODE_SERVICE"
+              ],
+              "command": {
+                "shell": true,
+                "value": "./test-csi-plugin --available_capacity=2GB --work_dir=workdir",
+                "uris": [
+                  {
+                    "value": "/PATH/TO/test-csi-plugin",
+                    "executable": true
+                  }
+                ]
+              },
+              "resources": [
+                { "name": "cpus", "type": "SCALAR", "scalar": { "value": 0.1 } },
+                { "name": "mem", "type": "SCALAR", "scalar": { "value": 200.0 } }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
+ADD_RESOURCE_PROVIDER_CONFIG HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+Possible responses:
+
+* `200 OK`: If a new config file is created.
+* `400 Bad Request`: If the request is not well-formed.
+* `401 Unauthorized`: If HTTP authentication fails.
+* `403 Forbidden`: If the call is not authorized.
+* `409 Conflict`: If another config file that describes a resource provider of the same type and name exists.
+* `500 Internal Server Error`: If an unexpected error occurs.
+
+
+### UPDATE_RESOURCE_PROVIDER_CONFIG
+
+This call updates a Local Resource Provider on the agent with the specified
+`ResourceProviderInfo`.
+
+```
+UPDATE_RESOURCE_PROVIDER_CONFIG HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "UPDATE_RESOURCE_PROVIDER_CONFIG",
+  "update_resource_provider_config": {
+    "info": {
+      "type": "org.apache.mesos.rp.local.storage",
+      "name": "test_slrp",
+      "default_reservations": [
+        {
+          "type": "DYNAMIC",
+          "role": "test-role"
+        }
+      ],
+      "storage": {
+        "plugin": {
+          "type": "org.apache.mesos.csi.test",
+          "name": "test_plugin",
+          "containers": [
+            {
+              "services": [
+                "CONTROLLER_SERVICE",
+                "NODE_SERVICE"
+              ],
+              "command": {
+                "shell": true,
+                "value": "./test-csi-plugin --available_capacity=2GB --work_dir=workdir",
+                "uris": [
+                  {
+                    "value": "/PATH/TO/test-csi-plugin",
+                    "executable": true
+                  }
+                ]
+              },
+              "resources": [
+                { "name": "cpus", "type": "SCALAR", "scalar": { "value": 0.1 } },
+                { "name": "mem", "type": "SCALAR", "scalar": { "value": 200.0 } }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
+UPDATE_RESOURCE_PROVIDER_CONFIG HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+Possible responses:
+
+* `200 OK`: If an existing config file is updated.
+* `400 Bad Request`: If the request is not well-formed.
+* `401 Unauthorized`: If HTTP authentication fails.
+* `403 Forbidden`: If the call is not authorized.
+* `404 Not Found`: If no config file describes a resource provider of the same type and name exists.
+* `500 Internal Server Error`: If an unexpected error occurs.
+
+
+### REMOVE_RESOURCE_PROVIDER_CONFIG
+
+This call terminates a given Local Resource Provider on the agent and prevents
+it from being launched again until the config is added back. The master and the
+agent will think the resource provider has disconnected, similar to agent
+disconnection.
+
+If there exists a task that is using the resources provided by the resource
+provider, its execution will not be affected. However, offer operations for the
+local resource provider will not be successful. In fact, if a local resource
+provider is disconnected, the master will rescind the offers related to that
+local resource provider, effectively disallowing frameworks to perform
+operations on the disconnected local resource provider.
+
+The local resource provider can be re-added after its removal using
+[`ADD_RESOURCE_PROVIDER_CONFIG`](#add_resource_provider_config). Note that
+removing a local resource provider is different than marking a local resource
+provider as gone, in which case the local resource provider will not be allowed
+to be re-added.  Marking a local resource provider as gone is not yet supported.
+
+```
+REMOVE_RESOURCE_PROVIDER_CONFIG HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "REMOVE_RESOURCE_PROVIDER_CONFIG",
+  "remove_resource_provider_config": {
+    "type": "org.apache.mesos.rp.local.storage",
+    "name": "test_slrp"
+  }
+}
+
+REMOVE_RESOURCE_PROVIDER_CONFIG HTTP Response (JSON):
+
+HTTP/1.1 200 OK
+```
+
+Possible responses:
+
+* `200 OK`: If the config file is removed.
+* `400 Bad Request`: If the request is not well-formed.
+* `401 Unauthorized`: If HTTP authentication fails.
+* `403 Forbidden`: If the call is not authorized.
+* `404 Not Found`: If the config file does not exist.
+* `500 Internal Server Error`: If an unexpected error occurs.
+
+
+### PRUNE_IMAGES
+
+This call triggers garbage collection for container images. This call can
+only be made when all running containers are launched with Mesos version 1.5
+or newer. An optional list of excluded images from GC can be speficied via
+`prune_images.excluded_images` field.
+
+```
+PRUNE_IMAGES HTTP Request (JSON):
+
+POST /api/v1  HTTP/1.1
+
+Host: agenthost:5051
+Content-Type: application/json
+Accept: application/json
+
+{
+  "type": "PRUNE_IMAGES",
+  "prune_images": {
+    "excluded_images": [
+      {"type":"DOCKER","docker":{"name":"mysql:latest"}}
+    ]
+  }
+}
+
+PRUNE_IMAGES HTTP Response (JSON):
 
 HTTP/1.1 200 OK
 ```

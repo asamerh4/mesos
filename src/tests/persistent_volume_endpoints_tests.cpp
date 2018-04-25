@@ -63,6 +63,7 @@ using process::http::Response;
 using process::http::Unauthorized;
 
 using testing::_;
+using testing::Not;
 using testing::Return;
 
 namespace mesos {
@@ -73,13 +74,15 @@ namespace tests {
 class PersistentVolumeEndpointsTest : public MesosTest
 {
 public:
-  // Set up the master flags such that it allows registration of the
-  // framework created with 'createFrameworkInfo'.
+  // Set up the master flags such that it allows registration of the framework
+  // created with 'createFrameworkInfo'.
   virtual master::Flags CreateMasterFlags()
   {
+    // Turn off periodic allocations to avoid the race between
+    // `HierarchicalAllocator::updateAvailable()` and periodic allocations.
     master::Flags flags = MesosTest::CreateMasterFlags();
-    flags.allocation_interval = Milliseconds(50);
-    flags.roles = createFrameworkInfo().role();
+    flags.allocation_interval = Seconds(1000);
+    flags.roles = createFrameworkInfo().roles(0);
     return flags;
   }
 
@@ -87,7 +90,7 @@ public:
   FrameworkInfo createFrameworkInfo()
   {
     FrameworkInfo info = DEFAULT_FRAMEWORK_INFO;
-    info.set_role("role1");
+    info.set_roles(0, "role1");
     return info;
   }
 
@@ -163,15 +166,12 @@ TEST_F(PersistentVolumeEndpointsTest, StaticReservation)
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   Future<OfferID> rescindedOfferId;
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&rescindedOfferId));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
 
   Future<Response> destroyResponse = process::http::post(
       master.get()->pid,
@@ -185,13 +185,19 @@ TEST_F(PersistentVolumeEndpointsTest, StaticReservation)
 
   EXPECT_EQ(rescindedOfferId.get(), offer.id());
 
+  // Summon an offer.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.reviveOffers();
+
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers->size());
   offer = offers.get()[0];
 
   EXPECT_FALSE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   driver.stop();
   driver.join();
@@ -223,7 +229,7 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservation)
   Resources unreserved = Resources::parse("disk:1024").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -256,19 +262,16 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservation)
 
   EXPECT_TRUE(Resources(offer.resources())
                 .contains(allocatedResources(
-                    dynamicallyReserved, frameworkInfo.role())));
+                    dynamicallyReserved, frameworkInfo.roles(0))));
 
   Future<OfferID> rescindedOfferId;
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&rescindedOfferId));
 
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
-
   Resources volume = createPersistentVolume(
       Megabytes(64),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "path1",
       DEFAULT_CREDENTIAL.principal(),
@@ -287,13 +290,19 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservation)
 
   EXPECT_EQ(rescindedOfferId.get(), offer.id());
 
+  // Summon an offer.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.reviveOffers();
+
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers->size());
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&rescindedOfferId));
@@ -343,7 +352,7 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservationRoleMismatch)
   Resources unreserved = Resources::parse("disk:1024").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -372,9 +381,9 @@ TEST_F(PersistentVolumeEndpointsTest, DynamicReservationRoleMismatch)
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
 
-  ASSERT_NE(frameworkInfo.role(), "role2");
+  ASSERT_NE(frameworkInfo.roles(0), "role2");
   Resources volume = createPersistentVolume(
       Megabytes(64),
       "role2",
@@ -422,7 +431,7 @@ TEST_F(PersistentVolumeEndpointsTest, UnreserveVolumeResources)
   Resources unreserved = Resources::parse("disk:1024").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -434,7 +443,7 @@ TEST_F(PersistentVolumeEndpointsTest, UnreserveVolumeResources)
 
   Resources volume = createPersistentVolume(
       Megabytes(64),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "path1",
       DEFAULT_CREDENTIAL.principal(),
@@ -702,7 +711,7 @@ TEST_F(PersistentVolumeEndpointsTest, NoHeader)
 
   Resources volume = createPersistentVolume(
       Megabytes(64),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "path1",
       None(),
@@ -715,9 +724,7 @@ TEST_F(PersistentVolumeEndpointsTest, NoHeader)
       None(),
       createRequestBody(slaveId, "volumes", volume));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      Unauthorized({}).status,
-      response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
 
   response = process::http::post(
       master.get()->pid,
@@ -725,9 +732,7 @@ TEST_F(PersistentVolumeEndpointsTest, NoHeader)
       None(),
       createRequestBody(slaveId, "volumes", volume));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      Unauthorized({}).status,
-      response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
 }
 
 
@@ -770,16 +775,12 @@ TEST_F(PersistentVolumeEndpointsTest, BadCredentials)
   Future<Response> response =
     process::http::post(master.get()->pid, "create-volumes", headers, body);
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      Unauthorized({}).status,
-      response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
 
   response =
     process::http::post(master.get()->pid, "destroy-volumes", headers, body);
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      Unauthorized({}).status,
-      response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
 }
 
 
@@ -787,9 +788,6 @@ TEST_F(PersistentVolumeEndpointsTest, BadCredentials)
 // operator to perform volume creation/destruction operations successfully.
 TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACL)
 {
-  // Pause the clock to gain control over the offer cycle.
-  Clock::pause();
-
   ACLs acls;
 
   // This ACL asserts that the principal of `DEFAULT_CREDENTIAL`
@@ -824,7 +822,7 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACL)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
-  // Advance clock to trigger agent registration before we HTTP POST.
+  // Advance the clock to trigger agent registration before we HTTP POST.
   Clock::advance(slaveFlags.registration_backoff_factor);
 
   AWAIT_READY(slaveRegisteredMessage);
@@ -864,24 +862,18 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACL)
 
   driver.start();
 
-  Clock::settle();
-  Clock::advance(masterFlags.allocation_interval);
-
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers->size());
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   Future<OfferID> rescindedOfferId;
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&rescindedOfferId));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
 
   Future<Response> destroyResponse = process::http::post(
       master.get()->pid,
@@ -891,12 +883,15 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACL)
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(Accepted().status, destroyResponse);
 
-  Clock::settle();
-  Clock::advance(masterFlags.allocation_interval);
-
   AWAIT_READY(rescindedOfferId);
 
   EXPECT_EQ(rescindedOfferId.get(), offer.id());
+
+  // Summon an offer.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.reviveOffers();
 
   AWAIT_READY(offers);
 
@@ -904,7 +899,7 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACL)
   offer = offers.get()[0];
 
   EXPECT_FALSE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   driver.stop();
   driver.join();
@@ -985,9 +980,6 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateACLMultipleRoles)
 // principal will lead to a properly failed request.
 TEST_F(PersistentVolumeEndpointsTest, BadCreateAndDestroyACL)
 {
-  // Pause the clock to gain control over the offer cycle.
-  Clock::pause();
-
   ACLs acls;
 
   // This ACL asserts that the principal of `DEFAULT_CREDENTIAL_2`
@@ -1091,16 +1083,13 @@ TEST_F(PersistentVolumeEndpointsTest, BadCreateAndDestroyACL)
 
   driver.start();
 
-  Clock::settle();
-  Clock::advance(masterFlags.allocation_interval);
-
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers->size());
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   // The failed destruction attempt.
   Future<Response> destroyResponse = process::http::post(
@@ -1197,9 +1186,6 @@ TEST_F(PersistentVolumeEndpointsTest, BadCreateACLMultipleRoles)
 // is provided.
 TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACLBadCredential)
 {
-  // Pause the clock to gain control over the offer cycle.
-  Clock::pause();
-
   // Create a credential which will not be listed
   // for valid authentication with the master.
   Credential failedCredential;
@@ -1268,9 +1254,7 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACLBadCredential)
       createBasicAuthHeaders(failedCredential),
       createRequestBody(slaveId, "volumes", volume));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      Unauthorized({}).status,
-      createResponse);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, createResponse);
 
   // The successful creation attempt.
   createResponse = process::http::post(
@@ -1296,16 +1280,13 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACLBadCredential)
 
   driver.start();
 
-  Clock::settle();
-  Clock::advance(masterFlags.allocation_interval);
-
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers->size());
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   // The failed destruction attempt.
   Future<Response> destroyResponse = process::http::post(
@@ -1314,9 +1295,7 @@ TEST_F(PersistentVolumeEndpointsTest, GoodCreateAndDestroyACLBadCredential)
       createBasicAuthHeaders(failedCredential),
       createRequestBody(slaveId, "volumes", volume));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      Unauthorized({}).status,
-      destroyResponse);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, destroyResponse);
 
   driver.stop();
   driver.join();
@@ -1527,7 +1506,7 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   Resources unreserved = Resources::parse("disk:512").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   EXPECT_CALL(sched, registered(_, _, _));
 
@@ -1545,16 +1524,21 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
 
   EXPECT_EQ(offer.slave_id(), slaveId);
 
-  // We use the filter explicitly here so that the resources will not
-  // be filtered for 5 seconds (the default).
-  Filters filters;
-  filters.set_refuse_seconds(0);
+  Future<UpdateOperationStatusMessage> updateOperationStatusMessage =
+    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
 
+  // Reserve the resources.
+  driver.acceptOffers({offer.id()}, {RESERVE(dynamicallyReserved)});
+
+  // Make sure the allocator processes the `RESERVE` operation before summoning
+  // an offer.
+  AWAIT_READY(updateOperationStatusMessage);
+
+  // Summon an offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers));
 
-  // Reserve the resources.
-  driver.acceptOffers({offer.id()}, {RESERVE(dynamicallyReserved)}, filters);
+  driver.reviveOffers();
 
   // Expect an offer with reserved resources.
   AWAIT_READY(offers);
@@ -1563,23 +1547,32 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
 
   // Create a 1MB persistent volume.
   Resources volume = createPersistentVolume(
       Megabytes(1),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "volume_path",
       frameworkInfo.principal(),
       None(),
       frameworkInfo.principal());
 
+  updateOperationStatusMessage =
+    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
+
+  // Create the volume.
+  driver.acceptOffers({offer.id()}, {CREATE(volume)});
+
+  // Make sure the master processes the accept call before summoning an offer.
+  AWAIT_READY(updateOperationStatusMessage);
+
+  // Summon an offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers));
 
-  // Create the volume.
-  driver.acceptOffers({offer.id()}, {CREATE(volume)}, filters);
+  driver.reviveOffers();
 
   // Expect an offer with a persistent volume.
   AWAIT_READY(offers);
@@ -1588,15 +1581,12 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   Future<OfferID> rescindedOfferId;
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&rescindedOfferId));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
 
   // Destroy the volume using HTTP operator endpoint.
   Future<Response> destroyResponse = process::http::post(
@@ -1610,6 +1600,12 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   AWAIT_READY(rescindedOfferId);
   EXPECT_EQ(rescindedOfferId.get(), offer.id());
 
+  // Summon an offer.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.reviveOffers();
+
   // Expect an offer containing reserved resources.
   AWAIT_READY(offers);
 
@@ -1617,13 +1613,10 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(dynamicallyReserved, frameworkInfo.role())));
+      allocatedResources(dynamicallyReserved, frameworkInfo.roles(0))));
 
   EXPECT_CALL(sched, offerRescinded(&driver, _))
     .WillOnce(FutureArg<1>(&rescindedOfferId));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
 
   // Unreserve the resources using HTTP operator endpoint.
   Future<Response> unreserveResponse = process::http::post(
@@ -1637,6 +1630,12 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   AWAIT_READY(rescindedOfferId);
   EXPECT_EQ(rescindedOfferId.get(), offer.id());
 
+  // Summon an offer.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.reviveOffers();
+
   // Expect an offer containing only unreserved resources.
   AWAIT_READY(offers);
 
@@ -1644,7 +1643,7 @@ TEST_F(PersistentVolumeEndpointsTest, OfferCreateThenEndpointRemove)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(unreserved, frameworkInfo.role())));
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
 
   driver.stop();
   driver.join();
@@ -1678,7 +1677,7 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
   Resources unreserved = Resources::parse("disk:512").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -1691,7 +1690,7 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
   // Create a 1MB persistent volume.
   Resources volume = createPersistentVolume(
       Megabytes(1),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "volume_path",
       frameworkInfo.principal(),
@@ -1726,20 +1725,21 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
-  // We use the filter explicitly here so that the resources will not
-  // be filtered for 5 seconds (the default).
-  Filters filters;
-  filters.set_refuse_seconds(0);
+  Future<UpdateOperationStatusMessage> updateOperationStatusMessage =
+    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
 
+  driver.acceptOffers({offer.id()}, {DESTROY(volume)});
+
+  // Make sure the master processes the accept call before summoning an offer.
+  AWAIT_READY(updateOperationStatusMessage);
+
+  // Summon an offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers));
 
-  driver.acceptOffers(
-      {offer.id()},
-      {DESTROY(volume)},
-      filters);
+  driver.reviveOffers();
 
   // Expect an offer containing the dynamic reservation.
   AWAIT_READY(offers);
@@ -1749,15 +1749,24 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
 
   EXPECT_TRUE(Resources(offer.resources())
                 .contains(allocatedResources(
-                    dynamicallyReserved, frameworkInfo.role())))
+                    dynamicallyReserved, frameworkInfo.roles(0))))
     << Resources(offer.resources()) << " vs "
-    << allocatedResources(dynamicallyReserved, frameworkInfo.role());
+    << allocatedResources(dynamicallyReserved, frameworkInfo.roles(0));
 
+  updateOperationStatusMessage =
+    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
+
+  // Unreserve the resources.
+  driver.acceptOffers({offer.id()}, {UNRESERVE(dynamicallyReserved)});
+
+  // Make sure the master processes the accept call before summoning an offer.
+  AWAIT_READY(updateOperationStatusMessage);
+
+  // Summon an offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers));
 
-  // Unreserve the resources.
-  driver.acceptOffers({offer.id()}, {UNRESERVE(dynamicallyReserved)}, filters);
+  driver.reviveOffers();
 
   // Expect an offer containing only unreserved resources.
   AWAIT_READY(offers);
@@ -1766,7 +1775,7 @@ TEST_F(PersistentVolumeEndpointsTest, EndpointCreateThenOfferRemove)
   offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(unreserved, frameworkInfo.role())));
+      allocatedResources(unreserved, frameworkInfo.roles(0))));
 
   driver.stop();
   driver.join();
@@ -1780,8 +1789,6 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
-
-  Clock::pause();
 
   Future<SlaveRegisteredMessage> slave1RegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
@@ -1798,8 +1805,10 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
 
   const SlaveID& slaveId1 = slave1RegisteredMessage->slave_id();
 
+  // Capture the registration message for the second agent.
   Future<SlaveRegisteredMessage> slave2RegisteredMessage =
-    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+    FUTURE_PROTOBUF(
+        SlaveRegisteredMessage(), master.get()->pid, Not(slave1.get()->pid));
 
   // Each slave needs its own flags to ensure work_dirs are unique.
   slave::Flags slave2Flags = CreateSlaveFlags();
@@ -1819,7 +1828,7 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
   Resources slave1Unreserved = Resources::parse("cpus:4").get();
   Resources slave1Reserved =
     slave1Unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -1847,16 +1856,17 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
 
   ASSERT_EQ(2u, offers->size());
 
-  Future<CheckpointResourcesMessage> checkpointResources =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(),
-                    master.get()->pid,
-                    slave2.get()->pid);
+  Future<ApplyOperationMessage> applyOperationMessage =
+    FUTURE_PROTOBUF(ApplyOperationMessage(), _, _);
+
+  Future<UpdateOperationStatusMessage> updateOperationStatusMessage =
+    FUTURE_PROTOBUF(UpdateOperationStatusMessage(), _, _);
 
   // Use the offers API to reserve all CPUs on `slave2`.
   Resources slave2Unreserved = Resources::parse("cpus:3").get();
   Resources slave2Reserved =
     slave2Unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   for (size_t i = 0; i < offers->size(); i++) {
     const Offer& offer = offers.get()[i];
@@ -1871,9 +1881,15 @@ TEST_F(PersistentVolumeEndpointsTest, ReserveAndSlaveRemoval)
     }
   }
 
-  AWAIT_READY(checkpointResources);
-  EXPECT_EQ(Resources(checkpointResources->resources()),
-            slave2Reserved);
+  Resources sentResources =
+    applyOperationMessage->operation_info().reserve().resources();
+
+  sentResources.unallocate();
+
+  AWAIT_READY(applyOperationMessage);
+  EXPECT_EQ(sentResources, slave2Reserved);
+
+  AWAIT_READY(updateOperationStatusMessage);
 
   // Shutdown `slave2` with an explicit shutdown message.
   EXPECT_CALL(sched, offerRescinded(_, _));
@@ -1924,7 +1940,7 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
   Resources unreserved = Resources::parse("cpus:1;mem:512;disk:1024").get();
   Resources dynamicallyReserved =
     unreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   Future<Response> response = process::http::post(
       master.get()->pid,
@@ -1936,7 +1952,7 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
 
   Resources volume = createPersistentVolume(
       Megabytes(64),
-      frameworkInfo.role(),
+      frameworkInfo.roles(0),
       "id1",
       "path1",
       DEFAULT_CREDENTIAL.principal(),
@@ -1972,34 +1988,32 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
   Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(
-      allocatedResources(volume, frameworkInfo.role())));
+      allocatedResources(volume, frameworkInfo.roles(0))));
 
   Resources taskUnreserved = Resources::parse("cpus:1;mem:256").get();
   Resources taskResources =
     taskUnreserved.pushReservation(createDynamicReservationInfo(
-        frameworkInfo.role(), DEFAULT_CREDENTIAL.principal()));
+        frameworkInfo.roles(0), DEFAULT_CREDENTIAL.principal()));
 
   TaskInfo taskInfo = createTask(offer.slave_id(), taskResources, "sleep 1000");
 
-  // We use the filter explicitly here so that the resources will not
-  // be filtered for 5 seconds (the default).
-  Filters filters;
-  filters.set_refuse_seconds(0);
+  Future<TaskStatus> starting;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&starting))
+    .WillRepeatedly(Return()); // Ignore subsequent updates.
 
-  // Expect a TASK_RUNNING status.
-  EXPECT_CALL(sched, statusUpdate(&driver, _));
+  driver.acceptOffers({offer.id()}, {LAUNCH({taskInfo})});
 
-  Future<Nothing> _statusUpdateAcknowledgement =
-    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
+  AWAIT_READY(starting);
+  EXPECT_EQ(TASK_STARTING, starting->state());
 
-  // Expect another resource offer.
+  // Summon an offer.
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers));
 
-  driver.acceptOffers({offer.id()}, {LAUNCH({taskInfo})}, filters);
+  driver.reviveOffers();
 
-  // Wait for TASK_RUNNING update ack.
-  AWAIT_READY(_statusUpdateAcknowledgement);
+  AWAIT_READY(offers);
 
   response = process::http::get(
       master.get()->pid,
@@ -2344,13 +2358,25 @@ TEST_F(PersistentVolumeEndpointsTest, SlavesEndpointFullResources)
   EXPECT_EQ(expectedReserved.get(), reservedValue);
 
   JSON::Value unreservedValue = slaveObject.values["unreserved_resources_full"];
-  EXPECT_EQ(expectedUnreserved.get(), unreservedValue);
+  EXPECT_EQ(
+      Resources(CHECK_NOTERROR(
+          Resources::fromJSON(expectedUnreserved->as<JSON::Array>()))),
+      Resources(CHECK_NOTERROR(
+          Resources::fromJSON(unreservedValue.as<JSON::Array>()))));
 
   JSON::Value usedValue = slaveObject.values["used_resources_full"];
-  EXPECT_EQ(expectedUsed.get(), usedValue);
+  EXPECT_EQ(
+      Resources(CHECK_NOTERROR(
+          Resources::fromJSON(expectedUsed->as<JSON::Array>()))),
+      Resources(CHECK_NOTERROR(
+          Resources::fromJSON(usedValue.as<JSON::Array>()))));
 
   JSON::Value offeredValue = slaveObject.values["offered_resources_full"];
-  EXPECT_EQ(expectedOffered.get(), offeredValue);
+  EXPECT_EQ(
+      Resources(CHECK_NOTERROR(
+          Resources::fromJSON(expectedOffered->as<JSON::Array>()))),
+      Resources(CHECK_NOTERROR(
+          Resources::fromJSON(offeredValue.as<JSON::Array>()))));
 
   driver.stop();
   driver.join();

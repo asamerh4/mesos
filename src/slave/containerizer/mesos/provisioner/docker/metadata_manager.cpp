@@ -67,7 +67,8 @@ public:
       const spec::ImageReference& reference,
       bool cached);
 
-  // TODO(chenlily): Implement removal of unreferenced images.
+  Future<hashset<string>> prune(
+      const vector<spec::ImageReference>& excludedImages);
 
 private:
   // Write out metadata manager state to persistent store.
@@ -134,6 +135,16 @@ Future<Option<Image>> MetadataManager::get(
 }
 
 
+Future<hashset<string>> MetadataManager::prune(
+    const vector<spec::ImageReference>& excludedImages)
+{
+  return dispatch(
+      process.get(),
+      &MetadataManagerProcess::prune,
+      excludedImages);
+}
+
+
 Future<Image> MetadataManagerProcess::put(
     const spec::ImageReference& reference,
     const vector<string>& layerIds)
@@ -180,6 +191,43 @@ Future<Option<Image>> MetadataManagerProcess::get(
 }
 
 
+Future<hashset<string>> MetadataManagerProcess::prune(
+    const vector<spec::ImageReference>& excludedImages)
+{
+  hashmap<string, Image> retainedImages;
+  hashset<string> retainedLayers;
+
+  foreach (const spec::ImageReference& reference, excludedImages) {
+    const string imageName = stringify(reference);
+    Option<Image> image = storedImages.get(imageName);
+
+    if (image.isNone()) {
+      // This is possible if docker store was cleaned
+      // in a recovery after the container using this image was
+      // launched.
+      VLOG(1) << "Excluded docker image '" << imageName
+              << "' is not cached in metadata manager.";
+      continue;
+    }
+
+    retainedImages[imageName] = image.get();
+
+    foreach (const string& layerId, image->layer_ids()) {
+      retainedLayers.insert(layerId);
+    }
+  }
+
+  storedImages = std::move(retainedImages);
+
+  Try<Nothing> status = persist();
+  if (status.isError()) {
+    return Failure("Failed to save state of Docker images: " + status.error());
+  }
+
+  return retainedLayers;
+}
+
+
 Try<Nothing> MetadataManagerProcess::persist()
 {
   Images images;
@@ -208,7 +256,7 @@ Future<Nothing> MetadataManagerProcess::recover()
     return Nothing();
   }
 
-  Result<Images> images = ::protobuf::read<Images>(storedImagesPath);
+  Result<Images> images = state::read<Images>(storedImagesPath);
   if (images.isError()) {
     return Failure("Failed to read images from '" + storedImagesPath + "' " +
                    images.error());
@@ -220,7 +268,7 @@ Future<Nothing> MetadataManagerProcess::recover()
     return Failure("Unexpected empty images file '" + storedImagesPath + "'");
   }
 
-  foreach (const Image& image, images.get().images()) {
+  foreach (const Image& image, images->images()) {
     const string imageReference = stringify(image.reference());
 
     if (storedImages.contains(imageReference)) {

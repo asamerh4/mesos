@@ -46,11 +46,13 @@ public:
   bool hostname_lookup;
   Option<std::string> resources;
   Option<std::string> resource_provider_config_dir;
+  Option<std::string> disk_profile_adaptor;
   std::string isolation;
   std::string launcher;
 
   Option<std::string> image_providers;
   Option<std::string> image_provisioner_backend;
+  Option<ImageGcConfig> image_gc_config;
 
   std::string appc_simple_discovery_uri_prefix;
   std::string appc_store_dir;
@@ -63,6 +65,7 @@ public:
   Option<std::string> attributes;
   Bytes fetcher_cache_size;
   std::string fetcher_cache_dir;
+  Duration fetcher_stall_timeout;
   std::string work_dir;
   std::string runtime_dir;
   std::string launcher_dir;
@@ -82,7 +85,7 @@ public:
   Option<Duration> executor_reregistration_retry_interval;
   Duration executor_shutdown_grace_period;
 #ifdef USE_SSL_SOCKET
-  Option<Path> executor_secret_key;
+  Option<Path> jwt_secret_key;
 #endif // USE_SSL_SOCKET
   Duration gc_delay;
   double gc_disk_headroom;
@@ -90,6 +93,7 @@ public:
 
   Option<std::string> container_logger;
 
+  std::string reconfiguration_policy;
   std::string recover;
   Duration recovery_timeout;
   bool strict;
@@ -143,7 +147,13 @@ public:
   bool network_enable_socket_statistics_summary;
   bool network_enable_socket_statistics_details;
   bool network_enable_snmp_statistics;
-#endif
+#endif // ENABLE_PORT_MAPPING_ISOLATOR
+
+#ifdef ENABLE_NETWORK_PORTS_ISOLATOR
+  Duration container_ports_watch_interval;
+  bool check_agent_port_range_only;
+#endif // ENABLE_NETWORK_PORTS_ISOLATOR
+
   Option<std::string> network_cni_plugins_dir;
   Option<std::string> network_cni_config_dir;
   Duration container_disk_watch_interval;
@@ -170,6 +180,7 @@ public:
   std::string xfs_project_range;
 #endif
   bool http_command_executor;
+  Option<SlaveCapabilities> agent_features;
   Option<DomainInfo> domain;
 
   // The following flags are executable specific (e.g., since we only
@@ -180,7 +191,10 @@ public:
   uint16_t port;
   Option<std::string> advertise_ip;
   Option<std::string> advertise_port;
-  Option<std::string> master;
+  Option<flags::SecurePathOrValue> master;
+  bool memory_profiling;
+
+  Duration zk_session_timeout;
 
   // Optional IP discover script that will set the slave's IP.
   // If set, its output is expected to be a valid parseable IP string.

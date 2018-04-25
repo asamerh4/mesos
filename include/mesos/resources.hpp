@@ -36,6 +36,7 @@
 #include <stout/hashmap.hpp>
 #include <stout/json.hpp>
 #include <stout/lambda.hpp>
+#include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/try.hpp>
 
@@ -52,6 +53,21 @@
 // but instead just written for correct semantics.
 
 namespace mesos {
+
+// Forward declaration.
+class ResourceConversion;
+
+
+// Helper functions.
+bool operator==(
+    const Resource::ReservationInfo& left,
+    const Resource::ReservationInfo& right);
+
+
+bool operator!=(
+    const Resource::ReservationInfo& left,
+    const Resource::ReservationInfo& right);
+
 
 // NOTE: Resource objects stored in the class are always valid, are in
 // the "post-reservation-refinement" format, and kept combined if possible.
@@ -276,6 +292,11 @@ public:
   // Tests if the given Resource object is a persistent volume.
   static bool isPersistentVolume(const Resource& resource);
 
+  // Tests if the given Resource object is a disk of the specified type.
+  static bool isDisk(
+      const Resource& resource,
+      const Resource::DiskInfo::Source::Type& type);
+
   // Tests if the given Resource object is reserved. If the role is
   // specified, tests that it's reserved for the given role.
   static bool isReserved(
@@ -306,9 +327,19 @@ public:
   // Tests if the given Resource object has refined reservations.
   static bool hasRefinedReservations(const Resource& resource);
 
+  // Tests if the given Resource object is provided by a resource provider.
+  static bool hasResourceProvider(const Resource& resource);
+
   // Returns the role to which the given Resource object is reserved for.
   // This must be called only when the resource is reserved!
   static const std::string& reservationRole(const Resource& resource);
+
+  // Shrinks a scalar type `resource` to the target size.
+  // Returns true if the resource was shrunk to the target size,
+  // or the resource is already within the target size.
+  // Returns false otherwise (i.e. the resource is indivisible.
+  // E.g. MOUNT volume).
+  static bool shrink(Resource* resource, const Value::Scalar& target);
 
   // Returns the summed up Resources given a hashmap<Key, Resources>.
   //
@@ -456,25 +487,35 @@ public:
   // example frameworks to leverage.
   Option<Resources> find(const Resources& targets) const;
 
-  // Certain offer operations (e.g., RESERVE, UNRESERVE, CREATE or
-  // DESTROY) alter the offered resources. The following methods
-  // provide a convenient way to get the transformed resources by
-  // applying the given offer operation(s). Returns an Error if the
-  // offer operation(s) cannot be applied.
+  // Applies a resource conversion by taking out the `consumed`
+  // resources and adding back the `converted` resources. Returns an
+  // Error if the conversion cannot be applied.
+  Try<Resources> apply(const ResourceConversion& conversion) const;
+
+  // Finds a resource object with the same metadata (i.e. AllocationInfo,
+  // ReservationInfo, etc.) as the given one, ignoring the actual value.
+  // If multiple matching resources exist, the first match is returned.
+  Option<Resource> match(const Resource& resource) const;
+
+  // Obtains the conversion from the given operation and applies the
+  // conversion. This method serves a syntax sugar for applying a
+  // resource conversion.
+  // TODO(jieyu): Consider remove this method once we updated all the
+  // call sites.
   Try<Resources> apply(const Offer::Operation& operation) const;
 
   template <typename Iterable>
-  Try<Resources> apply(const Iterable& operations) const
+  Try<Resources> apply(const Iterable& iterable) const
   {
     Resources result = *this;
 
-    foreach (const Offer::Operation& operation, operations) {
-      Try<Resources> transformed = result.apply(operation);
-      if (transformed.isError()) {
-        return Error(transformed.error());
+    foreach (const auto& t, iterable) {
+      Try<Resources> converted = result.apply(t);
+      if (converted.isError()) {
+        return Error(converted.error());
       }
 
-      result = transformed.get();
+      result = converted.get();
     }
 
     return result;
@@ -653,6 +694,31 @@ hashmap<Key, Resources> operator+(
   result += right;
   return result;
 }
+
+
+/**
+ * Represents a resource conversion, usually as a result of an offer
+ * operation. See more details in `Resources::apply` method.
+ */
+class ResourceConversion
+{
+public:
+  typedef lambda::function<Try<Nothing>(const Resources&)> PostValidation;
+
+  ResourceConversion(
+      const Resources& _consumed,
+      const Resources& _converted,
+      const Option<PostValidation>& _postValidation = None())
+    : consumed(_consumed),
+      converted(_converted),
+      postValidation(_postValidation) {}
+
+  Try<Resources> apply(const Resources& resources) const;
+
+  Resources consumed;
+  Resources converted;
+  Option<PostValidation> postValidation;
+};
 
 } // namespace mesos {
 

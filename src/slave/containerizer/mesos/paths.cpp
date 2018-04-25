@@ -19,12 +19,17 @@
 #include <stout/path.hpp>
 #include <stout/protobuf.hpp>
 
+#include "common/protobuf_utils.hpp"
+#include "common/resources_utils.hpp"
+
 #include "slave/containerizer/mesos/paths.hpp"
+#include "slave/state.hpp"
 
 #ifndef __WINDOWS__
 namespace unix = process::network::unix;
 #endif // __WINDOWS__
 
+using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerTermination;
 
@@ -89,7 +94,7 @@ Result<pid_t> getContainerPid(
     return None();
   }
 
-  Try<string> read = os::read(path);
+  Result<string> read = state::read<string>(path);
   if (read.isError()) {
     return Error("Failed to recover pid of container: " + read.error());
   }
@@ -175,7 +180,7 @@ Result<pid_t> getContainerIOSwitchboardPid(
     return None();
   }
 
-  Try<string> read = os::read(path);
+  Result<string> read = state::read<string>(path);
   if (read.isError()) {
     return Error("Failed to recover pid of io switchboard: " + read.error());
   }
@@ -201,6 +206,22 @@ string getContainerIOSwitchboardSocketPath(
 }
 
 
+string getContainerIOSwitchboardSocketProvisionalPath(
+    const std::string& socketPath)
+{
+  return socketPath + "_provisional";
+}
+
+
+string getContainerIOSwitchboardSocketProvisionalPath(
+    const std::string& runtimeDir,
+    const ContainerID& containerId)
+{
+  return getContainerIOSwitchboardSocketProvisionalPath(
+      getContainerIOSwitchboardSocketPath(runtimeDir, containerId));
+}
+
+
 Result<unix::Address> getContainerIOSwitchboardAddress(
     const string& runtimeDir,
     const ContainerID& containerId)
@@ -216,7 +237,7 @@ Result<unix::Address> getContainerIOSwitchboardAddress(
     return None();
   }
 
-  Try<string> read = os::read(path);
+  Result<string> read = state::read<string>(path);
   if (read.isError()) {
     return Error("Failed reading '" + path + "': " + read.error());
   }
@@ -272,15 +293,62 @@ Result<ContainerTermination> getContainerTermination(
     return None();
   }
 
-  const Result<ContainerTermination>& termination =
-    ::protobuf::read<ContainerTermination>(path);
+  Result<ContainerTermination> termination =
+    state::read<ContainerTermination>(path);
 
   if (termination.isError()) {
-    return Error("Failed to read termination state of container:"
-                 " " + termination.error());
+    return Error("Failed to read termination state of container: " +
+                 termination.error());
   }
 
   return termination;
+}
+
+
+string getStandaloneContainerMarkerPath(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  return path::join(
+      getRuntimePath(runtimeDir, containerId),
+      STANDALONE_MARKER_FILE);
+}
+
+
+bool isStandaloneContainer(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = getStandaloneContainerMarkerPath(runtimeDir, containerId);
+
+  return os::exists(path);
+}
+
+
+Result<ContainerConfig> getContainerConfig(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = path::join(
+      getRuntimePath(runtimeDir, containerId),
+      CONTAINER_CONFIG_FILE);
+
+  if (!os::exists(path)) {
+    // This is possible if we recovered a container launched before we
+    // started to checkpoint `ContainerConfig`.
+    VLOG(1) << "Config path '" << path << "' is missing for container' "
+            << containerId << "'";
+    return None();
+  }
+
+  Result<ContainerConfig> containerConfig = state::read<ContainerConfig>(path);
+
+  if (containerConfig.isError()) {
+    return Error("Failed to read launch config of container: " +
+                 containerConfig.error());
+  }
+
+  return containerConfig;
 }
 
 
@@ -369,8 +437,8 @@ Result<ContainerLaunchInfo> getContainerLaunchInfo(
     return None();
   }
 
-  const Result<ContainerLaunchInfo>& containerLaunchInfo =
-    ::protobuf::read<ContainerLaunchInfo>(path);
+  Result<ContainerLaunchInfo> containerLaunchInfo =
+    state::read<ContainerLaunchInfo>(path);
 
   if (containerLaunchInfo.isError()) {
     return Error(

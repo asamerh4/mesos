@@ -80,24 +80,27 @@ Try<Nothing> Cache::recover()
 
 Try<Nothing> Cache::add(const string& imageId)
 {
-  const Path imageDir(paths::getImagePath(storeDir, imageId));
+  const string path = spec::getImageManifestPath(
+      paths::getImagePath(storeDir, imageId));
 
-  Try<string> read = os::read(spec::getImageManifestPath(imageDir));
+  Try<string> read = os::read(path);
   if (read.isError()) {
-    return Error("Failed to read manifest: " + read.error());
+    return Error(
+        "Failed to read manifest from '" + path + "': " + read.error());
   }
 
   Try<spec::ImageManifest> manifest = spec::parse(read.get());
   if (manifest.isError()) {
-    return Error("Failed to parse manifest: " + manifest.error());
+    return Error(
+        "Failed to parse manifest from '" + path + "': " + manifest.error());
   }
 
   map<string, string> labels;
-  foreach (const spec::ImageManifest::Label& label, manifest.get().labels()) {
+  foreach (const spec::ImageManifest::Label& label, manifest->labels()) {
     labels.insert({label.name(), label.value()});
   }
 
-  imageIds.put(Key(manifest.get().name(), labels), imageId);
+  imageIds.put(Key(manifest->name(), labels), imageId);
 
   VLOG(1) << "Added image with id '" << imageId << "' to cache";
 

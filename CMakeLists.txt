@@ -17,14 +17,14 @@
 # THE MESOS PROJECT.
 ####################
 if (NOT WIN32)
-  cmake_minimum_required(VERSION 2.8.10)
+  cmake_minimum_required(VERSION 3.7.0)
 else ()
   cmake_minimum_required(VERSION 3.8.0)
 endif ()
 
 project(Mesos)
 set(MESOS_MAJOR_VERSION 1)
-set(MESOS_MINOR_VERSION 5)
+set(MESOS_MINOR_VERSION 6)
 set(MESOS_PATCH_VERSION 0)
 set(PACKAGE_VERSION
   ${MESOS_MAJOR_VERSION}.${MESOS_MINOR_VERSION}.${MESOS_PATCH_VERSION})
@@ -38,21 +38,9 @@ set(MESOS_PACKAGE_SOVERSION 0)
 # Paths that are searched when `include(...)` is called.
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/libprocess/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/stout/cmake)
-list(
-  APPEND
-  CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/libprocess/cmake/macros)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/examples/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/master/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/slave/cmake)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/tests/cmake)
 
 # Macros.
-include(Common)
-include(External)
-include(PatchCommand)
 include(Versions)
 include(cotire)
 
@@ -68,17 +56,14 @@ add_subdirectory(src)
 
 # TESTS.
 ########
-add_custom_target(
-  check ${STOUT_TESTS_TARGET}
-  COMMAND ${PROCESS_TESTS_TARGET}
-  COMMAND ${MESOS_TESTS_TARGET}
-  DEPENDS ${STOUT_TESTS_TARGET} ${PROCESS_TESTS_TARGET} ${MESOS_TESTS_TARGET}
-  )
-
+add_custom_target(check COMMAND ctest -V -C $<CONFIG> DEPENDS tests)
 add_custom_target(
   tests
-  DEPENDS ${STOUT_TESTS_TARGET} ${PROCESS_TESTS_TARGET} ${MESOS_TESTS_TARGET}
-  )
+  DEPENDS stout-tests libprocess-tests mesos-tests)
+
+if (ENABLE_NEW_CLI)
+  add_dependencies(tests cli-tests)
+endif ()
 
 # PACKAGING.
 ############
@@ -102,8 +87,7 @@ set(CPACK_SOURCE_IGNORE_FILES
   /mpi/;
   /site/;
   /support/;
-  ${CMAKE_BINARY_DIR};
-  )
+  ${CMAKE_BINARY_DIR};)
 
 # Convert the ignore list to a string (as required by CPack).
 set(CPACK_SOURCE_IGNORE_FILES "${CPACK_SOURCE_IGNORE_FILES}")

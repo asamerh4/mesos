@@ -146,7 +146,7 @@ bool operator==(
     return false;
   }
 
-  return left.root() == right.root();
+  return true;
 }
 
 
@@ -174,11 +174,43 @@ bool operator==(
     return false;
   }
 
+  if (left.has_path() != right.has_path()) {
+    return false;
+  }
+
   if (left.has_path() && left.path() != right.path()) {
     return false;
   }
 
+  if (left.has_mount() != right.has_mount()) {
+    return false;
+  }
+
   if (left.has_mount() && left.mount() != right.mount()) {
+    return false;
+  }
+
+  if (left.has_id() != right.has_id()) {
+    return false;
+  }
+
+  if (left.has_id() && left.id() != right.id()) {
+    return false;
+  }
+
+  if (left.has_metadata() != right.has_metadata()) {
+    return false;
+  }
+
+  if (left.has_metadata() && left.metadata() != right.metadata()) {
+    return false;
+  }
+
+  if (left.has_profile() != right.has_profile()) {
+    return false;
+  }
+
+  if (left.has_profile() && left.profile() != right.profile()) {
     return false;
   }
 
@@ -228,7 +260,7 @@ bool operator!=(const Resource::DiskInfo& left, const Resource::DiskInfo& right)
 }
 
 
-bool operator==(const Resource& left, const Resource& right)
+static bool compareResourceMetadata(const Resource& left, const Resource& right)
 {
   if (left.name() != right.name() || left.type() != right.type()) {
     return false;
@@ -280,6 +312,15 @@ bool operator==(const Resource& left, const Resource& right)
 
   // Check SharedInfo.
   if (left.has_shared() != right.has_shared()) {
+    return false;
+  }
+
+  return true;
+}
+
+
+bool operator==(const Resource& left, const Resource& right) {
+  if (!compareResourceMetadata(left, right)) {
     return false;
   }
 
@@ -350,11 +391,29 @@ static bool addable(const Resource& left, const Resource& right)
   if (left.has_disk()) {
     if (left.disk() != right.disk()) { return false; }
 
-    // Two non-shared resources that represent exclusive 'MOUNT' disks
-    // cannot be added together; this would defeat the exclusivity.
-    if (left.disk().has_source() &&
-        left.disk().source().type() == Resource::DiskInfo::Source::MOUNT) {
-      return false;
+    if (left.disk().has_source()) {
+      switch (left.disk().source().type()) {
+        case Resource::DiskInfo::Source::PATH: {
+          // Two PATH resources can be added if their disks are identical.
+          break;
+        }
+        case Resource::DiskInfo::Source::BLOCK:
+        case Resource::DiskInfo::Source::MOUNT: {
+          // Two resources that represent exclusive 'MOUNT' or 'RAW' disks
+          // cannot be added together; this would defeat the exclusivity.
+          return false;
+        }
+        case Resource::DiskInfo::Source::RAW: {
+          // We can only add resources representing 'RAW' disks if
+          // they have no identity or are identical.
+          if (left.disk().source().has_id()) {
+            return false;
+          }
+          break;
+        }
+        case Resource::DiskInfo::Source::UNKNOWN:
+          UNREACHABLE();
+      }
     }
 
     // TODO(jieyu): Even if two Resource objects with DiskInfo have
@@ -437,13 +496,33 @@ static bool subtractable(const Resource& left, const Resource& right)
   if (left.has_disk()) {
     if (left.disk() != right.disk()) { return false; }
 
-    // Two resources that represent exclusive 'MOUNT' disks cannot be
-    // subtracted from each other if they are not the exact same mount;
-    // this would defeat the exclusivity.
-    if (left.disk().has_source() &&
-        left.disk().source().type() == Resource::DiskInfo::Source::MOUNT &&
-        left != right) {
-      return false;
+    if (left.disk().has_source()) {
+      switch (left.disk().source().type()) {
+        case Resource::DiskInfo::Source::PATH: {
+          // Two PATH resources can be subtracted if their disks are identical.
+          break;
+        }
+        case Resource::DiskInfo::Source::BLOCK:
+        case Resource::DiskInfo::Source::MOUNT: {
+          // Two resources that represent exclusive 'MOUNT' or 'BLOCK' disks
+          // cannot be subtracted from each other if they are not the exact same
+          // mount; this would defeat the exclusivity.
+          if (left != right) {
+            return false;
+          }
+          break;
+        }
+        case Resource::DiskInfo::Source::RAW: {
+          // We can only subtract resources representing 'RAW' disks
+          // if they have no identity, or refer to the same disk.
+          if (left.disk().source().has_id() && left != right) {
+            return false;
+          }
+          break;
+        }
+        case Resource::DiskInfo::Source::UNKNOWN:
+          UNREACHABLE();
+      }
     }
 
     // NOTE: For Resource objects that have DiskInfo, we can only subtract
@@ -647,16 +726,13 @@ Try<Resources> Resources::parse(
 
   Resources result;
 
-  // Validate the Resource objects and convert them
-  // to the "post-reservation-refinement" format.
+  // Validate the Resource objects.
   foreach (Resource resource, resources.get()) {
     // If invalid, propgate error instead of skipping the resource.
     Option<Error> error = Resources::validate(resource);
     if (error.isSome()) {
       return error.get();
     }
-
-    convertResourceFormat(&resource, POST_RESERVATION_REFINEMENT);
 
     result.add(resource);
   }
@@ -696,6 +772,8 @@ Try<vector<Resource>> Resources::fromJSON(
     if (!resource.has_role() && resource.reservations_size() == 0) {
       resource.set_role(defaultRole);
     }
+
+    upgradeResource(&resource);
 
     // We add the Resource object even if it is empty or invalid.
     result.push_back(resource);
@@ -744,6 +822,8 @@ Try<vector<Resource>> Resources::fromSimpleString(
     if (resource.isError()) {
       return Error(resource.error());
     }
+
+    upgradeResource(&(resource.get()));
 
     // We add the Resource object even if it is empty or invalid.
     resources.push_back(resource.get());
@@ -847,6 +927,23 @@ Option<Error> Resources::validate(const Resource& resource)
         case Resource::DiskInfo::Source::PATH:
         case Resource::DiskInfo::Source::MOUNT:
           // `PATH` and `MOUNT` contain only `optional` members.
+          break;
+        case Resource::DiskInfo::Source::BLOCK:
+        case Resource::DiskInfo::Source::RAW:
+          if (source.has_mount()) {
+            return Error(
+                "Mount should not be set for " +
+                Resource::DiskInfo::Source::Type_Name(source.type()) +
+                " disk source");
+          }
+
+          if (source.has_path()) {
+            return Error(
+                "Path should not be set for " +
+                Resource::DiskInfo::Source::Type_Name(source.type()) +
+                " disk source");
+          }
+
           break;
         case Resource::DiskInfo::Source::UNKNOWN:
           return Error(
@@ -1073,6 +1170,19 @@ bool Resources::isPersistentVolume(const Resource& resource)
 }
 
 
+bool Resources::isDisk(
+    const Resource& resource,
+    const Resource::DiskInfo::Source::Type& type)
+{
+  CHECK(!resource.has_role()) << resource;
+  CHECK(!resource.has_reservation()) << resource;
+
+  return resource.has_disk() &&
+         resource.disk().has_source() &&
+         resource.disk().source().type() == type;
+}
+
+
 bool Resources::isReserved(
     const Resource& resource,
     const Option<string>& role)
@@ -1144,11 +1254,43 @@ bool Resources::hasRefinedReservations(const Resource& resource)
 }
 
 
+bool Resources::hasResourceProvider(const Resource& resource)
+{
+  CHECK(!resource.has_role()) << resource;
+  CHECK(!resource.has_reservation()) << resource;
+
+  return resource.has_provider_id();
+}
+
+
 const string& Resources::reservationRole(const Resource& resource)
 {
   CHECK_GT(resource.reservations_size(), 0);
   return resource.reservations().rbegin()->role();
 }
+
+
+bool Resources::shrink(Resource* resource, const Value::Scalar& target)
+{
+  if (resource->scalar() <= target) {
+    return true; // Already within target.
+  }
+
+  Resource copy = *resource;
+  copy.mutable_scalar()->CopyFrom(target);
+
+  // Some resources (e.g. MOUNT disk) are indivisible. We use
+  // a containement check to verify this. Specifically, if a
+  // contains a smaller version of itself, then it can safely
+  // be chopped into a smaller amount.
+  if (Resources(*resource).contains(copy)) {
+    resource->CopyFrom(copy);
+    return true;
+  }
+
+  return false;
+}
+
 
 /////////////////////////////////////////////////
 // Public member functions.
@@ -1263,6 +1405,7 @@ Resources::Resources(const Resource& resource)
 
 Resources::Resources(const vector<Resource>& _resources)
 {
+  resources.reserve(_resources.size());
   foreach (const Resource& resource, _resources) {
     // NOTE: Invalid and zero Resource objects will be ignored.
     *this += resource;
@@ -1272,6 +1415,7 @@ Resources::Resources(const vector<Resource>& _resources)
 
 Resources::Resources(const RepeatedPtrField<Resource>& _resources)
 {
+  resources.reserve(_resources.size());
   foreach (const Resource& resource, _resources) {
     // NOTE: Invalid and zero Resource objects will be ignored.
     *this += resource;
@@ -1526,181 +1670,35 @@ Option<Resources> Resources::find(const Resources& targets) const
 }
 
 
+Try<Resources> Resources::apply(const ResourceConversion& conversion) const
+{
+  return conversion.apply(*this);
+}
+
+
 Try<Resources> Resources::apply(const Offer::Operation& operation) const
 {
-  Resources result = *this;
+  Try<vector<ResourceConversion>> conversions =
+    getResourceConversions(operation);
 
-  switch (operation.type()) {
-    case Offer::Operation::LAUNCH:
-      // Launch operation does not alter the offered resources.
-      break;
-
-    case Offer::Operation::LAUNCH_GROUP:
-      // LaunchGroup operation does not alter the offered resources.
-      break;
-
-    case Offer::Operation::RESERVE: {
-      Option<Error> error = validate(operation.reserve().resources());
-      if (error.isSome()) {
-        return Error("Invalid RESERVE Operation: " + error->message);
-      }
-
-      foreach (const Resource& reserved, operation.reserve().resources()) {
-        if (!Resources::isReserved(reserved)) {
-          return Error("Invalid RESERVE Operation: Resource must be reserved");
-        } else if (!Resources::isDynamicallyReserved(reserved)) {
-          return Error(
-              "Invalid RESERVE Operation: Resource must be"
-              " dynamically reserved");
-        }
-
-        // Note that we only allow "pushing" a single reservation at time.
-        Resources resources = Resources(reserved).popReservation();
-
-        if (!result.contains(resources)) {
-          return Error("Invalid RESERVE Operation: " + stringify(result) +
-                       " does not contain " + stringify(resources));
-        }
-
-        result -= resources;
-        result.add(reserved);
-      }
-      break;
-    }
-
-    case Offer::Operation::UNRESERVE: {
-      Option<Error> error = validate(operation.unreserve().resources());
-      if (error.isSome()) {
-        return Error("Invalid UNRESERVE Operation: " + error->message);
-      }
-
-      foreach (const Resource& reserved, operation.unreserve().resources()) {
-        if (!Resources::isReserved(reserved)) {
-          return Error("Invalid UNRESERVE Operation: Resource is not reserved");
-        } else if (!Resources::isDynamicallyReserved(reserved)) {
-          return Error(
-              "Invalid UNRESERVE Operation: Resource is not"
-              " dynamically reserved");
-        }
-
-        if (!result.contains(reserved)) {
-          return Error("Invalid UNRESERVE Operation: " + stringify(result) +
-                       " does not contain " + stringify(reserved));
-        }
-
-        // Note that we only allow "popping" a single reservation at time.
-        Resources resources = Resources(reserved).popReservation();
-
-        result.subtract(reserved);
-        result += resources;
-      }
-      break;
-    }
-
-    case Offer::Operation::CREATE: {
-      Option<Error> error = validate(operation.create().volumes());
-      if (error.isSome()) {
-        return Error("Invalid CREATE Operation: " + error->message);
-      }
-
-      foreach (const Resource& volume, operation.create().volumes()) {
-        if (!volume.has_disk()) {
-          return Error("Invalid CREATE Operation: Missing 'disk'");
-        } else if (!volume.disk().has_persistence()) {
-          return Error("Invalid CREATE Operation: Missing 'persistence'");
-        }
-
-        // Strip persistence and volume from the disk info so that we
-        // can subtract it from the original resources.
-        // TODO(jieyu): Non-persistent volumes are not supported for
-        // now. Persistent volumes can only be be created from regular
-        // disk resources. Revisit this once we start to support
-        // non-persistent volumes.
-        Resource stripped = volume;
-
-        if (stripped.disk().has_source()) {
-          stripped.mutable_disk()->clear_persistence();
-          stripped.mutable_disk()->clear_volume();
-        } else {
-          stripped.clear_disk();
-        }
-
-        // Since we only allow persistent volumes to be shared, the
-        // original resource must be non-shared.
-        stripped.clear_shared();
-
-        if (!result.contains(stripped)) {
-          return Error("Invalid CREATE Operation: Insufficient disk resources"
-                       " for persistent volume " + stringify(volume));
-        }
-
-        result.subtract(stripped);
-        result.add(volume);
-      }
-      break;
-    }
-
-    case Offer::Operation::DESTROY: {
-      Option<Error> error = validate(operation.destroy().volumes());
-      if (error.isSome()) {
-        return Error("Invalid DESTROY Operation: " + error->message);
-      }
-
-      foreach (const Resource& volume, operation.destroy().volumes()) {
-        if (!volume.has_disk()) {
-          return Error("Invalid DESTROY Operation: Missing 'disk'");
-        } else if (!volume.disk().has_persistence()) {
-          return Error("Invalid DESTROY Operation: Missing 'persistence'");
-        }
-
-        if (!result.contains(volume)) {
-          return Error(
-              "Invalid DESTROY Operation: Persistent volume does not exist");
-        }
-
-        result.subtract(volume);
-
-        if (result.contains(volume)) {
-          return Error(
-              "Invalid DESTROY Operation: Persistent volume " +
-              stringify(volume) + " cannot be removed due to additional " +
-              "shared copies");
-        }
-
-        // Strip persistence and volume from the disk info so that we
-        // can subtract it from the original resources.
-        Resource stripped = volume;
-
-        if (stripped.disk().has_source()) {
-          stripped.mutable_disk()->clear_persistence();
-          stripped.mutable_disk()->clear_volume();
-        } else {
-          stripped.clear_disk();
-        }
-
-        // Since we only allow persistent volumes to be shared, we
-        // return the resource to non-shared state after destroy.
-        stripped.clear_shared();
-
-        result.add(stripped);
-      }
-      break;
-    }
-
-    case Offer::Operation::UNKNOWN:
-      return Error("Unknown offer operation");
+  if (conversions.isError()) {
+    return Error("Cannot get conversions: " + conversions.error());
   }
 
-  // The following are sanity checks to ensure the amount of each type of
-  // resource does not change.
+  Try<Resources> result = apply(conversions.get());
+  if (result.isError()) {
+    return Error(result.error());
+  }
+
+  // The following are sanity checks to ensure the amount of each type
+  // of resource does not change.
   // TODO(jieyu): Currently, we only check known resource types like
   // cpus, gpus, mem, disk, ports, etc. We should generalize this.
-
-  CHECK(result.cpus() == cpus());
-  CHECK(result.gpus() == gpus());
-  CHECK(result.mem() == mem());
-  CHECK(result.disk() == disk());
-  CHECK(result.ports() == ports());
+  CHECK(result->cpus() == cpus());
+  CHECK(result->gpus() == gpus());
+  CHECK(result->mem() == mem());
+  CHECK(result->disk() == disk());
+  CHECK(result->ports() == ports());
 
   return result;
 }
@@ -1875,6 +1873,17 @@ Option<Value::Ranges> Resources::ephemeral_ports() const
   }
 }
 
+
+Option<Resource> Resources::match(const Resource& resource) const
+{
+  foreach (const Resource_& resource_, resources) {
+    if (compareResourceMetadata(resource_.resource, resource)) {
+      return resource_.resource;
+    }
+  }
+
+  return None();
+}
 
 /////////////////////////////////////////////////
 // Private member functions.
@@ -2134,13 +2143,27 @@ ostream& operator<<(ostream& stream, const Resource::DiskInfo::Source& source)
 {
   switch (source.type()) {
     case Resource::DiskInfo::Source::MOUNT:
-      return stream << "MOUNT"
-                    << (source.mount().has_root() ? ":" + source.mount().root()
-                                                  : "");
+      return stream
+        << "MOUNT"
+        << ((source.has_id() || source.has_profile())
+              ? "(" + source.id() + "," + source.profile() + ")"
+              : (source.mount().has_root() ? ":" + source.mount().root() : ""));
     case Resource::DiskInfo::Source::PATH:
-      return stream << "PATH"
-                    << (source.path().has_root() ? ":" + source.path().root()
-                                                 : "");
+      return stream
+        << "PATH"
+        << ((source.has_id() || source.has_profile())
+              ? "(" + source.id() + "," + source.profile() + ")"
+              : (source.path().has_root() ? ":" + source.path().root() : ""));
+    case Resource::DiskInfo::Source::BLOCK:
+      return stream
+        << "BLOCK"
+        << ((source.has_id() || source.has_profile())
+              ? "(" + source.id() + "," + source.profile() + ")" : "");
+    case Resource::DiskInfo::Source::RAW:
+      return stream
+        << "RAW"
+        << ((source.has_id() || source.has_profile())
+              ? "(" + source.id() + "," + source.profile() + ")" : "");
     case Resource::DiskInfo::Source::UNKNOWN:
       return stream << "UNKNOWN";
   }
@@ -2326,6 +2349,30 @@ ostream& operator<<(
     const google::protobuf::RepeatedPtrField<Resource>& resources)
 {
   return stream << JSON::protobuf(resources);
+}
+
+
+Try<Resources> ResourceConversion::apply(const Resources& resources) const
+{
+  Resources result = resources;
+
+  if (!result.contains(consumed)) {
+    return Error(
+        stringify(result) + " does not contain " +
+        stringify(consumed));
+  }
+
+  result -= consumed;
+  result += converted;
+
+  if (postValidation.isSome()) {
+    Try<Nothing> validation = postValidation.get()(result);
+    if (validation.isError()) {
+      return Error(validation.error());
+    }
+  }
+
+  return result;
 }
 
 } // namespace mesos {

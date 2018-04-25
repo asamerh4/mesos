@@ -16,7 +16,10 @@
 
 #include <ostream>
 
+#include <google/protobuf/util/message_differencer.h>
+
 #include <stout/protobuf.hpp>
+#include <stout/uuid.hpp>
 
 #include <mesos/v1/attributes.hpp>
 #include <mesos/v1/mesos.hpp>
@@ -86,6 +89,56 @@ bool operator==(const Credential& left, const Credential& right)
 {
   return left.principal() == right.principal() &&
     left.secret() == right.secret();
+}
+
+
+bool operator==(const CSIPluginInfo& left, const CSIPluginInfo& right)
+{
+  // Order of containers is important.
+  if (left.containers_size() != right.containers_size()) {
+    return false;
+  }
+
+  for (int i = 0; i < left.containers_size(); i++) {
+    if (left.containers(i) != right.containers(i)) {
+      return false;
+    }
+  }
+
+  return left.type() == right.type() &&
+    left.name() == right.name();
+}
+
+
+bool operator==(
+    const CSIPluginContainerInfo& left,
+    const CSIPluginContainerInfo& right)
+{
+  // Order of services is not important.
+  if (left.services_size() != right.services_size()) {
+    return false;
+  }
+
+  vector<bool> used(right.services_size(), false);
+
+  for (int i = 0; i < left.services_size(); i++) {
+    bool found = false;
+    for (int j = 0; j < right.services_size(); j++) {
+      if (left.services(i) == right.services(j) && !used[j]) {
+        found = used[j] = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+
+  return left.has_command() == right.has_command() &&
+    (!left.has_command() || left.command() == right.command()) &&
+    Resources(left.resources()) == Resources(right.resources()) &&
+    left.has_container() == right.has_container() &&
+    (!left.has_container() || left.container() == right.container());
 }
 
 
@@ -344,35 +397,60 @@ bool operator==(const MasterInfo& left, const MasterInfo& right)
 }
 
 
+bool operator==(const Offer::Operation& left, const Offer::Operation& right)
+{
+  return google::protobuf::util::MessageDifferencer::Equals(left, right);
+}
+
+
+bool operator==(const Operation& left, const Operation& right)
+{
+  return google::protobuf::util::MessageDifferencer::Equals(left, right);
+}
+
+
+bool operator!=(const Offer::Operation& left, const Offer::Operation& right)
+{
+  return !(left == right);
+}
+
+
+bool operator!=(const Operation& left, const Operation& right)
+{
+  return !(left == right);
+}
+
+
+bool operator==(
+    const ResourceProviderInfo::Storage& left,
+    const ResourceProviderInfo::Storage& right)
+{
+  return left.plugin() == right.plugin();
+}
+
+
 bool operator==(
     const ResourceProviderInfo& left,
     const ResourceProviderInfo& right)
 {
-  if (left.id() != right.id()) {
+  // Order of reservations is important.
+  if (left.default_reservations_size() != right.default_reservations_size()) {
     return false;
   }
 
-  if (Attributes(left.attributes()) != Attributes(right.attributes())) {
-    return false;
+  for (int i = 0; i < left.default_reservations_size(); i++) {
+    if (left.default_reservations(i) != right.default_reservations(i)) {
+      return false;
+    }
   }
 
-  if (left.type() != right.type()) {
-    return false;
-  }
-
-  if (left.name() != right.name()) {
-    return false;
-  }
-
-  return true;
-}
-
-
-bool operator!=(
-    const ResourceProviderInfo& left,
-    const ResourceProviderInfo& right)
-{
-  return !(left == right);
+  return left.has_id() == right.has_id() &&
+    (!left.has_id() || left.id() == right.id()) &&
+    Attributes(left.attributes()) == Attributes(right.attributes()) &&
+    left.type() == right.type() &&
+    left.name() == right.name() &&
+    left.has_storage() == right.has_storage() &&
+    (!left.has_storage() || left.storage() == right.storage());
 }
 
 
@@ -509,6 +587,18 @@ ostream& operator<<(ostream& stream, const OfferID& offerId)
 }
 
 
+ostream& operator<<(ostream& stream, const OperationID& operationId)
+{
+  return stream << operationId.value();
+}
+
+
+ostream& operator<<(ostream& stream, const OperationState& state)
+{
+  return stream << OperationState_Name(state);
+}
+
+
 ostream& operator<<(ostream& stream, const RateLimits& limits)
 {
   return stream << limits.DebugString();
@@ -534,6 +624,42 @@ ostream& operator<<(
 ostream& operator<<(ostream& stream, const RLimitInfo& limits)
 {
   return stream << JSON::protobuf(limits);
+}
+
+
+ostream& operator<<(ostream& stream, const TaskStatus& status)
+{
+  stream << status.state();
+
+  if (status.has_uuid()) {
+    stream << " (Status UUID: "
+           << stringify(id::UUID::fromBytes(status.uuid()).get()) << ")";
+  }
+
+  if (status.has_source()) {
+    stream << " Source: " << TaskStatus::Source_Name(status.source());
+  }
+
+  if (status.has_reason()) {
+    stream << " Reason: " << TaskStatus::Reason_Name(status.reason());
+  }
+
+  if (status.has_message()) {
+    stream << " Message: '" << status.message() << "'";
+  }
+
+  stream << " for task '" << status.task_id() << "'";
+
+  if (status.has_agent_id()) {
+    stream << " on agent: " << status.agent_id() << "";
+  }
+
+  if (status.has_healthy()) {
+    stream << " in health state "
+           << (status.healthy() ? "healthy" : "unhealthy");
+  }
+
+  return stream;
 }
 
 
@@ -596,6 +722,14 @@ ostream& operator<<(ostream& stream, const CheckInfo::Type& type)
 
 ostream& operator<<(
     ostream& stream,
+    const CSIPluginContainerInfo::Service& service)
+{
+  return stream << CSIPluginContainerInfo::Service_Name(service);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
     const FrameworkInfo::Capability& capability)
 {
   return stream << FrameworkInfo::Capability::Type_Name(capability.type());
@@ -614,9 +748,19 @@ ostream& operator<<(ostream& stream, const Secret::Type& secretType)
 }
 
 
-ostream& operator<<(ostream& stream, const hashmap<string, string>& map)
+ostream& operator<<(
+    ostream& stream,
+    const Offer::Operation::Type& operationType)
 {
-  return stream << stringify(map);
+  return stream << Offer::Operation::Type_Name(operationType);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const Resource::DiskInfo::Source::Type& sourceType)
+{
+  return stream << Resource::DiskInfo::Source::Type_Name(sourceType);
 }
 
 } // namespace v1 {

@@ -133,7 +133,7 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_DockerDefaultCmdLocalPuller)
 
   TaskInfo task;
   task.set_name("test-task");
-  task.mutable_task_id()->set_value(UUID::random().toString());
+  task.mutable_task_id()->set_value(id::UUID::random().toString());
   task.mutable_slave_id()->CopyFrom(offer.slave_id());
   task.mutable_resources()->CopyFrom(Resources::parse("cpus:1;mem:128").get());
   task.mutable_command()->set_shell(false);
@@ -148,13 +148,19 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_DockerDefaultCmdLocalPuller)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -217,7 +223,7 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_DockerDefaultEntryptLocalPuller)
 
   TaskInfo task;
   task.set_name("test-task");
-  task.mutable_task_id()->set_value(UUID::random().toString());
+  task.mutable_task_id()->set_value(id::UUID::random().toString());
   task.mutable_slave_id()->CopyFrom(offer.slave_id());
   task.mutable_resources()->CopyFrom(Resources::parse("cpus:1;mem:128").get());
   task.mutable_command()->set_shell(false);
@@ -231,13 +237,19 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_DockerDefaultEntryptLocalPuller)
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -291,7 +303,7 @@ TEST_F(DockerRuntimeIsolatorTest,
 
   TaskInfo task;
   task.set_name("test-task");
-  task.mutable_task_id()->set_value(UUID::random().toString());
+  task.mutable_task_id()->set_value(id::UUID::random().toString());
   task.mutable_slave_id()->CopyFrom(offer.slave_id());
   task.mutable_resources()->CopyFrom(Resources::parse("cpus:1;mem:128").get());
   task.mutable_command()->set_shell(false);
@@ -308,13 +320,19 @@ TEST_F(DockerRuntimeIsolatorTest,
   container->set_type(ContainerInfo::MESOS);
   container->mutable_mesos()->mutable_image()->CopyFrom(image);
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished));
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(task.task_id(), statusStarting->task_id());
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(task.task_id(), statusRunning->task_id());
@@ -349,17 +367,8 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_INTERNET_CURL_NestedSimpleCommand)
 
   auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
 
-  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
-
-  Future<Nothing> connected;
   EXPECT_CALL(*scheduler, connected(_))
-    .WillOnce(DoAll(v1::scheduler::SendSubscribe(frameworkInfo),
-                    FutureSatisfy(&connected)));
-
-  v1::scheduler::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
-
-  AWAIT_READY(connected);
+    .WillOnce(v1::scheduler::SendSubscribe(v1::DEFAULT_FRAMEWORK_INFO));
 
   Future<Event::Subscribed> subscribed;
   EXPECT_CALL(*scheduler, subscribed(_, _))
@@ -373,9 +382,12 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_INTERNET_CURL_NestedSimpleCommand)
   EXPECT_CALL(*scheduler, heartbeat(_))
     .WillRepeatedly(Return()); // Ignore heartbeats.
 
-  AWAIT_READY(subscribed);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler);
 
+  AWAIT_READY(subscribed);
   v1::FrameworkID frameworkId(subscribed->framework_id());
+
   v1::ExecutorInfo executorInfo = v1::createExecutorInfo(
       "test_default_executor",
       None(),
@@ -386,7 +398,7 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_INTERNET_CURL_NestedSimpleCommand)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
 
@@ -401,8 +413,13 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_INTERNET_CURL_NestedSimpleCommand)
   taskInfo.mutable_container()->CopyFrom(
       v1::createContainerInfo("library/alpine"));
 
+  Future<Event::Update> updateStarting;
   Future<Event::Update> updateRunning;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(DoAll(FutureArg<1>(&updateStarting),
+                    v1::scheduler::SendAcknowledge(
+                        frameworkId,
+                        offer.agent_id())))
     .WillOnce(DoAll(FutureArg<1>(&updateRunning),
                     v1::scheduler::SendAcknowledge(
                         frameworkId,
@@ -413,6 +430,10 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_INTERNET_CURL_NestedSimpleCommand)
       v1::createTaskGroupInfo({taskInfo}));
 
   mesos.send(v1::createCallAccept(frameworkId, offer, {launchGroup}));
+
+  AWAIT_READY(updateStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateStarting->status().task_id());
 
   AWAIT_READY(updateRunning);
   ASSERT_EQ(v1::TASK_RUNNING, updateRunning->status().state());
@@ -468,17 +489,8 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultCmdLocalPuller)
 
   auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
 
-  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
-
-  Future<Nothing> connected;
   EXPECT_CALL(*scheduler, connected(_))
-    .WillOnce(DoAll(v1::scheduler::SendSubscribe(frameworkInfo),
-                    FutureSatisfy(&connected)));
-
-  v1::scheduler::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
-
-  AWAIT_READY(connected);
+    .WillOnce(v1::scheduler::SendSubscribe(v1::DEFAULT_FRAMEWORK_INFO));
 
   Future<Event::Subscribed> subscribed;
   EXPECT_CALL(*scheduler, subscribed(_, _))
@@ -492,9 +504,12 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultCmdLocalPuller)
   EXPECT_CALL(*scheduler, heartbeat(_))
     .WillRepeatedly(Return()); // Ignore heartbeats.
 
-  AWAIT_READY(subscribed);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler);
 
+  AWAIT_READY(subscribed);
   v1::FrameworkID frameworkId(subscribed->framework_id());
+
   v1::ExecutorInfo executorInfo = v1::createExecutorInfo(
       "test_default_executor",
       None(),
@@ -505,7 +520,7 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultCmdLocalPuller)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
 
@@ -520,8 +535,13 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultCmdLocalPuller)
   taskInfo.mutable_container()->CopyFrom(
       v1::createContainerInfo("alpine"));
 
+  Future<Event::Update> updateStarting;
   Future<Event::Update> updateRunning;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(DoAll(FutureArg<1>(&updateStarting),
+                    v1::scheduler::SendAcknowledge(
+                        frameworkId,
+                        offer.agent_id())))
     .WillOnce(DoAll(FutureArg<1>(&updateRunning),
                     v1::scheduler::SendAcknowledge(
                         frameworkId,
@@ -532,6 +552,10 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultCmdLocalPuller)
       v1::createTaskGroupInfo({taskInfo}));
 
   mesos.send(v1::createCallAccept(frameworkId, offer, {launchGroup}));
+
+  AWAIT_READY(updateStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateStarting->status().task_id());
 
   AWAIT_READY(updateRunning);
   ASSERT_EQ(v1::TASK_RUNNING, updateRunning->status().state());
@@ -588,17 +612,8 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultEntryptLocalPuller)
 
   auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
 
-  v1::FrameworkInfo frameworkInfo = v1::DEFAULT_FRAMEWORK_INFO;
-
-  Future<Nothing> connected;
   EXPECT_CALL(*scheduler, connected(_))
-    .WillOnce(DoAll(v1::scheduler::SendSubscribe(frameworkInfo),
-                    FutureSatisfy(&connected)));
-
-  v1::scheduler::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
-
-  AWAIT_READY(connected);
+    .WillOnce(v1::scheduler::SendSubscribe(v1::DEFAULT_FRAMEWORK_INFO));
 
   Future<Event::Subscribed> subscribed;
   EXPECT_CALL(*scheduler, subscribed(_, _))
@@ -612,9 +627,12 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultEntryptLocalPuller)
   EXPECT_CALL(*scheduler, heartbeat(_))
     .WillRepeatedly(Return()); // Ignore heartbeats.
 
-  AWAIT_READY(subscribed);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid, ContentType::PROTOBUF, scheduler);
 
+  AWAIT_READY(subscribed);
   v1::FrameworkID frameworkId(subscribed->framework_id());
+
   v1::ExecutorInfo executorInfo = v1::createExecutorInfo(
       "test_default_executor",
       None(),
@@ -625,7 +643,7 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultEntryptLocalPuller)
   executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
 
   const v1::Offer& offer = offers->offers(0);
 
@@ -640,8 +658,13 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultEntryptLocalPuller)
   taskInfo.mutable_container()->CopyFrom(
       v1::createContainerInfo("alpine"));
 
+  Future<Event::Update> updateStarting;
   Future<Event::Update> updateRunning;
   EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(DoAll(FutureArg<1>(&updateStarting),
+                    v1::scheduler::SendAcknowledge(
+                        frameworkId,
+                        offer.agent_id())))
     .WillOnce(DoAll(FutureArg<1>(&updateRunning),
                     v1::scheduler::SendAcknowledge(
                         frameworkId,
@@ -652,6 +675,10 @@ TEST_F(DockerRuntimeIsolatorTest, ROOT_NestedDockerDefaultEntryptLocalPuller)
       v1::createTaskGroupInfo({taskInfo}));
 
   mesos.send(v1::createCallAccept(frameworkId, offer, {launchGroup}));
+
+  AWAIT_READY(updateStarting);
+  ASSERT_EQ(v1::TASK_STARTING, updateStarting->status().state());
+  EXPECT_EQ(taskInfo.task_id(), updateStarting->status().task_id());
 
   AWAIT_READY(updateRunning);
   ASSERT_EQ(v1::TASK_RUNNING, updateRunning->status().state());

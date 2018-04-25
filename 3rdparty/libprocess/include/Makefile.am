@@ -29,10 +29,10 @@ nobase_include_HEADERS =		\
   process/filter.hpp			\
   process/firewall.hpp			\
   process/future.hpp			\
-  process/gc.hpp			\
   process/gmock.hpp			\
   process/grpc.hpp			\
   process/gtest.hpp			\
+  process/gtest_constants.hpp		\
   process/help.hpp			\
   process/http.hpp			\
   process/id.hpp			\
@@ -60,9 +60,11 @@ nobase_include_HEADERS =		\
   process/queue.hpp			\
   process/reap.hpp			\
   process/run.hpp			\
+  process/rwlock.hpp			\
   process/sequence.hpp			\
   process/shared.hpp			\
   process/socket.hpp			\
+  process/state_machine.hpp		\
   process/statistics.hpp		\
   process/system.hpp			\
   process/subprocess.hpp		\

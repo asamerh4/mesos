@@ -36,6 +36,7 @@ $ cd /path/to/mesos
 $ [ do some work on your branch off of master, make commit(s) ]
 $ ./support/post-reviews.py
 """
+# pylint: skip-file
 
 import argparse
 import atexit
@@ -107,19 +108,20 @@ def main():
         print 'Please install RBTools before proceeding'
         sys.exit(1)
 
-    # Don't do anything if people have unstaged changes.
+    # Warn if people have unstaged changes.
     diff_stat = execute(['git', 'diff', '--shortstat']).strip()
 
     if diff_stat:
-        print 'Please commit or stash any changes before using post-reviews!'
-        sys.exit(1)
+        print >> sys.stderr, \
+            'WARNING: Worktree contains unstaged changes, continuing anyway.'
 
-    # Don't do anything if people have uncommitted changes.
+    # Warn if people have uncommitted changes.
     diff_stat = execute(['git', 'diff', '--shortstat', '--staged']).strip()
 
     if diff_stat:
-        print 'Please commit staged changes before using post-reviews!'
-        sys.exit(1)
+        print >> sys.stderr, \
+            'WARNING: Worktree contains staged but uncommitted changes, ' \
+            'continuing anyway.'
 
     # Grab a reference to the repo's git directory. Usually this is simply
     # .git in the repo's top level directory. However, when submodules are
@@ -139,9 +141,23 @@ def main():
     top_level_dir = execute(['git', 'rev-parse', '--show-toplevel']).strip()
 
     # Use the tracking_branch specified by the user if exists.
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('--server')
-    parser.add_argument('--tracking-branch')
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        '--server',
+        help='Specifies the Review Board server to use.')
+    parser.add_argument(
+        '--no-markdown',
+        action='store_true',
+        help='Specifies if the commit text should not be treated as Markdown.')
+    parser.add_argument(
+        '--bugs-closed',
+        help='The comma-separated list of bug IDs closed.')
+    parser.add_argument(
+        '--target-people',
+        help='The usernames of the people who should perform the review.')
+    parser.add_argument(
+        '--tracking-branch',
+        help='The remote tracking branch from which your local branch is derived.')
     args, _ = parser.parse_known_args()
 
     # Try to read the .reviewboardrc in the top-level directory.
@@ -168,9 +184,10 @@ def main():
     branch_ref = execute(['git', 'symbolic-ref', 'HEAD']).strip()
     branch = branch_ref.replace('refs/heads/', '', 1)
 
-    # do not work on master branch
-    if branch == "master":
-        print "We're expecting you to be working on another branch from master!"
+    # Do not work on the tracking branch.
+    if branch == tracking_branch:
+        print "We're expecting you to be working on another branch" \
+              " from {}!".format(tracking_branch)
         sys.exit(1)
 
     temporary_branch = '_post-reviews_' + branch
@@ -182,6 +199,19 @@ def main():
     # Always put us back on the original branch.
     atexit.register(lambda: execute(['git', 'checkout', branch]))
 
+    # Warn if the tracking branch is no direct ancestor of this review chain.
+    if execute([
+            'git', 'merge-base', '--is-ancestor', tracking_branch, branch_ref],
+            ignore_errors=True) is None:
+        print >> sys.stderr, \
+            "WARNING: Tracking branch '%s' is no direct ancestor of HEAD." \
+            " Did you forget to rebase?" % tracking_branch
+
+        try:
+            raw_input("Press enter to continue or 'Ctrl-C' to abort.\n")
+        except KeyboardInterrupt:
+            sys.exit(0)
+
     merge_base = execute(
         ['git', 'merge-base', tracking_branch, branch_ref]).strip()
 
@@ -192,6 +222,7 @@ def main():
         '--pretty=format:%Cred%H%Creset -%C'
         '(yellow)%d%Creset %s %Cgreen(%cr)%Creset',
         merge_base + '..HEAD'])
+
     print 'Running \'%s\' across all of ...' % " ".join(post_review)
     print output
 
@@ -213,7 +244,7 @@ def main():
         sha = line.split()[0]
         shas.append(sha)
 
-    previous = tracking_branch
+    previous = merge_base
     parent_review_request_id = None
     for i, sha in enumerate(shas):
         execute(['git', 'branch', '-D', temporary_branch], True)
@@ -296,6 +327,15 @@ def main():
         # Build the post-review/rbt command up
         # to the point where they are common.
         command = post_review
+
+        if not args.no_markdown:
+            command = command + ['--markdown']
+
+        if args.bugs_closed:
+            command = command + ['--bugs-closed=' + args.bugs_closed]
+
+        if args.target_people:
+            command = command + ['--target-people=' + args.target_people]
 
         if args.tracking_branch is None:
             command = command + ['--tracking-branch=' + tracking_branch]

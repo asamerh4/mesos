@@ -20,6 +20,7 @@
 
 #include <mesos/slave/container_logger.hpp>
 
+#include <process/io.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/owned.hpp>
@@ -47,6 +48,8 @@
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
 #include "tests/mock_docker.hpp"
+
+#include "tests/containerizer/docker_common.hpp"
 
 using namespace mesos::internal::slave::paths;
 using namespace mesos::internal::slave::state;
@@ -93,6 +96,18 @@ void reinitialize(
 namespace mesos {
 namespace internal {
 namespace tests {
+
+
+static
+ContainerInfo createDockerInfo(const string& imageName)
+{
+  ContainerInfo containerInfo;
+
+  containerInfo.set_type(ContainerInfo::DOCKER);
+  containerInfo.mutable_docker()->set_image(imageName);
+
+  return containerInfo;
+}
 
 
 class DockerContainerizerTest : public MesosTest
@@ -234,34 +249,21 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch_Executor)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  ExecutorInfo executorInfo;
   ExecutorID executorId;
   executorId.set_value("e1");
-  executorInfo.mutable_executor_id()->CopyFrom(executorId);
 
   CommandInfo command;
   command.set_value("/bin/test-executor");
-  executorInfo.mutable_command()->CopyFrom(command);
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command,
+      executorId);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("tnachen/test-executor");
-
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-  executorInfo.mutable_container()->CopyFrom(containerInfo);
-
-  task.mutable_executor()->CopyFrom(executorInfo);
+  task.mutable_executor()->mutable_container()->CopyFrom(
+      createDockerInfo("tnachen/test-executor"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -360,35 +362,25 @@ TEST_F(DockerContainerizerTest, DISABLED_ROOT_DOCKER_Launch_Executor_Bridged)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  ExecutorInfo executorInfo;
   ExecutorID executorId;
   executorId.set_value("e1");
-  executorInfo.mutable_executor_id()->CopyFrom(executorId);
 
   CommandInfo command;
   command.set_value("/bin/test-executor");
-  executorInfo.mutable_command()->CopyFrom(command);
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command,
+      executorId);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("tnachen/test-executor");
-  dockerInfo.set_network(ContainerInfo::DockerInfo::BRIDGE);
+  ContainerInfo containerInfo = createDockerInfo("alpine");
 
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-  executorInfo.mutable_container()->CopyFrom(containerInfo);
+  containerInfo.mutable_docker()->set_network(
+      ContainerInfo::DockerInfo::BRIDGE);
 
-  task.mutable_executor()->CopyFrom(executorInfo);
+  task.mutable_executor()->mutable_container()->CopyFrom(containerInfo);
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -478,27 +470,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -506,14 +484,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Launch)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   ASSERT_TRUE(statusRunning->has_data());
@@ -628,27 +610,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Kill)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -656,13 +624,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Kill)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -756,27 +728,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_TaskKillingCapability)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -784,13 +742,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_TaskKillingCapability)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -877,28 +839,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Usage)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
   CommandInfo command;
   // Run a CPU intensive command, so we can measure utime and stime later.
   command.set_value("dd if=/dev/zero of=/dev/null");
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -910,14 +861,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Usage)
   EXPECT_CALL(dockerContainerizer, update(_, _))
     .WillRepeatedly(Return(Nothing()));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -1023,27 +978,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -1051,14 +992,19 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(containerId);
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
 
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
@@ -1109,7 +1055,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
   ASSERT_SOME(mem);
 
   EXPECT_EQ(1024u, cpu.get());
-  EXPECT_EQ(128u, mem->megabytes());
+  EXPECT_EQ(128u, mem->bytes() / Bytes::MEGABYTES);
 
   newResources = Resources::parse("cpus:1;mem:144");
 
@@ -1129,7 +1075,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Update)
   ASSERT_SOME(mem);
 
   EXPECT_EQ(1024u, cpu.get());
-  EXPECT_EQ(144u, mem->megabytes());
+  EXPECT_EQ(144u, mem->bytes() / Bytes::MEGABYTES);
 
   driver.stop();
   driver.join();
@@ -1162,9 +1108,9 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Recover)
   SlaveID slaveId;
   slaveId.set_value("s1");
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
   ContainerID reapedContainerId;
-  reapedContainerId.set_value(UUID::random().toString());
+  reapedContainerId.set_value(id::UUID::random().toString());
 
   string container1 = containerName(containerId);
   string container2 = containerName(reapedContainerId);
@@ -1175,13 +1121,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Recover)
 
   Resources resources = Resources::parse("cpus:1;mem:512").get();
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+  ContainerInfo containerInfo = createDockerInfo("alpine");
 
   CommandInfo commandInfo;
   commandInfo.set_value("sleep 1000");
@@ -1295,10 +1236,10 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_KillOrphanContainers)
   slaveId.set_value("s1");
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ContainerID orphanContainerId;
-  orphanContainerId.set_value(UUID::random().toString());
+  orphanContainerId.set_value(id::UUID::random().toString());
 
   string container1 = containerName(containerId);
 
@@ -1311,14 +1252,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_KillOrphanContainers)
 
   Resources resources = Resources::parse("cpus:1;mem:512").get();
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+  ContainerInfo containerInfo = createDockerInfo("alpine");
 
   CommandInfo commandInfo;
   commandInfo.set_value("sleep 1000");
@@ -1429,10 +1364,10 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SkipRecoverNonDocker)
       docker);
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ExecutorID executorId;
-  executorId.set_value(UUID::random().toString());
+  executorId.set_value(id::UUID::random().toString());
 
   ExecutorInfo executorInfo;
   executorInfo.mutable_container()->set_type(ContainerInfo::MESOS);
@@ -1450,7 +1385,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SkipRecoverNonDocker)
 
   SlaveState slaveState;
   FrameworkID frameworkId;
-  frameworkId.set_value(UUID::random().toString());
+  frameworkId.set_value(id::UUID::random().toString());
   slaveState.frameworks.put(frameworkId, frameworkState);
 
   Future<Nothing> recover = dockerContainerizer.recover(slaveState);
@@ -1501,19 +1436,14 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SkipRecoverMalformedUUID)
   ASSERT_TRUE(docker->rm(container, true).await(Seconds(30)));
 
   Resources resources = Resources::parse("cpus:1;mem:512").get();
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   CommandInfo commandInfo;
   commandInfo.set_value("sleep 1000");
 
   Try<Docker::RunOptions> runOptions = Docker::RunOptions::create(
-      containerInfo,
+      createDockerInfo("alpine"),
       commandInfo,
       container,
       flags.work_dir,
@@ -1585,7 +1515,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_LaunchWithPersistentVolumes)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
+  frameworkInfo.set_roles(0, "role1");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -1607,8 +1537,6 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_LaunchWithPersistentVolumes)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
   Resource volume = createPersistentVolume(
     Megabytes(64),
     "role1",
@@ -1618,27 +1546,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_LaunchWithPersistentVolumes)
     None(),
     frameworkInfo.principal());
 
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(
-      Resources::parse("cpus:1;mem:64").get() + volume);
-
   CommandInfo command;
   command.set_value("echo abc > " +
                     path::join(flags.sandbox_directory, "path1", "file"));
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      Resources::parse("cpus:1;mem:64").get() + volume,
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   // We use the filter explicitly here so that the resources will not
   // be filtered for 5 seconds (the default).
@@ -1653,20 +1571,26 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_LaunchWithPersistentVolumes)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
 
   driver.acceptOffers(
-      {offer.id()},
+      {offers->front().id()},
       {CREATE(volume), LAUNCH({task})},
       filters);
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -1739,7 +1663,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverPersistentVolumes)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
+  frameworkInfo.set_roles(0, "role1");
   frameworkInfo.set_checkpoint(true);
 
   MockScheduler sched;
@@ -1767,8 +1691,6 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverPersistentVolumes)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
   Resource volume = createPersistentVolume(
     Megabytes(64),
     "role1",
@@ -1778,26 +1700,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverPersistentVolumes)
     None(),
     frameworkInfo.principal());
 
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(
-      Resources::parse("cpus:1;mem:64").get() + volume);
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      Resources::parse("cpus:1;mem:64").get() + volume,
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   Future<ContainerConfig> containerConfig;
@@ -1807,18 +1716,22 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverPersistentVolumes)
                     Invoke(dockerContainerizer.get(),
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.acceptOffers(
-      {offer.id()},
+      {offers->front().id()},
       {CREATE(volume), LAUNCH({task})},
       filters);
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -1903,7 +1816,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverOrphanedPersistentVolumes)
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
+  frameworkInfo.set_roles(0, "role1");
   frameworkInfo.set_checkpoint(true);
 
   MockScheduler sched;
@@ -1931,8 +1844,6 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverOrphanedPersistentVolumes)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
   Resource volume = createPersistentVolume(
     Megabytes(64),
     "role1",
@@ -1942,26 +1853,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverOrphanedPersistentVolumes)
     None(),
     frameworkInfo.principal());
 
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(
-      Resources::parse("cpus:1;mem:64").get() + volume);
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      Resources::parse("cpus:1;mem:64").get() + volume,
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   Future<ContainerConfig> containerConfig;
@@ -1971,18 +1869,22 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverOrphanedPersistentVolumes)
                     Invoke(dockerContainerizer.get(),
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.acceptOffers(
-      {offer.id()},
+      {offers->front().id()},
       {CREATE(volume), LAUNCH({task})},
       filters);
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -1997,7 +1899,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_RecoverOrphanedPersistentVolumes)
   ASSERT_SOME(
       os::rmdir(getFrameworkPath(
           getMetaRootDir(flags.work_dir),
-          offer.slave_id(),
+          offers->front().slave_id(),
           frameworkId.get())));
 
   logger = ContainerLogger::create(flags.container_logger);
@@ -2095,15 +1997,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Logs)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  string uuid = UUID::random().toString();
+  string uuid = id::UUID::random().toString();
 
   // NOTE: We prefix `echo` with `unbuffer` so that we can immediately
   // flush the output of `echo`.  This mitigates a race in Docker where
@@ -2114,18 +2008,16 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Logs)
       "unbuffer echo out" + uuid + " ; "
       "unbuffer echo err" + uuid + " 1>&2");
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
   // NOTE: This is an image that is exactly
   // `docker run -t -i alpine /bin/sh -c "apk add --update expect"`.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("mesosphere/alpine-expect");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(
+      createDockerInfo("mesosphere/alpine-expect"));
 
   Future<ContainerID> containerId;
   Future<ContainerConfig> containerConfig;
@@ -2135,9 +2027,11 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Logs)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -2146,6 +2040,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Logs)
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   AWAIT_READY_FOR(statusFinished, Seconds(60));
@@ -2235,14 +2131,6 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
   CommandInfo command;
   command.set_shell(false);
 
@@ -2250,16 +2138,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD)
   // will still be able to run the container because it has a default
   // entrypoint!
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("mesosphere/inky");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("mesosphere/inky"));
 
   Future<ContainerID> containerId;
   Future<ContainerConfig> containerConfig;
@@ -2269,9 +2154,11 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -2280,6 +2167,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD)
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   AWAIT_READY_FOR(statusFinished, Seconds(60));
@@ -2368,15 +2257,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Override)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  string uuid = UUID::random().toString();
+  string uuid = id::UUID::random().toString();
 
   CommandInfo command;
   command.set_shell(false);
@@ -2385,16 +2266,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Override)
   // passed as an argument to the entrypoint, i.e., 'echo uuid'.
   command.set_value(uuid);
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("mesosphere/inky");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("mesosphere/inky"));
 
   Future<ContainerID> containerId;
   Future<ContainerConfig> containerConfig;
@@ -2404,9 +2282,11 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Override)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -2415,6 +2295,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Override)
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   AWAIT_READY_FOR(statusFinished, Seconds(60));
@@ -2506,15 +2388,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Args)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  string uuid = UUID::random().toString();
+  string uuid = id::UUID::random().toString();
 
   CommandInfo command;
   command.set_shell(false);
@@ -2524,16 +2398,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Args)
   // entrypoint!
   command.add_arguments(uuid);
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("mesosphere/inky");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("mesosphere/inky"));
 
   Future<ContainerID> containerId;
   Future<ContainerConfig> containerConfig;
@@ -2543,9 +2414,11 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Args)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -2554,6 +2427,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Args)
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   AWAIT_READY_FOR(statusFinished, Seconds(60));
@@ -2588,7 +2463,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Default_CMD_Args)
 
 // The slave is stopped before the first update for a task is received
 // from the executor. When it comes back up we make sure the executor
-// re-registers and the slave properly sends the update.
+// reregisters and the slave properly sends the update.
 TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -2646,27 +2521,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(*dockerContainerizer, launch(_, _, _, _))
@@ -2674,16 +2535,23 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
                     Invoke(dockerContainerizer.get(),
                            &MockDockerContainerizer::_launch)));
 
-  // Drop the first update from the executor.
-  Future<StatusUpdateMessage> statusUpdateMessage =
+  // Drop the status updates from the executor. We actually wait until we can
+  // drop the `TASK_RUNNING` update here because the window between the two is
+  // small enough that we could still successfully receive `TASK_RUNNING` after
+  // we have dropped `TASK_STARTING`.
+  Future<StatusUpdateMessage> runningUpdate =
+    DROP_PROTOBUF(StatusUpdateMessage(), _, _);
+
+  Future<StatusUpdateMessage> startingUpdate =
     DROP_PROTOBUF(StatusUpdateMessage(), _, _);
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY(containerId);
 
-  // Stop the slave before the status update is received.
-  AWAIT_READY(statusUpdateMessage);
+  // Stop the slave before the status updates are received.
+  AWAIT_READY(startingUpdate);
+  AWAIT_READY(runningUpdate);
 
   slave.get()->terminate();
 
@@ -2708,21 +2576,26 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
   slave = StartSlave(detector.get(), dockerContainerizer.get(), flags);
   ASSERT_SOME(slave);
 
-  // Ensure the executor re-registers.
+  // Ensure the executor reregisters.
   AWAIT_READY(reregisterExecutorMessage);
 
   ReregisterExecutorMessage reregister;
   reregister.ParseFromString(reregisterExecutorMessage->body);
 
-  // Executor should inform about the unacknowledged update.
-  ASSERT_EQ(1, reregister.updates_size());
-  const StatusUpdate& update = reregister.updates(0);
-  ASSERT_EQ(task.task_id(), update.status().task_id());
-  ASSERT_EQ(TASK_RUNNING, update.status().state());
+  // Executor should inform about the unacknowledged updates.
+  ASSERT_EQ(2, reregister.updates_size());
+
+  const StatusUpdate& updateStarting = reregister.updates(0);
+  ASSERT_EQ(task.task_id(), updateStarting.status().task_id());
+  ASSERT_EQ(TASK_STARTING, updateStarting.status().state());
+
+  const StatusUpdate& updateRunning = reregister.updates(1);
+  ASSERT_EQ(task.task_id(), updateRunning.status().task_id());
+  ASSERT_EQ(TASK_RUNNING, updateRunning.status().state());
 
   // Scheduler should receive the recovered update.
   AWAIT_READY(status);
-  ASSERT_EQ(TASK_RUNNING, status->state());
+  ASSERT_EQ(TASK_STARTING, status->state());
 
   ASSERT_TRUE(exists(docker, containerId.get()));
 
@@ -2739,7 +2612,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
 
 // The slave is stopped before the first update for a task is received
 // from the executor. When it comes back up we make sure the executor
-// re-registers and the slave properly sends the update.
+// reregisters and the slave properly sends the update.
 //
 // TODO(benh): This test is currently disabled because the executor
 // inside the image mesosphere/test-executor does not properly set the
@@ -2749,6 +2622,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_SlaveRecoveryTaskContainer)
 // parse and can even properly use for sending other messages, but the
 // current implementation of 'UPID::operator bool()' fails if the IP
 // component of a PID is '0'.
+//
+// TODO(alexr): Enable after MESOS-8708 is resolved.
 TEST_F(DockerContainerizerTest,
        DISABLED_ROOT_DOCKER_SlaveRecoveryExecutorContainer)
 {
@@ -2807,34 +2682,21 @@ TEST_F(DockerContainerizerTest,
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  ExecutorInfo executorInfo;
   ExecutorID executorId;
   executorId.set_value("e1");
-  executorInfo.mutable_executor_id()->CopyFrom(executorId);
 
   CommandInfo command;
   command.set_value("test-executor");
-  executorInfo.mutable_command()->CopyFrom(command);
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command,
+      executorId);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("mesosphere/test-executor");
-
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-  executorInfo.mutable_container()->CopyFrom(containerInfo);
-
-  task.mutable_executor()->CopyFrom(executorInfo);
+  task.mutable_executor()->mutable_container()->CopyFrom(
+      createDockerInfo("mesosphere/test-executor"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(*dockerContainerizer, launch(_, _, _, _))
@@ -2893,7 +2755,7 @@ TEST_F(DockerContainerizerTest,
   slave = StartSlave(detector.get(), dockerContainerizer.get(), flags);
   ASSERT_SOME(slave);
 
-  // Ensure the executor re-registers.
+  // Ensure the executor reregisters.
   AWAIT_READY(reregisterExecutorMessage);
 
   ReregisterExecutorMessage reregister;
@@ -2903,11 +2765,11 @@ TEST_F(DockerContainerizerTest,
   ASSERT_EQ(1, reregister.updates_size());
   const StatusUpdate& update = reregister.updates(0);
   ASSERT_EQ(task.task_id(), update.status().task_id());
-  ASSERT_EQ(TASK_RUNNING, update.status().state());
+  ASSERT_EQ(TASK_STARTING, update.status().state());
 
   // Scheduler should receive the recovered update.
   AWAIT_READY(status);
-  ASSERT_EQ(TASK_RUNNING, status->state());
+  ASSERT_EQ(TASK_STARTING, status->state());
 
   ASSERT_TRUE(exists(docker, containerId.get()));
 
@@ -2978,14 +2840,6 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NC_PortMapping)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
   CommandInfo command;
   command.set_shell(false);
   command.set_value("nc");
@@ -2993,22 +2847,23 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NC_PortMapping)
   command.add_arguments("-p");
   command.add_arguments("1000");
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  dockerInfo.set_network(ContainerInfo::DockerInfo::BRIDGE);
+  ContainerInfo containerInfo = createDockerInfo("alpine");
+
+  containerInfo.mutable_docker()->set_network(
+      ContainerInfo::DockerInfo::BRIDGE);
 
   ContainerInfo::DockerInfo::PortMapping portMapping;
   portMapping.set_host_port(10000);
   portMapping.set_container_port(1000);
 
-  dockerInfo.add_port_mappings()->CopyFrom(portMapping);
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+  containerInfo.mutable_docker()->add_port_mappings()->CopyFrom(portMapping);
 
-  task.mutable_command()->CopyFrom(command);
   task.mutable_container()->CopyFrom(containerInfo);
 
   Future<ContainerID> containerId;
@@ -3019,9 +2874,11 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NC_PortMapping)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFinished;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(DoDefault());
@@ -3030,6 +2887,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NC_PortMapping)
 
   AWAIT_READY_FOR(containerId, Seconds(60));
   AWAIT_READY(containerConfig);
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -3038,7 +2897,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NC_PortMapping)
            containerId.get(),
            ContainerState::RUNNING));
 
-  string uuid = UUID::random().toString();
+  string uuid = id::UUID::random().toString();
 
   // Write uuid to docker mapped host port.
   Try<process::Subprocess> s = process::subprocess(
@@ -3128,27 +2987,16 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_LaunchSandboxWithColon)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("test:colon");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  // Create a sleep task whose name is "test:colon".
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000),
+      None(),
+      "test:colon");
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -3156,14 +3004,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_LaunchSandboxWithColon)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -3245,27 +3097,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DestroyWhileFetching)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<TaskStatus> statusFailed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3365,27 +3203,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DestroyWhilePulling)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<TaskStatus> statusFailed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3434,9 +3258,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DestroyUnknownContainer)
   DockerContainerizer* containerizer = create.get();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
-  AWAIT_EXPECT_FALSE(containerizer->destroy(containerId));
+  Future<Option<ContainerTermination>> destroyed =
+    containerizer->destroy(containerId);
+
+  AWAIT_READY(destroyed);
+  EXPECT_NONE(destroyed.get());
 }
 
 
@@ -3504,26 +3332,12 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_ExecutorCleanupWhenLaunchFailed)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      "ls");
 
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("ls");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<TaskStatus> statusGone;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3612,26 +3426,12 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_FetchFailure)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      "ls");
 
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("ls");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<TaskStatus> statusFailed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3723,26 +3523,12 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DockerPullFailure)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      "ls");
 
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("ls");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<TaskStatus> statusFailed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3843,34 +3629,21 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DockerInspectDiscard)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  ExecutorInfo executorInfo;
   ExecutorID executorId;
   executorId.set_value("e1");
-  executorInfo.mutable_executor_id()->CopyFrom(executorId);
 
   CommandInfo command;
   command.set_value("/bin/test-executor");
-  executorInfo.mutable_command()->CopyFrom(command);
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command,
+      executorId);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("tnachen/test-executor");
-
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-  executorInfo.mutable_container()->CopyFrom(containerInfo);
-
-  task.mutable_executor()->CopyFrom(executorInfo);
+  task.mutable_executor()->mutable_container()->CopyFrom(
+      createDockerInfo("tnachen/test-executor"));
 
   Future<TaskStatus> statusFailed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3918,7 +3691,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_WaitUnknownContainer)
   DockerContainerizer* containerizer = create.get();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
@@ -3997,9 +3770,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NoTransitionFromKillingToRunning)
   // The docker container runs in host network mode.
   //
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-  containerInfo.mutable_docker()->set_image("alpine");
+  ContainerInfo containerInfo = createDockerInfo("alpine");
+
   containerInfo.mutable_docker()->set_network(
       ContainerInfo::DockerInfo::HOST);
 
@@ -4028,12 +3800,14 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NoTransitionFromKillingToRunning)
                     Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusHealthy;
   Future<TaskStatus> statusKilling;
   Future<TaskStatus> statusKilled;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusHealthy))
     .WillOnce(FutureArg<1>(&statusKilling))
@@ -4042,6 +3816,8 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NoTransitionFromKillingToRunning)
   driver.launchTasks(offers->front().id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -4059,6 +3835,124 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_NoTransitionFromKillingToRunning)
   AWAIT_READY(statusKilled);
   EXPECT_EQ(TASK_KILLED, statusKilled->state());
   EXPECT_FALSE(statusKilled->has_healthy());
+
+  Future<Option<ContainerTermination>> termination =
+    containerizer.wait(containerId.get());
+
+  driver.stop();
+  driver.join();
+
+  AWAIT_READY(termination);
+  EXPECT_SOME(termination.get());
+}
+
+
+// This test ensures that a task will transition from `TASK_KILLING`
+// to `TASK_KILLED` rather than `TASK_FINISHED` when it is killed,
+// even if it returns an "EXIT_STATUS" of 0 on receiving a SIGTERM.
+TEST_F(DockerContainerizerTest, ROOT_DOCKER_NoTransitionFromKillingToFinished)
+{
+  Shared<Docker> docker(new MockDocker(
+      tests::flags.docker, tests::flags.docker_socket));
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags agentFlags = CreateSlaveFlags();
+
+  Fetcher fetcher(agentFlags);
+
+  Try<ContainerLogger*> logger =
+    ContainerLogger::create(agentFlags.container_logger);
+
+  ASSERT_SOME(logger);
+
+  MockDockerContainerizer containerizer(
+      agentFlags,
+      &fetcher,
+      Owned<ContainerLogger>(logger.get()),
+      docker);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> agent =
+    StartSlave(detector.get(), &containerizer, agentFlags);
+
+  ASSERT_SOME(agent);
+
+  // Start the framework with the task killing capability.
+  FrameworkInfo::Capability capability;
+  capability.set_type(FrameworkInfo::Capability::TASK_KILLING_STATE);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.add_capabilities()->CopyFrom(capability);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_EQ(1u, offers->size());
+
+  CommandInfo command;
+  command.set_shell(false);
+
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
+
+  // The "nginx:alpine" container returns an "EXIT_STATUS" of 0 on
+  // receiving a SIGTERM.
+  //
+  // TODO(tnachen): Use local image to test if possible.
+  task.mutable_container()->CopyFrom(createDockerInfo("nginx:alpine"));
+
+  Future<ContainerID> containerId;
+  EXPECT_CALL(containerizer, launch(_, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    Invoke(&containerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusStarting;
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusKilling;
+  Future<TaskStatus> statusKilled;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusKilling))
+    .WillOnce(FutureArg<1>(&statusKilled));
+
+  driver.launchTasks(offers->front().id(), {task});
+
+  AWAIT_READY_FOR(containerId, Seconds(60));
+
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  // Docker executor will call "docker stop ..." to send SIGTERM
+  // to kill the task.
+  driver.killTask(task.task_id());
+
+  AWAIT_READY(statusKilling);
+  EXPECT_EQ(TASK_KILLING, statusKilling->state());
+
+  AWAIT_READY(statusKilled);
+  EXPECT_EQ(TASK_KILLED, statusKilled->state());
 
   Future<Option<ContainerTermination>> termination =
     containerizer.wait(containerId.get());
@@ -4129,27 +4023,13 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_CGROUPS_CFS_CgroupsEnableCFS)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_command()->CopyFrom(command);
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -4157,14 +4037,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_CGROUPS_CFS_CgroupsEnableCFS)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   ASSERT_TRUE(statusRunning->has_data());
@@ -4240,7 +4124,7 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Non_Root_Sandbox)
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegisteredMessage);
-  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
+  SlaveID slaveId = slaveRegisteredMessage->slave_id();
 
   FrameworkInfo framework;
   framework.set_name("default");
@@ -4269,26 +4153,19 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Non_Root_Sandbox)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
   // Start the task as a user without supplying an explicit command
   // user. This should inherit the framework user for the task
   // ownership.
-  CommandInfo* command = task.mutable_command();
-  command->set_value("echo \"foo\" && sleep 1000");
+  CommandInfo command;
+  command.set_value("echo \"foo\" && sleep 1000");
 
-  ContainerInfo* containerInfo = task.mutable_container();
-  containerInfo->set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      command);
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo* dockerInfo = containerInfo->mutable_docker();
-  dockerInfo->set_image("alpine");
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -4296,14 +4173,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_Non_Root_Sandbox)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
@@ -4423,27 +4304,17 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DefaultDNS)
   AWAIT_READY(offers);
   ASSERT_FALSE(offers->empty());
 
-  const Offer& offer = offers.get()[0];
-
-  TaskInfo task;
-  task.set_name("");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->CopyFrom(offer.slave_id());
-  task.mutable_resources()->CopyFrom(offer.resources());
-
-  CommandInfo command;
-  command.set_value("sleep 1000");
-
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
+  TaskInfo task = createTask(
+      offers->front().slave_id(),
+      offers->front().resources(),
+      SLEEP_COMMAND(1000));
 
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  dockerInfo.set_network(ContainerInfo::DockerInfo::BRIDGE);
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+  ContainerInfo containerInfo = createDockerInfo("alpine");
 
-  task.mutable_command()->CopyFrom(command);
+  containerInfo.mutable_docker()->set_network(
+      ContainerInfo::DockerInfo::BRIDGE);
+
   task.mutable_container()->CopyFrom(containerInfo);
 
   Future<ContainerID> containerId;
@@ -4452,14 +4323,18 @@ TEST_F(DockerContainerizerTest, ROOT_DOCKER_DefaultDNS)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   ASSERT_TRUE(statusRunning->has_data());
@@ -4590,7 +4465,7 @@ TEST_F(DockerContainerizerIPv6Test, ROOT_DOCKER_LaunchIPv6HostNetwork)
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return()); // Ignore subsequent offers.
+    .WillRepeatedly(Return());  // Ignore subsequent offers.
 
   driver.start();
 
@@ -4606,15 +4481,8 @@ TEST_F(DockerContainerizerIPv6Test, ROOT_DOCKER_LaunchIPv6HostNetwork)
       offer.resources(),
       SLEEP_COMMAND(10000));
 
-  ContainerInfo containerInfo;
-  containerInfo.set_type(ContainerInfo::DOCKER);
-
   // TODO(tnachen): Use local image to test if possible.
-  ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("alpine");
-  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
-
-  task.mutable_container()->CopyFrom(containerInfo);
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
 
   Future<ContainerID> containerId;
   EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
@@ -4622,14 +4490,18 @@ TEST_F(DockerContainerizerIPv6Test, ROOT_DOCKER_LaunchIPv6HostNetwork)
                     Invoke(&dockerContainerizer,
                            &MockDockerContainerizer::_launch)));
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillRepeatedly(DoDefault());
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
   AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
   ASSERT_TRUE(statusRunning->has_data());
@@ -4708,6 +4580,371 @@ TEST_F(DockerContainerizerIPv6Test, ROOT_DOCKER_LaunchIPv6HostNetwork)
 
   ASSERT_FALSE(
     exists(docker, containerId.get(), ContainerState::RUNNING));
+}
+
+
+// Fixture for testing IPv6 support for docker containers on docker
+// user network.
+class DockerContainerizerIPv6UserNetworkTest : public DockerContainerizerTest
+{
+protected:
+  virtual void SetUp()
+  {
+    createDockerIPv6UserNetwork();
+    DockerContainerizerTest::SetUp();
+  }
+
+  virtual void TearDown()
+  {
+    DockerContainerizerTest::TearDown();
+    removeDockerIPv6UserNetwork();
+  }
+};
+
+
+// Launches a docker container on the docker user network. The docker network
+// is assumed to have an IPv4 address and an IPv6 address. The test passes if
+// the Mesos state correctly exposes both the IPv4 and IPv6 address.
+TEST_F(
+    DockerContainerizerIPv6UserNetworkTest,
+    ROOT_DOCKER_USERNETWORK_LaunchIPv6Container)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockDocker* mockDocker =
+    new MockDocker(tests::flags.docker, tests::flags.docker_socket);
+
+  Shared<Docker> docker(mockDocker);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  Fetcher fetcher(flags);
+
+  Try<ContainerLogger*> logger =
+    ContainerLogger::create(flags.container_logger);
+
+  ASSERT_SOME(logger);
+
+  MockDockerContainerizer dockerContainerizer(
+      flags,
+      &fetcher,
+      Owned<ContainerLogger>(logger.get()),
+      docker);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &dockerContainerizer, flags);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task = createTask(
+      offer.slave_id(),
+      offer.resources(),
+      SLEEP_COMMAND(10000));
+
+  // TODO(tnachen): Use local image to test if possible.
+  ContainerInfo containerInfo = createDockerInfo("alpine");
+
+  containerInfo.mutable_docker()->set_network(
+      ContainerInfo::DockerInfo::USER);
+
+  // Setup the docker IPv6 network.
+  NetworkInfo networkInfo;
+  networkInfo.set_name(DOCKER_IPv6_NETWORK);
+  containerInfo.add_network_infos()->CopyFrom(networkInfo);
+
+  task.mutable_container()->CopyFrom(containerInfo);
+
+  Future<ContainerID> containerId;
+  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    Invoke(&dockerContainerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusStarting;
+  Future<TaskStatus> statusRunning;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillRepeatedly(DoDefault());
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY_FOR(containerId, Seconds(60));
+  AWAIT_READY_FOR(statusStarting, Seconds(60));
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+  AWAIT_READY_FOR(statusRunning, Seconds(60));
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+  ASSERT_TRUE(statusRunning->has_data());
+
+  // Now verify the ContainerStatus fields in the TaskStatus.
+  ASSERT_TRUE(statusRunning->has_container_status());
+  EXPECT_TRUE(statusRunning->container_status().has_container_id());
+  ASSERT_EQ(1, statusRunning->container_status().network_infos().size());
+  ASSERT_EQ(2, statusRunning->container_status().network_infos(0).ip_addresses().size()); // NOLINT(whitespace/line_length)
+
+  Option<string> containerIPv4 = None();
+  Option<string> containerIPv6 = None();
+
+  foreach(const NetworkInfo::IPAddress& ipAddress,
+          statusRunning->container_status().network_infos(0).ip_addresses()) {
+    if (ipAddress.protocol() == NetworkInfo::IPv4) {
+      containerIPv4 = ipAddress.ip_address();
+    }
+
+    if (ipAddress.protocol() == NetworkInfo::IPv6) {
+      containerIPv6 = ipAddress.ip_address();
+    }
+  }
+
+  ASSERT_SOME(containerIPv4);
+  ASSERT_SOME(containerIPv6);
+
+  // Check if container information is exposed through slave's state endpoint.
+  Future<http::Response> response = http::get(
+      slave.get()->pid,
+      "state",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
+
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(response->body);
+  ASSERT_SOME(parse);
+
+  // Verify that the slave state information has the same container
+  // status as received in the status update message.
+  for (int i = 0; i < 2; i++) {
+    Result<JSON::String> protocol = parse->find<JSON::String>(
+        "frameworks[0].executors[0].tasks[0].statuses[1]"
+        ".container_status.network_infos[0].ip_addresses[" +
+        stringify(i) + "].protocol");
+
+    ASSERT_SOME(protocol);
+
+    Result<JSON::String> ip = parse->find<JSON::String>(
+        "frameworks[0].executors[0].tasks[0].statuses[1]"
+        ".container_status.network_infos[0].ip_addresses[" +
+        stringify(i) + "].ip_address");
+
+    ASSERT_SOME(ip);
+
+    if (protocol->value == "IPv4") {
+      EXPECT_EQ(ip->value, containerIPv4.get());
+    } else {
+      EXPECT_EQ(ip->value, containerIPv6.get());
+    }
+
+    LOG(INFO) << "IP: " << ip->value;
+  }
+
+  ASSERT_TRUE(exists(docker, containerId.get()));
+
+  Future<Option<ContainerTermination>> termination =
+    dockerContainerizer.wait(containerId.get());
+
+  driver.stop();
+  driver.join();
+
+  AWAIT_READY(termination);
+  EXPECT_SOME(termination.get());
+
+  ASSERT_FALSE(
+    exists(docker, containerId.get(), ContainerState::RUNNING));
+}
+
+
+class HungDockerTest : public DockerContainerizerTest
+{
+public:
+  const string testDockerEnvFile = "test-docker.env";
+  const string testDockerBinary = "docker";
+  const string testDockerScript = "test-docker.sh";
+  string commandsEnv;
+  string delayEnv;
+
+  virtual slave::Flags CreateSlaveFlags()
+  {
+    slave::Flags flags = MesosTest::CreateSlaveFlags();
+
+    flags.docker = path::join(os::getcwd(), testDockerScript);
+
+    return flags;
+  }
+
+  void writeEnv()
+  {
+    // TODO(greggomann): This write operation is not atomic, which means an
+    // ill-timed write may cause the shell script to be invoked when this
+    // file is in an unintended state. We should make this atomic.
+    Try<Nothing> write =
+      os::write(testDockerEnvFile, commandsEnv + "\n" + delayEnv);
+    ASSERT_SOME(write);
+  }
+
+  void setDelayedCommands(const std::vector<string>& commands)
+  {
+    commandsEnv = "DELAYED_COMMANDS=( ";
+    foreach (const string& command, commands) {
+      commandsEnv += (command + " ");
+    }
+    commandsEnv += ")";
+
+    writeEnv();
+  }
+
+  void setDelay(const int seconds)
+  {
+    delayEnv = "DELAY_SECONDS=" + stringify(seconds);
+
+    writeEnv();
+  }
+
+  virtual void SetUp()
+  {
+    DockerContainerizerTest::SetUp();
+
+    // Write a wrapper script which allows us to delay Docker commands.
+    const string dockerScriptText =
+      "#!/usr/bin/env bash\n"
+      "source " + stringify(path::join(os::getcwd(), testDockerEnvFile)) + "\n"
+      "ACTIVE_COMMAND=$3\n"
+      "for DELAYED_COMMAND in \"${DELAYED_COMMANDS[@]}\"; do\n"
+      "  if [ \"$ACTIVE_COMMAND\" == \"$DELAYED_COMMAND\" ]; then\n"
+      "    sleep $DELAY_SECONDS\n"
+      "  fi\n"
+      "done\n" +
+      testDockerBinary + " \"$@\"\n";
+
+    Try<Nothing> write = os::write(testDockerScript, dockerScriptText);
+    ASSERT_SOME(write);
+
+    Try<Nothing> chmod = os::chmod(
+        testDockerScript, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+    ASSERT_SOME(chmod);
+
+    // Set a very long delay by default to simulate an indefinitely
+    // hung Docker daemon.
+    setDelay(999999);
+  }
+};
+
+
+TEST_F_TEMP_DISABLED_ON_WINDOWS(
+    HungDockerTest, ROOT_DOCKER_InspectHungDuringPull)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  // When the 'executor_registration_timeout' elapses, the agent will destroy
+  // the container whose 'docker pull' command is stuck. This should cause the
+  // launch to fail and the terminal task status update to be sent.
+  flags.executor_registration_timeout = Milliseconds(100);
+
+  MockDocker* mockDocker =
+    new MockDocker(flags.docker, tests::flags.docker_socket);
+  Shared<Docker> docker(mockDocker);
+
+  Fetcher fetcher(flags);
+
+  Try<ContainerLogger*> logger =
+    ContainerLogger::create(flags.container_logger);
+
+  ASSERT_SOME(logger);
+
+  MockDockerContainerizer dockerContainerizer(
+      flags,
+      &fetcher,
+      Owned<ContainerLogger>(logger.get()),
+      docker);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &dockerContainerizer, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+
+  // Causing the 'docker inspect' call preceding the container pull to hang
+  // should result in a TASK_FAILED update.
+  setDelayedCommands({"inspect"});
+
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task = createTask(
+      offer.slave_id(),
+      offer.resources(),
+      SLEEP_COMMAND(1000));
+
+  // TODO(tnachen): Use local image to test if possible.
+  task.mutable_container()->CopyFrom(createDockerInfo("alpine"));
+
+  Future<ContainerID> containerId;
+  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _))
+    .WillOnce(DoAll(FutureArg<0>(&containerId),
+                    Invoke(&dockerContainerizer,
+                           &MockDockerContainerizer::_launch)));
+
+  Future<TaskStatus> statusFailed;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusFailed))
+    .WillRepeatedly(DoDefault());
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(statusFailed);
+  EXPECT_EQ(TASK_FAILED, statusFailed->state());
+  EXPECT_EQ(
+      TaskStatus::REASON_CONTAINER_LAUNCH_FAILED,
+      statusFailed->reason());
+
+  driver.stop();
+  driver.join();
 }
 
 } // namespace tests {

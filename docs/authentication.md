@@ -133,7 +133,7 @@ token (JWT) HTTP authenticator is loaded to handle executor authentication on
 both the executor and operator API endpoints. Note that command and custom
 executors not using the HTTP API will remain unauthenticated.
 
-When a secret key is loaded via the `--executor_secret_key` flag, the agent will
+When a secret key is loaded via the `--jwt_secret_key` flag, the agent will
 generate a default JWT for each executor before it is launched. This token is
 passed into the executor's environment via the
 `MESOS_EXECUTOR_AUTHENTICATION_TOKEN` environment variable. In order to
@@ -146,7 +146,7 @@ In order to upgrade an existing cluster to require executor authentication, the
 following procedure should be followed:
 
 1. Upgrade all agents, and provide each agent with a cryptographic key via the
-   `--executor_secret_key` flag. This key will be used to sign executor
+   `--jwt_secret_key` flag. This key will be used to sign executor
    authentication tokens using the HMAC-SHA256 procedure.
 
 2. Before executor authentication can be enabled successfully, all HTTP
@@ -162,6 +162,12 @@ following procedure should be followed:
    This will enable required HTTP executor authentication, and since all
    executors now have authentication tokens and support authentication, their
    requests to the agent will authenticate successfully.
+
+Note that HTTP executors make use of the agent operator API in order to make
+nested container calls. This means that authentication of the v1 agent operator
+API should not be enabled (via `--authenticate_http_readwrite`) when HTTP
+executor authentication is disabled, or HTTP executors will not be able to
+function correctly.
 
 ### Framework
 

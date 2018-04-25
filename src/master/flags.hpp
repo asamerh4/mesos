@@ -96,6 +96,7 @@ public:
   Duration registry_gc_interval;
   Duration registry_max_agent_age;
   size_t registry_max_agent_count;
+  bool require_agent_domain;
   Option<DomainInfo> domain;
 
   // The following flags are executable specific (e.g., since we only
@@ -106,7 +107,8 @@ public:
   uint16_t port;
   Option<std::string> advertise_ip;
   Option<std::string> advertise_port;
-  Option<std::string> zk;
+  Option<flags::SecurePathOrValue> zk;
+  bool memory_profiling;
 
   // Optional IP discover script that will set the Master IP.
   // If set, its output is expected to be a valid parseable IP string.

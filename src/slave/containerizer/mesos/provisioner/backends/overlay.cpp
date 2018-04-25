@@ -23,6 +23,8 @@
 #include <stout/fs.hpp>
 #include <stout/os.hpp>
 
+#include <stout/os/realpath.hpp>
+
 #include "linux/fs.hpp"
 
 #include "slave/containerizer/mesos/provisioner/backends/overlay.hpp"
@@ -151,7 +153,7 @@ Future<Nothing> OverlayBackendProcess::provision(
   Try<string> mktemp = os::mkdtemp();
   if (mktemp.isError()) {
     return Failure(
-      "Failued to create temporary directory for symlinks to layers: " +
+      "Failed to create temporary directory for symlinks to layers: " +
       mktemp.error());
   }
 

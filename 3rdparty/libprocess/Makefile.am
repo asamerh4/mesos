@@ -74,12 +74,12 @@ BUNDLED_DEPS = # Initialize BUNDLED_DEPENDENCIES so we can add to it.
 	@cd $(BUNDLED_DIR) && $(MAKE) $(AM_MAKEFLAGS) $(@:$(BUNDLED_DIR)/%=%)
 
 if WITH_BUNDLED_BOOST
-BOOST_INCLUDE_FLAGS = -isystem $(BOOST)
+BOOST_INCLUDE_FLAGS = -I$(BOOST)
 BUNDLED_DEPS += $(BOOST)-stamp
 endif
 
 if WITH_BUNDLED_CONCURRENTQUEUE
-CONCURRENTQUEUE_INCLUDE_FLAGS = -isystem $(CONCURRENTQUEUE)
+CONCURRENTQUEUE_INCLUDE_FLAGS = -I$(CONCURRENTQUEUE)
 BUNDLED_DEPS += $(CONCURRENTQUEUE)-stamp
 endif
 
@@ -186,9 +186,9 @@ endif
 noinst_LTLIBRARIES = libprocess.la
 
 libprocess_la_SOURCES =		\
-  src/authenticator_manager.hpp	\
-  src/authenticator_manager.cpp	\
   src/authenticator.cpp		\
+  src/authenticator_manager.cpp	\
+  src/authenticator_manager.hpp	\
   src/clock.cpp			\
   src/config.hpp		\
   src/decoder.hpp		\
@@ -197,23 +197,29 @@ libprocess_la_SOURCES =		\
   src/event_queue.hpp		\
   src/firewall.cpp		\
   src/gate.hpp			\
+  src/gtest_constants.cpp	\
   src/help.cpp			\
   src/http.cpp			\
+  src/http_proxy.cpp		\
+  src/http_proxy.hpp		\
   src/io.cpp			\
   src/latch.cpp			\
   src/logging.cpp		\
+  src/memory_profiler.cpp	\
+  src/memory_profiler.hpp	\
   src/metrics/metrics.cpp	\
   src/mime.cpp			\
   src/pid.cpp			\
   src/poll_socket.cpp		\
   src/poll_socket.hpp		\
-  src/profiler.cpp		\
   src/process.cpp		\
   src/process_reference.hpp	\
+  src/profiler.cpp		\
   src/reap.cpp			\
   src/run_queue.hpp		\
   src/semaphore.hpp		\
   src/socket.cpp		\
+  src/socket_manager.hpp	\
   src/subprocess.cpp		\
   src/subprocess_posix.cpp	\
   src/subprocess_posix.hpp	\
@@ -232,9 +238,6 @@ libprocess_la_SOURCES +=	\
 endif
 
 
-# We use "-isystem" instead of "-I" to add Boost to the include search
-# path. This disables compiler warnings inside Boost headers since we
-# can't easily fix them. See MESOS-3799.
 libprocess_la_CPPFLAGS =			\
   -DBUILD_DIR=\"$(LIBPROCESS_BUILD_DIR)\"	\
   -I$(srcdir)/include				\
@@ -275,6 +278,10 @@ if ENABLE_STATIC_LIBPROCESS
 libprocess_la_LDFLAGS = -static -fpic
 endif
 
+if OS_LINUX
+libprocess_la_CPPFLAGS += -DLIBPROCESS_ALLOW_JEMALLOC
+endif
+
 libprocess_la_LIBADD =		\
   $(LIB_GLOG)			\
   $(LIB_GPERFTOOLS)		\
@@ -303,9 +310,11 @@ libprocess_tests_SOURCES =					\
   src/tests/profiler_tests.cpp					\
   src/tests/queue_tests.cpp					\
   src/tests/reap_tests.cpp					\
+  src/tests/rwlock_tests.cpp					\
   src/tests/socket_tests.cpp					\
   src/tests/sequence_tests.cpp					\
   src/tests/shared_tests.cpp					\
+  src/tests/state_machine_tests.cpp				\
   src/tests/statistics_tests.cpp				\
   src/tests/subprocess_tests.cpp				\
   src/tests/system_tests.cpp					\
@@ -348,7 +357,12 @@ libprocess_tests_SOURCES +=		\
 endif
 
 benchmarks_SOURCES =			\
-  src/tests/benchmarks.cpp
+  src/tests/benchmarks.cpp		\
+  src/tests/benchmarks.proto
+
+BENCHMARKS_PROTOS =			\
+  benchmarks.pb.cc			\
+  benchmarks.pb.h
 
 benchmarks_CPPFLAGS =			\
   -I$(srcdir)/src			\
@@ -358,6 +372,7 @@ benchmarks_CPPFLAGS =			\
 
 benchmarks_LDADD =			\
   $(LIB_GMOCK)				\
+  $(LIB_PROTOBUF)			\
   libprocess.la
 
 # Used for testing remote links.
@@ -385,21 +400,27 @@ libprocess_tests_LDADD +=		\
 endif
 
 BUILT_SOURCES =				\
-  $(BUNDLED_DEPS)
+  $(BUNDLED_DEPS)			\
+  $(BENCHMARKS_PROTOS)			\
+  $(GRPC_TESTS_PROTOS)
+
+nodist_benchmarks_SOURCES =		\
+  $(BENCHMARKS_PROTOS)
 
 nodist_libprocess_tests_SOURCES =	\
   $(GRPC_TESTS_PROTOS)
 
 CLEANFILES =				\
+  $(BENCHMARKS_PROTOS)			\
   $(GRPC_TESTS_PROTOS)
 
 
 # Targets for generating C++ protocol buffer and gRPC code for tests.
-%.pb.cc %.pb.h: src/tests/%.proto
-	$(PROTOC) -I$(^D) --cpp_out=. $^
+%.pb.cc %.pb.h: src/tests/%.proto $(BUNDLED_DEPS)
+	$(PROTOC) -I$(<D) --cpp_out=. $<
 
-%.grpc.pb.cc %.grpc.pb.h: src/tests/%.proto
-	$(PROTOC) -I$(^D) --grpc_out=. $^			\
+%.grpc.pb.cc %.grpc.pb.h: src/tests/%.proto $(BUNDLED_DEPS)
+	$(PROTOC) -I$(<D) --grpc_out=. $<			\
 	          --plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN)
 
 
@@ -410,7 +431,7 @@ CLEANFILES =				\
 check-local: tests
 	$(TEST_DRIVER) ./libprocess-tests
 
-tests: all $(BUNDLED_DEPS) $(GRPC_TESTS_PROTOS)
+tests: all $(BUNDLED_DEPS) $(BENCHMARKS_PROTOS) $(GRPC_TESTS_PROTOS)
 	$(MAKE) $(AM_MAKEFLAGS) $(check_PROGRAMS)
 
 # TODO(benh): Fix shared builds (tests need libglog, libev, etc).

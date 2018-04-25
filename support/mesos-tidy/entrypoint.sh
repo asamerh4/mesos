@@ -23,6 +23,8 @@ SRCDIR=/tmp/SRC
 
 # Prepare sources
 git clone --depth 1 file:///SRC "${SRCDIR}"
+
+# We require this in order to populate the `.clang-tidy` file at the top-level.
 (cd "${SRCDIR}" && ./bootstrap)
 
 # Configure sources
@@ -33,7 +35,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \
 
 # Build the external dependencies.
 # TODO(mpark): Use an external dependencies target once MESOS-6924 is resolved.
-cmake --build 3rdparty --target boost-1.53.0 -- -j $(nproc)
+cmake --build 3rdparty --target boost-1.65.0 -- -j $(nproc)
 cmake --build 3rdparty --target elfio-3.2 -- -j $(nproc)
 cmake --build 3rdparty --target glog-0.3.3 -- -j $(nproc)
 cmake --build 3rdparty --target googletest-1.8.0 -- -j $(nproc)
@@ -48,12 +50,19 @@ cmake --build 3rdparty --target libevent-2.1.5-beta -- -j $(nproc) || true
 cmake --build 3rdparty --target leveldb-1.19 -- -j $(nproc)
 cmake --build 3rdparty --target nvml-352.79 -- -j $(nproc)
 cmake --build 3rdparty --target picojson-1.3.0 -- -j $(nproc)
-cmake --build 3rdparty --target protobuf-3.3.0 -- -j $(nproc)
+cmake --build 3rdparty --target protobuf-3.5.0 -- -j $(nproc)
 cmake --build 3rdparty --target zookeeper-3.4.8 -- -j $(nproc)
 
 # Generate the protobuf definitions.
 # TODO(mpark): Use a protobuf generation target once MESOS-6925 is resolved.
 cmake --build . --target mesos-protobufs -- -j $(nproc)
+
+# For protobuf definitions in stout (`protobuf-test.pb.h`) or
+# libprocess (`benchmarks.pb.h`) no explict targets exists; we instead
+# build the executable targets to produce them as a side-effect.  This
+# is pretty hacky for what we want to do, but it's okay for now.
+cmake --build 3rdparty/stout/tests --target stout-tests -- -j $(nproc)
+cmake --build 3rdparty/libprocess/src/tests --target benchmarks -- -j $(nproc)
 
 # TODO(bbannier): Use a less restrictive `grep` pattern and `header-filter`
 # once MESOS-6115 is fixed.

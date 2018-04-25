@@ -16,6 +16,8 @@
 
 #include <ostream>
 
+#include <google/protobuf/util/message_differencer.h>
+
 #include <mesos/attributes.hpp>
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
@@ -99,6 +101,56 @@ bool operator==(const Credential& left, const Credential& right)
 }
 
 
+bool operator==(const CSIPluginInfo& left, const CSIPluginInfo& right)
+{
+  // Order of containers is important.
+  if (left.containers_size() != right.containers_size()) {
+    return false;
+  }
+
+  for (int i = 0; i < left.containers_size(); i++) {
+    if (left.containers(i) != right.containers(i)) {
+      return false;
+    }
+  }
+
+  return left.type() == right.type() &&
+    left.name() == right.name();
+}
+
+
+bool operator==(
+    const CSIPluginContainerInfo& left,
+    const CSIPluginContainerInfo& right)
+{
+  // Order of services is not important.
+  if (left.services_size() != right.services_size()) {
+    return false;
+  }
+
+  vector<bool> used(right.services_size(), false);
+
+  for (int i = 0; i < left.services_size(); i++) {
+    bool found = false;
+    for (int j = 0; j < right.services_size(); j++) {
+      if (left.services(i) == right.services(j) && !used[j]) {
+        found = used[j] = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+
+  return left.has_command() == right.has_command() &&
+    (!left.has_command() || left.command() == right.command()) &&
+    Resources(left.resources()) == Resources(right.resources()) &&
+    left.has_container() == right.has_container() &&
+    (!left.has_container() || left.container() == right.container());
+}
+
+
 bool operator==(
     const Environment::Variable& left,
     const Environment::Variable& right)
@@ -143,6 +195,12 @@ bool operator==(const Volume& left, const Volume& right)
 bool operator==(const URL& left, const URL& right)
 {
   return left.SerializeAsString() == right.SerializeAsString();
+}
+
+
+bool operator==(const UUID& left, const UUID& right)
+{
+  return left.value() == right.value();
 }
 
 
@@ -351,22 +409,82 @@ bool operator==(const MasterInfo& left, const MasterInfo& right)
 
 
 bool operator==(
+    const ResourceProviderInfo::Storage& left,
+    const ResourceProviderInfo::Storage& right)
+{
+  return left.plugin() == right.plugin();
+}
+
+
+bool operator==(
     const ResourceProviderInfo& left,
     const ResourceProviderInfo& right)
 {
-  if (left.id() != right.id()) {
+  // Order of reservations is important.
+  if (left.default_reservations_size() != right.default_reservations_size()) {
     return false;
   }
 
-  if (Attributes(left.attributes()) != Attributes(right.attributes())) {
+  for (int i = 0; i < left.default_reservations_size(); i++) {
+    if (left.default_reservations(i) != right.default_reservations(i)) {
+      return false;
+    }
+  }
+
+  return left.has_id() == right.has_id() &&
+    (!left.has_id() || left.id() == right.id()) &&
+    Attributes(left.attributes()) == Attributes(right.attributes()) &&
+    left.type() == right.type() &&
+    left.name() == right.name() &&
+    left.has_storage() == right.has_storage() &&
+    (!left.has_storage() || left.storage() == right.storage());
+}
+
+
+bool operator==(const Offer::Operation& left, const Offer::Operation& right)
+{
+  return google::protobuf::util::MessageDifferencer::Equals(left, right);
+}
+
+
+bool operator==(const Operation& left, const Operation& right)
+{
+  return google::protobuf::util::MessageDifferencer::Equals(left, right);
+}
+
+
+bool operator==(const OperationStatus& left, const OperationStatus& right)
+{
+  if (left.has_operation_id() != right.has_operation_id()) {
     return false;
   }
 
-  if (left.type() != right.type()) {
+  if (left.has_operation_id() && left.operation_id() != right.operation_id()) {
     return false;
   }
 
-  if (left.name() != right.name()) {
+  if (left.state() != right.state()) {
+    return false;
+  }
+
+  if (left.has_message() != right.has_message()) {
+    return false;
+  }
+
+  if (left.has_message() && left.message() != right.message()) {
+    return false;
+  }
+
+  if (Resources(left.converted_resources()) !=
+      Resources(right.converted_resources())) {
+    return false;
+  }
+
+  if (left.has_uuid() != right.has_uuid()) {
+    return false;
+  }
+
+  if (left.has_uuid() && left.uuid() != right.uuid()) {
     return false;
   }
 
@@ -374,9 +492,19 @@ bool operator==(
 }
 
 
-bool operator!=(
-    const ResourceProviderInfo& left,
-    const ResourceProviderInfo& right)
+bool operator!=(const Offer::Operation& left, const Offer::Operation& right)
+{
+  return !(left == right);
+}
+
+
+bool operator!=(const Operation& left, const Operation& right)
+{
+  return !(left == right);
+}
+
+
+bool operator!=(const OperationStatus& left, const OperationStatus& right)
 {
   return !(left == right);
 }
@@ -607,6 +735,18 @@ ostream& operator<<(ostream& stream, const OfferID& offerId)
 }
 
 
+ostream& operator<<(ostream& stream, const OperationID& operationId)
+{
+  return stream << operationId.value();
+}
+
+
+ostream& operator<<(ostream& stream, const OperationState& state)
+{
+  return stream << OperationState_Name(state);
+}
+
+
 ostream& operator<<(ostream& stream, const RateLimits& limits)
 {
   return stream << limits.DebugString();
@@ -680,9 +820,28 @@ ostream& operator<<(ostream& stream, const TaskState& state)
 }
 
 
+ostream& operator<<(ostream& stream, const UUID& uuid)
+{
+  Try<id::UUID> _uuid = id::UUID::fromBytes(uuid.value());
+  if (_uuid.isError()) {
+    return stream << "INVALID UUID";
+  }
+
+  return stream << _uuid->toString();
+}
+
+
 ostream& operator<<(ostream& stream, const CheckInfo::Type& type)
 {
   return stream << CheckInfo::Type_Name(type);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const CSIPluginContainerInfo::Service& service)
+{
+  return stream << CSIPluginContainerInfo::Service_Name(service);
 }
 
 
@@ -706,9 +865,19 @@ ostream& operator<<(ostream& stream, const Secret::Type& secretType)
 }
 
 
-ostream& operator<<(ostream& stream, const hashmap<string, string>& map)
+ostream& operator<<(
+    ostream& stream,
+    const Offer::Operation::Type& operationType)
 {
-  return stream << stringify(map);
+  return stream << Offer::Operation::Type_Name(operationType);
+}
+
+
+ostream& operator<<(
+    ostream& stream,
+    const Resource::DiskInfo::Source::Type& sourceType)
+{
+  return stream << Resource::DiskInfo::Source::Type_Name(sourceType);
 }
 
 } // namespace mesos {

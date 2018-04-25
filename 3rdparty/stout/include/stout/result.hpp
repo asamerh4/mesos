@@ -99,14 +99,17 @@ public:
   // We don't need to implement these because we are leveraging
   // Try<Option<T>>.
   Result(const Result<T>& that) = default;
+  Result(Result&& that) = default;
+
   ~Result() = default;
+
   Result<T>& operator=(const Result<T>& that) = default;
   Result<T>& operator=(Result<T>&& that) = default;
 
   // 'isSome', 'isNone', and 'isError' are mutually exclusive. They
   // correspond to the underlying unioned state of the Option and Try.
-  bool isSome() const { return data.isSome() && data.get().isSome(); }
-  bool isNone() const { return data.isSome() && data.get().isNone(); }
+  bool isSome() const { return data.isSome() && data->isSome(); }
+  bool isNone() const { return data.isSome() && data->isNone(); }
   bool isError() const { return data.isError(); }
 
   const T& get() const
@@ -120,7 +123,7 @@ public:
       }
       ABORT(errorMessage);
     }
-    return data.get().get();
+    return data->get();
   }
 
   T& get()

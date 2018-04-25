@@ -18,6 +18,7 @@
 #include <string>
 
 #include <stout/gtest.hpp>
+#include <stout/path.hpp>
 
 #include <process/future.hpp>
 #include <process/gtest.hpp>
@@ -25,18 +26,25 @@
 #include "tests/environment.hpp"
 #include "tests/mesos.hpp"
 
+#include "slave/containerizer/mesos/containerizer.hpp"
+
+#ifdef __linux__
+#include "tests/containerizer/docker_archive.hpp"
+#endif
+
+using std::map;
+using std::string;
+
 using process::Future;
 using process::Owned;
 
+using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::MesosContainerizer;
 
 using mesos::internal::slave::state::SlaveState;
 
 using mesos::slave::ContainerTermination;
-
-using std::map;
-using std::string;
 
 namespace mesos {
 namespace internal {
@@ -45,11 +53,69 @@ namespace tests {
 class VolumeSandboxPathIsolatorTest : public MesosTest {};
 
 
+#ifdef __linux__
+// This test verifies that a SANDBOX_PATH volume with SELF type is
+// properly created in the container's sandbox and is properly mounted
+// in the container's mount namespace.
+TEST_F(VolumeSandboxPathIsolatorTest, ROOT_SelfType)
+{
+  string registry = path::join(sandbox.get(), "registry");
+  AWAIT_READY(DockerArchive::create(registry, "test_image"));
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "filesystem/linux,volume/sandbox_path,docker/runtime";
+  flags.docker_registry = registry;
+  flags.docker_store_dir = path::join(sandbox.get(), "store");
+  flags.image_providers = "docker";
+
+  Fetcher fetcher(flags);
+
+  Try<MesosContainerizer*> create =
+    MesosContainerizer::create(flags, true, &fetcher);
+
+  ASSERT_SOME(create);
+
+  Owned<MesosContainerizer> containerizer(create.get());
+
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  ExecutorInfo executor = createExecutorInfo(
+      "test_executor",
+      "echo abc > /tmp/file");
+
+  executor.mutable_container()->CopyFrom(createContainerInfo(
+      "test_image",
+      {createVolumeSandboxPath("/tmp", "tmp", Volume::RW)}));
+
+  string directory = path::join(flags.work_dir, "sandbox");
+  ASSERT_SOME(os::mkdir(directory));
+
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
+      containerId,
+      createContainerConfig(None(), executor, directory),
+      map<string, string>(),
+      None());
+
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
+
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait->get().has_status());
+  EXPECT_WEXITSTATUS_EQ(0, wait->get().status());
+
+  EXPECT_SOME_EQ("abc\n", os::read(path::join(directory, "tmp", "file")));
+}
+#endif // __linux__
+
+
 // This test verifies that sandbox path volume allows two containers
 // nested under the same parent container to share data.
 // TODO(jieyu): Parameterize this test to test both linux and posix
 // launcher and filesystem isolator.
-TEST_F(VolumeSandboxPathIsolatorTest, SharedVolume)
+TEST_F(VolumeSandboxPathIsolatorTest, SharedParentTypeVolume)
 {
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = "volume/sandbox_path";
@@ -71,24 +137,24 @@ TEST_F(VolumeSandboxPathIsolatorTest, SharedVolume)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ExecutorInfo executor = createExecutorInfo("executor", "sleep 99", "cpus:1");
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executor, directory.get()),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   ContainerID nestedContainerId1;
   nestedContainerId1.mutable_parent()->CopyFrom(containerId);
-  nestedContainerId1.set_value(UUID::random().toString());
+  nestedContainerId1.set_value(id::UUID::random().toString());
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::MESOS);
@@ -112,11 +178,11 @@ TEST_F(VolumeSandboxPathIsolatorTest, SharedVolume)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   ContainerID nestedContainerId2;
   nestedContainerId2.mutable_parent()->CopyFrom(containerId);
-  nestedContainerId2.set_value(UUID::random().toString());
+  nestedContainerId2.set_value(id::UUID::random().toString());
 
   launch = containerizer->launch(
       nestedContainerId2,
@@ -127,7 +193,7 @@ TEST_F(VolumeSandboxPathIsolatorTest, SharedVolume)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait =
     containerizer->wait(nestedContainerId2);
@@ -148,11 +214,74 @@ TEST_F(VolumeSandboxPathIsolatorTest, SharedVolume)
 }
 
 
+#ifdef __linux__
+// This is a regression test for MESOS-5187. It is a ROOT test to
+// simulate the scenario that the framework user is non-root while
+// the agent process is root, to make sure that non-root user can
+// still have the permission to write to the volume as expected.
+TEST_F(VolumeSandboxPathIsolatorTest, ROOT_SelfTypeOwnership)
+{
+  string registry = path::join(sandbox.get(), "registry");
+  AWAIT_READY(DockerArchive::create(registry, "test_image"));
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "filesystem/linux,volume/sandbox_path,docker/runtime";
+  flags.docker_registry = registry;
+  flags.docker_store_dir = path::join(sandbox.get(), "store");
+  flags.image_providers = "docker";
+
+  Fetcher fetcher(flags);
+
+  Try<MesosContainerizer*> create =
+    MesosContainerizer::create(flags, true, &fetcher);
+
+  ASSERT_SOME(create);
+
+  Owned<MesosContainerizer> containerizer(create.get());
+
+  ContainerID containerId;
+  containerId.set_value(id::UUID::random().toString());
+
+  ExecutorInfo executor = createExecutorInfo(
+      "test_executor",
+      "echo abc > /tmp/file");
+
+  executor.mutable_container()->CopyFrom(createContainerInfo(
+      "test_image",
+      {createVolumeSandboxPath("/tmp", "tmp", Volume::RW)}));
+
+  string directory = path::join(flags.work_dir, "sandbox");
+  ASSERT_SOME(os::mkdir(directory));
+
+  // Simulate the executor sandbox ownership as the user
+  // from FrameworkInfo.
+  ASSERT_SOME(os::chown("nobody", directory));
+
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
+      containerId,
+      createContainerConfig(None(), executor, directory, "nobody"),
+      map<string, string>(),
+      None());
+
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
+
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait->get().has_status());
+  EXPECT_WEXITSTATUS_EQ(0, wait->get().status());
+
+  EXPECT_SOME_EQ("abc\n", os::read(path::join(directory, "tmp", "file")));
+}
+#endif // __linux__
+
+
 // This is a regression test for MESOS-7830. It is a ROOT test to
 // simulate the scenario that the framework user is non-root while
 // the agent process is root, to make sure that non-root user can
 // still have the permission to write to the volume as expected.
-TEST_F(VolumeSandboxPathIsolatorTest, ROOT_SandboxPathVolumeOwnership)
+TEST_F(VolumeSandboxPathIsolatorTest, ROOT_ParentTypeOwnership)
 {
   slave::Flags flags = CreateSlaveFlags();
   flags.isolation = "volume/sandbox_path";
@@ -174,7 +303,7 @@ TEST_F(VolumeSandboxPathIsolatorTest, ROOT_SandboxPathVolumeOwnership)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ExecutorInfo executor = createExecutorInfo("executor", "sleep 99", "cpus:1");
 
@@ -185,17 +314,17 @@ TEST_F(VolumeSandboxPathIsolatorTest, ROOT_SandboxPathVolumeOwnership)
   // from FrameworkInfo.
   ASSERT_SOME(os::chown("nobody", directory.get()));
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executor, directory.get(), "nobody"),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   ContainerID nestedContainerId;
   nestedContainerId.mutable_parent()->CopyFrom(containerId);
-  nestedContainerId.set_value(UUID::random().toString());
+  nestedContainerId.set_value(id::UUID::random().toString());
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::MESOS);
@@ -221,7 +350,7 @@ TEST_F(VolumeSandboxPathIsolatorTest, ROOT_SandboxPathVolumeOwnership)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait =
     containerizer->wait(nestedContainerId);

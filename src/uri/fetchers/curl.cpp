@@ -54,6 +54,16 @@ using process::Subprocess;
 namespace mesos {
 namespace uri {
 
+CurlFetcherPlugin::Flags::Flags()
+{
+  add(&Flags::curl_stall_timeout,
+      "curl_stall_timeout",
+      "Amount of time for the fetcher to wait before considering a download\n"
+      "being too slow and abort it when the download stalls (i.e., the speed\n"
+      "keeps below one byte per second).\n");
+}
+
+
 const char CurlFetcherPlugin::NAME[] = "curl";
 
 
@@ -61,7 +71,7 @@ Try<Owned<Fetcher::Plugin>> CurlFetcherPlugin::create(const Flags& flags)
 {
   // TODO(jieyu): Make sure curl is available.
 
-  return Owned<Fetcher::Plugin>(new CurlFetcherPlugin());
+  return Owned<Fetcher::Plugin>(new CurlFetcherPlugin(flags));
 }
 
 
@@ -96,10 +106,16 @@ Future<Nothing> CurlFetcherPlugin::fetch(
   }
 
   // TODO(jieyu): Allow user to specify the name of the output file.
-  const string output = path::join(directory, Path(uri.path()).basename());
+  const string output =
+    path::join(directory, Path(path::from_uri(uri.path())).basename());
+#ifndef __WINDOWS__
+  const string curl = "curl";
+#else
+  const string curl = "curl.exe";
+#endif // __WINDOWS__
 
-  const vector<string> argv = {
-    "curl",
+  vector<string> argv = {
+    curl,
     "-s",                 // Don't show progress meter or error messages.
     "-S",                 // Makes curl show an error message if it fails.
     "-L",                 // Follow HTTP 3xx redirects.
@@ -108,8 +124,17 @@ Future<Nothing> CurlFetcherPlugin::fetch(
     strings::trim(stringify(uri))
   };
 
+  // Add a timeout for curl to abort when the download speed keeps low
+  // (1 byte per second by default) for the specified duration. See:
+  // https://curl.haxx.se/docs/manpage.html#-y
+  if (flags.curl_stall_timeout.isSome()) {
+    argv.push_back("-y");
+    argv.push_back(
+        std::to_string(static_cast<long>(flags.curl_stall_timeout->secs())));
+  }
+
   Try<Subprocess> s = subprocess(
-      "curl",
+      curl,
       argv,
       Subprocess::PATH(os::DEV_NULL),
       Subprocess::PIPE(),
@@ -120,9 +145,9 @@ Future<Nothing> CurlFetcherPlugin::fetch(
   }
 
   return await(
-      s.get().status(),
-      io::read(s.get().out().get()),
-      io::read(s.get().err().get()))
+      s->status(),
+      io::read(s->out().get()),
+      io::read(s->err().get()))
     .then([](const tuple<
         Future<Option<int>>,
         Future<string>,

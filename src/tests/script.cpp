@@ -26,6 +26,9 @@
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
+#include <stout/uri.hpp>
+
+#include <stout/os/realpath.hpp>
 
 #include <stout/os/constants.hpp>
 
@@ -119,9 +122,6 @@ void execute(const string& script)
     // Enable replicated log based registry.
     os::setenv("MESOS_REGISTRY", "replicated_log");
 
-    // Enable authentication.
-    os::setenv("MESOS_AUTHENTICATE_FRAMEWORKS", "true");
-
     // Create test credentials.
     const string& credentials =
       DEFAULT_CREDENTIAL.principal() + " " + DEFAULT_CREDENTIAL.secret();
@@ -132,16 +132,17 @@ void execute(const string& script)
     CHECK_SOME(os::write(credentialsPath, credentials))
       << "Failed to write credentials to '" << credentialsPath << "'";
 
-    os::setenv("MESOS_CREDENTIALS", "file://" + credentialsPath);
+    os::setenv("MESOS_CREDENTIALS", uri::from_path(credentialsPath));
+
+    // Enable framework authentication on the master.
+    os::setenv("MESOS_AUTHENTICATE_FRAMEWORKS", "true");
+
+    // Enable authentication on the test framework.
+    os::setenv("MESOS_EXAMPLE_AUTHENTICATE", "true");
 
     // We set test credentials here for example frameworks to use.
-    os::setenv("DEFAULT_PRINCIPAL", DEFAULT_CREDENTIAL.principal());
-    os::setenv("DEFAULT_SECRET", DEFAULT_CREDENTIAL.secret());
-
-    // TODO(bmahler): Update the example frameworks to use flags and
-    // remove the special DEFAULT_* environment variables above.
-    os::setenv("MESOS_PRINCIPAL", DEFAULT_CREDENTIAL.principal());
-    os::setenv("MESOS_SECRET", DEFAULT_CREDENTIAL.secret());
+    os::setenv("MESOS_EXAMPLE_PRINCIPAL", DEFAULT_CREDENTIAL.principal());
+    os::setenv("MESOS_EXAMPLE_SECRET", DEFAULT_CREDENTIAL.secret());
 
     // Create test ACLs.
     ACLs acls;
@@ -171,7 +172,7 @@ void execute(const string& script)
     CHECK_SOME(os::write(aclsPath, stringify(JSON::protobuf(acls))))
       << "Failed to write ACLs to '" << aclsPath << "'";
 
-    os::setenv("MESOS_ACLS", "file://" + aclsPath);
+    os::setenv("MESOS_ACLS", uri::from_path(aclsPath));
 
     // Now execute the script.
     execl(path->c_str(), path->c_str(), (char*) nullptr);

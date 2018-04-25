@@ -48,7 +48,7 @@ public:
 
   MOCK_METHOD4(
       launch,
-      process::Future<bool>(
+      process::Future<slave::Containerizer::LaunchResult>(
           const ContainerID&,
           const mesos::slave::ContainerConfig&,
           const std::map<std::string, std::string>&,
@@ -76,11 +76,17 @@ public:
 
   MOCK_METHOD1(
       destroy,
-      process::Future<bool>(const ContainerID&));
+      process::Future<Option<mesos::slave::ContainerTermination>>(
+          const ContainerID&));
 
   MOCK_METHOD0(
       containers,
       process::Future<hashset<ContainerID>>());
+
+  MOCK_METHOD1(
+      pruneImages,
+      process::Future<Nothing>(
+          const std::vector<Image>&));
 };
 
 } // namespace tests {

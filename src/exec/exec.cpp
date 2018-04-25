@@ -149,7 +149,7 @@ public:
       frameworkId(_frameworkId),
       executorId(_executorId),
       connected(false),
-      connection(UUID::random()),
+      connection(id::UUID::random()),
       local(_local),
       aborted(false),
       mutex(_mutex),
@@ -209,8 +209,7 @@ public:
 protected:
   virtual void initialize()
   {
-    VLOG(1) << "Executor started at: " << self()
-            << " with pid " << getpid();
+    VLOG(1) << "Executor started at: " << self() << " with pid " << getpid();
 
     link(slave);
 
@@ -237,7 +236,7 @@ protected:
     LOG(INFO) << "Executor registered on agent " << slaveId;
 
     connected = true;
-    connection = UUID::random();
+    connection = id::UUID::random();
 
     Stopwatch stopwatch;
     if (FLAGS_v >= 1) {
@@ -252,15 +251,15 @@ protected:
   void reregistered(const SlaveID& slaveId, const SlaveInfo& slaveInfo)
   {
     if (aborted.load()) {
-      VLOG(1) << "Ignoring re-registered message from agent " << slaveId
+      VLOG(1) << "Ignoring reregistered message from agent " << slaveId
               << " because the driver is aborted!";
       return;
     }
 
-    LOG(INFO) << "Executor re-registered on agent " << slaveId;
+    LOG(INFO) << "Executor reregistered on agent " << slaveId;
 
     connected = true;
-    connection = UUID::random();
+    connection = id::UUID::random();
 
     Stopwatch stopwatch;
     if (FLAGS_v >= 1) {
@@ -318,8 +317,8 @@ protected:
     }
 
     if (!connected) {
-      VLOG(1) << "Ignoring run task message for task " << task.task_id()
-              << " because the driver is disconnected!";
+      LOG(WARNING) << "Ignoring run task message for task " << task.task_id()
+                   << " because the driver is disconnected!";
       return;
     }
 
@@ -348,6 +347,17 @@ protected:
       return;
     }
 
+    // A kill task request is received when the driver is not connected. This
+    // can happen, for example, if `ExecutorRegisteredMessage` has not been
+    // delivered. We do not shutdown the driver because there might be other
+    // still running tasks and the executor might eventually reconnect, e.g.,
+    // after the agent failover. We do not drop ignore the message because the
+    // actual executor may still want to react, e.g., commit suicide.
+    if (!connected) {
+      LOG(WARNING) << "Executor received kill task message for task " << taskId
+                   << " while disconnected from the agent!";
+    }
+
     VLOG(1) << "Executor asked to kill task '" << taskId << "'";
 
     Stopwatch stopwatch;
@@ -366,7 +376,7 @@ protected:
       const TaskID& taskId,
       const string& uuid)
   {
-    Try<UUID> uuid_ = UUID::fromBytes(uuid);
+    Try<id::UUID> uuid_ = id::UUID::fromBytes(uuid);
     CHECK_SOME(uuid_);
 
     if (aborted.load()) {
@@ -378,10 +388,10 @@ protected:
     }
 
     if (!connected) {
-      VLOG(1) << "Ignoring status update acknowledgement "
-              << uuid_.get() << " for task " << taskId
-              << " of framework " << frameworkId
-              << " because the driver is disconnected!";
+      LOG(WARNING) << "Ignoring status update acknowledgement "
+                   << uuid_.get() << " for task " << taskId
+                   << " of framework " << frameworkId
+                   << " because the driver is disconnected!";
       return;
     }
 
@@ -408,8 +418,8 @@ protected:
     }
 
     if (!connected) {
-      VLOG(1) << "Ignoring framework message because "
-              << "the driver is disconnected!";
+      LOG(WARNING) << "Ignoring framework message because"
+                   << " the driver is disconnected!";
       return;
     }
 
@@ -475,7 +485,7 @@ protected:
     }
   }
 
-  void _recoveryTimeout(UUID _connection)
+  void _recoveryTimeout(id::UUID _connection)
   {
     // If we're connected, no need to shut down the driver!
     if (connected) {
@@ -560,7 +570,7 @@ protected:
     // We overwrite the UUID for this status update, however with
     // the HTTP API, the executor will have to generate a UUID
     // (which needs to be validated to be RFC-4122 compliant).
-    UUID uuid = UUID::random();
+    id::UUID uuid = id::UUID::random();
     update->set_uuid(uuid.toBytes());
     update->mutable_status()->set_uuid(uuid.toBytes());
 
@@ -596,7 +606,7 @@ private:
   FrameworkID frameworkId;
   ExecutorID executorId;
   bool connected; // Registered with the slave.
-  UUID connection; // UUID to identify the connection instance.
+  id::UUID connection; // UUID to identify the connection instance.
   bool local;
   std::atomic_bool aborted;
   std::recursive_mutex* mutex;
@@ -606,7 +616,7 @@ private:
   Duration recoveryTimeout;
   Duration shutdownGracePeriod;
 
-  LinkedHashMap<UUID, StatusUpdate> updates; // Unacknowledged updates.
+  LinkedHashMap<id::UUID, StatusUpdate> updates; // Unacknowledged updates.
 
   // We store tasks that have not been acknowledged
   // (via status updates) by the slave. This ensures that, during
@@ -649,7 +659,7 @@ MesosExecutorDriver::MesosExecutorDriver(mesos::Executor* _executor)
 
   // Initialize logging.
   if (flags.initialize_driver_logging) {
-    logging::initialize("mesos", flags);
+    logging::initialize("mesos", false, flags);
   } else {
     VLOG(1) << "Disabling initialization of GLOG logging";
   }

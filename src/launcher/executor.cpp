@@ -63,7 +63,13 @@
 #include <stout/os/kill.hpp>
 #include <stout/os/killtree.hpp>
 
+#ifdef __WINDOWS__
+#include <stout/os/windows/jobobject.hpp>
+#endif // __WINDOWS__
+
 #include "checks/checker.hpp"
+#include "checks/checks_runtime.hpp"
+#include "checks/checks_types.hpp"
 #include "checks/health_checker.hpp"
 
 #include "common/http.hpp"
@@ -135,7 +141,7 @@ public:
       killed(false),
       killedByHealthCheck(false),
       terminated(false),
-      pid(-1),
+      pid(None()),
       shutdownGracePeriod(_shutdownGracePeriod),
       frameworkInfo(None()),
       taskId(None()),
@@ -204,7 +210,8 @@ public:
       }
 
       case Event::ACKNOWLEDGED: {
-        const UUID uuid = UUID::fromBytes(event.acknowledged().uuid()).get();
+        const id::UUID uuid =
+          id::UUID::fromBytes(event.acknowledged().uuid()).get();
 
         if (!unacknowledgedUpdates.contains(uuid)) {
           LOG(WARNING) << "Received acknowledgement " << uuid
@@ -308,7 +315,7 @@ protected:
     CHECK_SOME(lastTaskStatus);
     TaskStatus status = protobuf::createTaskStatus(
         lastTaskStatus.get(),
-        UUID::random(),
+        id::UUID::random(),
         Clock::now().secs(),
         None(),
         None(),
@@ -342,7 +349,7 @@ protected:
     CHECK_SOME(lastTaskStatus);
     TaskStatus status = protobuf::createTaskStatus(
         lastTaskStatus.get(),
-        UUID::random(),
+        id::UUID::random(),
         Clock::now().secs(),
         None(),
         None(),
@@ -484,6 +491,11 @@ protected:
     vector<process::Subprocess::ParentHook> parentHooks;
 #ifdef __WINDOWS__
     parentHooks.emplace_back(Subprocess::ParentHook::CREATE_JOB());
+    // Setting the "kill on close" job object limit ties the lifetime of the
+    // task to that of the executor. This ensures that if the executor exits,
+    // its task exits too.
+    parentHooks.emplace_back(Subprocess::ParentHook(
+        [](pid_t pid) { return os::set_job_kill_on_close_limit(pid); }));
 #endif // __WINDOWS__
 
     Try<Subprocess> s = subprocess(
@@ -524,6 +536,10 @@ protected:
     CHECK(taskData.isNone());
     taskData = TaskData(task);
     taskId = task.task_id();
+
+    // Send initial TASK_STARTING update.
+    TaskStatus starting = createTaskStatus(taskId.get(), TASK_STARTING);
+    forward(starting);
 
     // Capture the kill policy.
     if (task.has_kill_policy()) {
@@ -643,7 +659,7 @@ protected:
         effectiveCapabilities,
         boundingCapabilities);
 
-    LOG(INFO) << "Forked command at " << pid;
+    LOG(INFO) << "Forked command at " << pid.get();
 
     if (task.has_check()) {
       vector<string> namespaces;
@@ -658,14 +674,14 @@ protected:
         namespaces.push_back("mnt");
       }
 
+      const checks::runtime::Plain plainRuntime{namespaces, pid.get()};
       Try<Owned<checks::Checker>> _checker =
         checks::Checker::create(
             task.check(),
             launcherDir,
             defer(self(), &Self::taskCheckUpdated, taskId.get(), lambda::_1),
             taskId.get(),
-            pid,
-            namespaces);
+            plainRuntime);
 
       if (_checker.isError()) {
         // TODO(alexr): Consider ABORT and return a TASK_FAILED here.
@@ -688,14 +704,14 @@ protected:
         namespaces.push_back("mnt");
       }
 
+      const checks::runtime::Plain plainRuntime{namespaces, pid.get()};
       Try<Owned<checks::HealthChecker>> _healthChecker =
         checks::HealthChecker::create(
             task.health_check(),
             launcherDir,
             defer(self(), &Self::taskHealthUpdated, lambda::_1),
             taskId.get(),
-            pid,
-            namespaces);
+            plainRuntime);
 
       if (_healthChecker.isError()) {
         // TODO(gilbert): Consider ABORT and return a TASK_FAILED here.
@@ -707,8 +723,8 @@ protected:
     }
 
     // Monitor this process.
-    process::reap(pid)
-      .onAny(defer(self(), &Self::reaped, pid, lambda::_1));
+    process::reap(pid.get())
+      .onAny(defer(self(), &Self::reaped, pid.get(), lambda::_1));
 
     TaskStatus status = createTaskStatus(taskId.get(), TASK_RUNNING);
 
@@ -760,6 +776,8 @@ protected:
     if (launched) {
       CHECK_SOME(taskId);
       kill(taskId.get(), gracePeriod);
+    } else {
+      terminate(self());
     }
   }
 
@@ -769,6 +787,12 @@ private:
     if (terminated) {
       return;
     }
+
+    // Terminate if a kill task request is received before the task is launched.
+    // This can happen, for example, if `RunTaskMessage` has not been delivered.
+    // See MESOS-8297.
+    CHECK(launched) << "Terminating because kill task message has been"
+                    << " received before the task has been launched";
 
     // If the task is being killed but has not terminated yet and
     // we receive another kill request. Check if we need to adjust
@@ -783,11 +807,6 @@ private:
       // order to avoid possible confusion when a subsequent kill overrides
       // the previous one and gives the task _more_ time to clean up. Other
       // systems, e.g., docker, do not allow this.
-      //
-      // The escalation grace period can be only decreased. We intentionally
-      // do not support increasing the total grace period for the terminating
-      // task, because we do not want users to "slow down" a kill that is in
-      // progress. Also note that docker does not support this currently.
       //
       // Here are some examples to illustrate:
       //
@@ -845,20 +864,20 @@ private:
       }
 
       // Now perform signal escalation to begin killing the task.
-      CHECK_GT(pid, 0);
+      CHECK_SOME(pid);
 
-      LOG(INFO) << "Sending SIGTERM to process tree at pid " << pid;
+      LOG(INFO) << "Sending SIGTERM to process tree at pid " << pid.get();
 
       Try<std::list<os::ProcessTree>> trees =
-        os::killtree(pid, SIGTERM, true, true);
+        os::killtree(pid.get(), SIGTERM, true, true);
 
       if (trees.isError()) {
-        LOG(ERROR) << "Failed to kill the process tree rooted at pid " << pid
-                   << ": " << trees.error();
+        LOG(ERROR) << "Failed to kill the process tree rooted at pid "
+                   << pid.get() << ": " << trees.error();
 
         // Send SIGTERM directly to process 'pid' as it may not have
         // received signal before os::killtree() failed.
-        os::kill(pid, SIGTERM);
+        os::kill(pid.get(), SIGTERM);
       } else {
         LOG(INFO) << "Sent SIGTERM to the following process trees:\n"
                   << stringify(trees.get());
@@ -875,7 +894,7 @@ private:
     }
   }
 
-  void reaped(pid_t pid, const Future<Option<int>>& status_)
+  void reaped(pid_t _pid, const Future<Option<int>>& status_)
   {
     terminated = true;
 
@@ -901,20 +920,20 @@ private:
       message =
         "Failed to get exit status for Command: " +
         (status_.isFailed() ? status_.failure() : "future discarded");
-    } else if (status_.get().isNone()) {
+    } else if (status_->isNone()) {
       taskState = TASK_FAILED;
       message = "Failed to get exit status for Command";
     } else {
-      int status = status_.get().get();
+      int status = status_->get();
       CHECK(WIFEXITED(status) || WIFSIGNALED(status))
         << "Unexpected wait status " << status;
 
-      if (WSUCCEEDED(status)) {
-        taskState = TASK_FINISHED;
-      } else if (killed) {
+      if (killed) {
         // Send TASK_KILLED if the task was killed as a result of
         // kill() or shutdown().
         taskState = TASK_KILLED;
+      } else if (WSUCCEEDED(status)) {
+        taskState = TASK_FINISHED;
       } else {
         taskState = TASK_FAILED;
       }
@@ -922,7 +941,7 @@ private:
       message = "Command " + WSTRINGIFY(status);
     }
 
-    LOG(INFO) << message << " (pid: " << pid << ")";
+    LOG(INFO) << message << " (pid: " << _pid << ")";
 
     CHECK_SOME(taskId);
 
@@ -961,24 +980,27 @@ private:
       return;
     }
 
-    LOG(INFO) << "Process " << pid << " did not terminate after " << timeout
-              << ", sending SIGKILL to process tree at " << pid;
+    CHECK_SOME(pid);
+
+    LOG(INFO) << "Process " << pid.get() << " did not terminate after "
+              << timeout << ", sending SIGKILL to process tree at "
+              << pid.get();
 
     // TODO(nnielsen): Sending SIGTERM in the first stage of the
     // shutdown may leave orphan processes hanging off init. This
     // scenario will be handled when PID namespace encapsulated
     // execution is in place.
     Try<std::list<os::ProcessTree>> trees =
-      os::killtree(pid, SIGKILL, true, true);
+      os::killtree(pid.get(), SIGKILL, true, true);
 
     if (trees.isError()) {
       LOG(ERROR) << "Failed to kill the process tree rooted at pid "
-                 << pid << ": " << trees.error();
+                 << pid.get() << ": " << trees.error();
 
       // Process 'pid' may not have received signal before
       // os::killtree() failed. To make sure process 'pid' is reaped
       // we send SIGKILL directly.
-      os::kill(pid, SIGKILL);
+      os::kill(pid.get(), SIGKILL);
     } else {
       LOG(INFO) << "Killed the following process trees:\n"
                 << stringify(trees.get());
@@ -996,7 +1018,7 @@ private:
     TaskStatus status = protobuf::createTaskStatus(
         _taskId,
         state,
-        UUID::random(),
+        id::UUID::random(),
         Clock::now().secs());
 
     status.mutable_executor_id()->CopyFrom(executorId);
@@ -1016,7 +1038,6 @@ private:
     // If a check for the task has been defined, `check_status` field in each
     // task status must be set to a valid `CheckStatusInfo` message even if
     // there is no check status available yet.
-    CHECK(taskData.isSome());
     if (taskData->taskInfo.has_check()) {
       CheckStatusInfo checkStatusInfo;
       checkStatusInfo.set_type(taskData->taskInfo.check().type());
@@ -1056,7 +1077,8 @@ private:
     call.mutable_update()->mutable_status()->CopyFrom(status);
 
     // Capture the status update.
-    unacknowledgedUpdates[UUID::fromBytes(status.uuid()).get()] = call.update();
+    unacknowledgedUpdates[id::UUID::fromBytes(status.uuid()).get()] =
+      call.update();
 
     // Overwrite the last task status.
     lastTaskStatus = status;
@@ -1113,7 +1135,7 @@ private:
   Option<Time> killGracePeriodStart;
   Option<Timer> killGracePeriodTimer;
 
-  pid_t pid;
+  Option<pid_t> pid;
   Duration shutdownGracePeriod;
   Option<KillPolicy> killPolicy;
   Option<FrameworkInfo> frameworkInfo;
@@ -1131,7 +1153,7 @@ private:
   const ExecutorID executorId;
   Owned<MesosBase> mesos;
 
-  LinkedHashMap<UUID, Call::Update> unacknowledgedUpdates;
+  LinkedHashMap<id::UUID, Call::Update> unacknowledgedUpdates;
 
   Option<TaskStatus> lastTaskStatus;
 
@@ -1209,11 +1231,10 @@ public:
 
 int main(int argc, char** argv)
 {
-  Flags flags;
   mesos::FrameworkID frameworkId;
   mesos::ExecutorID executorId;
 
-  process::initialize();
+  Flags flags;
 
   // Load flags from command line.
   Try<flags::Warnings> load = flags.load(None(), &argc, &argv);
@@ -1228,7 +1249,7 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
-  mesos::internal::logging::initialize(argv[0], flags, true); // Catch signals.
+  mesos::internal::logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -1267,6 +1288,8 @@ int main(int argc, char** argv)
 
     shutdownGracePeriod = parse.get();
   }
+
+  process::initialize();
 
   Owned<mesos::internal::CommandExecutor> executor(
       new mesos::internal::CommandExecutor(

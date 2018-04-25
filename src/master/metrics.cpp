@@ -129,10 +129,14 @@ Metrics::Metrics(const Master& master)
         "master/messages_revive_offers"),
     messages_suppress_offers(
         "master/messages_suppress_offers"),
+    messages_reconcile_operations(
+        "master/messages_reconcile_operations"),
     messages_reconcile_tasks(
         "master/messages_reconcile_tasks"),
     messages_framework_to_executor(
         "master/messages_framework_to_executor"),
+    messages_operation_status_update_acknowledgement(
+        "master/messages_operation_status_update_acknowledgement"),
     messages_executor_to_framework(
         "master/messages_executor_to_framework"),
     messages_register_slave(
@@ -165,6 +169,10 @@ Metrics::Metrics(const Master& master)
         "master/valid_status_update_acknowledgements"),
     invalid_status_update_acknowledgements(
         "master/invalid_status_update_acknowledgements"),
+    valid_operation_status_update_acknowledgements(
+        "master/valid_operation_status_update_acknowledgements"),
+    invalid_operation_status_update_acknowledgements(
+        "master/invalid_operation_status_update_acknowledgements"),
     recovery_slave_removals(
         "master/recovery_slave_removals"),
     event_queue_messages(
@@ -241,11 +249,13 @@ Metrics::Metrics(const Master& master)
   process::metrics::add(messages_deactivate_framework);
   process::metrics::add(messages_kill_task);
   process::metrics::add(messages_status_update_acknowledgement);
+  process::metrics::add(messages_operation_status_update_acknowledgement);
   process::metrics::add(messages_resource_request);
   process::metrics::add(messages_launch_tasks);
   process::metrics::add(messages_decline_offers);
   process::metrics::add(messages_revive_offers);
   process::metrics::add(messages_suppress_offers);
+  process::metrics::add(messages_reconcile_operations);
   process::metrics::add(messages_reconcile_tasks);
   process::metrics::add(messages_framework_to_executor);
   process::metrics::add(messages_executor_to_framework);
@@ -272,6 +282,9 @@ Metrics::Metrics(const Master& master)
 
   process::metrics::add(valid_status_update_acknowledgements);
   process::metrics::add(invalid_status_update_acknowledgements);
+
+  process::metrics::add(valid_operation_status_update_acknowledgements);
+  process::metrics::add(invalid_operation_status_update_acknowledgements);
 
   process::metrics::add(recovery_slave_removals);
 
@@ -387,11 +400,13 @@ Metrics::~Metrics()
   process::metrics::remove(messages_deactivate_framework);
   process::metrics::remove(messages_kill_task);
   process::metrics::remove(messages_status_update_acknowledgement);
+  process::metrics::remove(messages_operation_status_update_acknowledgement);
   process::metrics::remove(messages_resource_request);
   process::metrics::remove(messages_launch_tasks);
   process::metrics::remove(messages_decline_offers);
   process::metrics::remove(messages_revive_offers);
   process::metrics::remove(messages_suppress_offers);
+  process::metrics::remove(messages_reconcile_operations);
   process::metrics::remove(messages_reconcile_tasks);
   process::metrics::remove(messages_framework_to_executor);
   process::metrics::remove(messages_executor_to_framework);
@@ -418,6 +433,9 @@ Metrics::~Metrics()
 
   process::metrics::remove(valid_status_update_acknowledgements);
   process::metrics::remove(invalid_status_update_acknowledgements);
+
+  process::metrics::remove(valid_operation_status_update_acknowledgements);
+  process::metrics::remove(invalid_operation_status_update_acknowledgements);
 
   process::metrics::remove(recovery_slave_removals);
 
@@ -478,6 +496,24 @@ Metrics::~Metrics()
     }
   }
   tasks_states.clear();
+}
+
+
+void Metrics::incrementInvalidSchedulerCalls(const scheduler::Call& call) {
+  if (call.type() == scheduler::Call::ACKNOWLEDGE) {
+    invalid_status_update_acknowledgements++;
+  }
+
+  if (call.type() == scheduler::Call::ACKNOWLEDGE_OPERATION_STATUS) {
+    invalid_operation_status_update_acknowledgements++;
+  }
+
+  if (call.type() == scheduler::Call::MESSAGE) {
+    invalid_framework_to_executor_messages++;
+  }
+
+  // TODO(gkleiman): Increment other metrics when we add counters for all
+  // the different types of scheduler calls. See MESOS-8533.
 }
 
 

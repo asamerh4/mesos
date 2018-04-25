@@ -734,8 +734,7 @@ TEST_F(MasterMaintenanceTest, BringDownMachines)
 
   {
     // Default principal 2 is not allowed to start maintenance in any machine.
-    mesos::ACL::StartMaintenance* acl =
-      flags.acls.get().add_start_maintenances();
+    mesos::ACL::StartMaintenance* acl = flags.acls->add_start_maintenances();
     acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
     acl->mutable_machines()->set_type(mesos::ACL::Entity::NONE);
   }
@@ -852,8 +851,7 @@ TEST_F(MasterMaintenanceTest, BringUpMachines)
 
   {
     // Default principal 2 is not allowed to stop maintenance in any machine.
-    mesos::ACL::StopMaintenance* acl =
-      flags.acls.get().add_stop_maintenances();
+    mesos::ACL::StopMaintenance* acl = flags.acls->add_stop_maintenances();
     acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
     acl->mutable_machines()->set_type(mesos::ACL::Entity::NONE);
   }
@@ -995,7 +993,7 @@ TEST_F(MasterMaintenanceTest, MachineStatus)
   {
     // Default principal 2 is not allowed to view any maintenance status.
     mesos::ACL::GetMaintenanceStatus* acl =
-      flags.acls.get().add_get_maintenance_statuses();
+      flags.acls->add_get_maintenance_statuses();
     acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
     acl->mutable_machines()->set_type(mesos::ACL::Entity::NONE);
   }
@@ -1223,7 +1221,7 @@ TEST_F(MasterMaintenanceTest, InverseOffers)
 
   // Ensure we receive some regular resource offers.
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->offers().empty());
+  ASSERT_FALSE(offers->offers().empty());
 
   // All the offers should have unavailability.
   foreach (const v1::Offer& offer, offers->offers()) {

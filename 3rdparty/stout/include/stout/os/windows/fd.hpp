@@ -13,9 +13,6 @@
 #ifndef __STOUT_OS_WINDOWS_FD_HPP__
 #define __STOUT_OS_WINDOWS_FD_HPP__
 
-#include <windows.h>
-#include <WinSock2.h>
-
 #include <array>
 #include <memory>
 #include <ostream>
@@ -24,6 +21,7 @@
 #include <stout/nothing.hpp>
 #include <stout/try.hpp>
 #include <stout/unreachable.hpp>
+#include <stout/windows.hpp> // For `WinSock2.h`.
 
 namespace os {
 
@@ -83,6 +81,11 @@ public:
 
   WindowsFD(SOCKET socket) : type_(FD_SOCKET), socket_(socket) {}
 
+  // On Windows, libevent's `evutil_socket_t` is set to `intptr_t`.
+  WindowsFD(intptr_t socket)
+    : type_(FD_SOCKET),
+      socket_(static_cast<SOCKET>(socket)) {}
+
   WindowsFD(const WindowsFD&) = default;
   WindowsFD(WindowsFD&&) = default;
 
@@ -109,7 +112,6 @@ public:
     return socket_;
   }
 
-  // On Windows, libevent's `evutil_socket_t` is set to `intptr_t`.
   operator intptr_t() const
   {
     CHECK_EQ(FD_SOCKET, type());

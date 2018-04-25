@@ -51,6 +51,13 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
+// If the container class is not of type `DEBUG` (i.e., it is not set or
+// `DEFAULT`), we log the line at the INFO level. Otherwise, we use VLOG(1).
+// The purpose of this macro is to avoid polluting agent logs with information
+// related to `DEBUG` containers as this type of container can run periodically.
+#define LOG_BASED_ON_CLASS(containerClass) \
+  LOG_IF(INFO, (containerClass != ContainerClass::DEBUG) || VLOG_IS_ON(1))
+
 // Forward declaration.
 class MesosContainerizerProcess;
 
@@ -78,7 +85,7 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
 
-  virtual process::Future<bool> launch(
+  virtual process::Future<Containerizer::LaunchResult> launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -100,7 +107,7 @@ public:
   virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual process::Future<bool> destroy(
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> destroy(
       const ContainerID& containerId);
 
   virtual process::Future<bool> kill(
@@ -110,6 +117,9 @@ public:
   virtual process::Future<hashset<ContainerID>> containers();
 
   virtual process::Future<Nothing> remove(const ContainerID& containerId);
+
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& excludedImages);
 
 private:
   explicit MesosContainerizer(
@@ -143,7 +153,7 @@ public:
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
 
-  virtual process::Future<bool> launch(
+  virtual process::Future<Containerizer::LaunchResult> launch(
       const ContainerID& containerId,
       const mesos::slave::ContainerConfig& containerConfig,
       const std::map<std::string, std::string>& environment,
@@ -165,12 +175,13 @@ public:
   virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual process::Future<bool> exec(
+  virtual process::Future<Containerizer::LaunchResult> exec(
       const ContainerID& containerId,
       int_fd pipeWrite);
 
-  virtual process::Future<bool> destroy(
-      const ContainerID& containerId);
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> destroy(
+      const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination);
 
   virtual process::Future<bool> kill(
       const ContainerID& containerId,
@@ -179,6 +190,9 @@ public:
   virtual process::Future<Nothing> remove(const ContainerID& containerId);
 
   virtual process::Future<hashset<ContainerID>> containers();
+
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& excludedImages);
 
 private:
   enum State
@@ -216,43 +230,52 @@ private:
   process::Future<Nothing> fetch(
       const ContainerID& containerId);
 
-  process::Future<bool> _launch(
+  process::Future<Containerizer::LaunchResult> _launch(
       const ContainerID& containerId,
       const Option<mesos::slave::ContainerIO>& containerIO,
       const std::map<std::string, std::string>& environment,
       const Option<std::string>& pidCheckpointPath);
 
-  process::Future<bool> isolate(
+  process::Future<Nothing> isolate(
       const ContainerID& containerId,
       pid_t _pid);
 
   // Continues 'destroy()' once nested containers are handled.
   void _destroy(
       const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination,
       const State& previousState,
-      const std::list<process::Future<bool>>& destroys);
+      const std::list<
+        process::Future<Option<mesos::slave::ContainerTermination>>>& destroys);
 
   // Continues '_destroy()' once isolators has completed.
-  void __destroy(const ContainerID& containerId);
+  void __destroy(
+      const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination);
 
   // Continues '__destroy()' once all processes have been killed
   // by the launcher.
   void ___destroy(
       const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination,
       const process::Future<Nothing>& future);
 
   // Continues '___destroy()' once we get the exit status of the container.
-  void ____destroy(const ContainerID& containerId);
+  void ____destroy(
+      const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination);
 
   // Continues '____destroy()' once all isolators have completed
   // cleanup.
   void _____destroy(
       const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination,
       const process::Future<std::list<process::Future<Nothing>>>& cleanups);
 
   // Continues '_____destroy()' once provisioner have completed destroy.
   void ______destroy(
       const ContainerID& containerId,
+      const Option<mesos::slave::ContainerTermination>& termination,
       const process::Future<bool>& destroy);
 
   // Call back for when an isolator limits a container and impacts the
@@ -329,17 +352,20 @@ private:
     // calling cleanup after all isolators have finished isolating.
     process::Future<std::list<Nothing>> isolation;
 
-    // We keep track of any limitations received from each isolator so
-    // we can determine the cause of a container termination.
-    std::vector<mesos::slave::ContainerLimitation> limitations;
-
     // We keep track of the resources for each container so we can set
     // the ResourceStatistics limits in usage().
     Resources resources;
 
-    // The configuration for the container to be launched. This field
-    // is only used during the launch of a container.
-    mesos::slave::ContainerConfig config;
+    // The configuration for the container to be launched.
+    // This can only be None if the underlying container is launched
+    // before we checkpoint `ContainerConfig` in MESOS-6894.
+    // TODO(zhitao): Drop the `Option` part at the end of deprecation
+    // cycle.
+    Option<mesos::slave::ContainerConfig> config;
+
+    // The container class that can be `DEFAULT` or `DEBUG`.
+    // Returns `DEFAULT` even if the container class is not defined.
+    mesos::slave::ContainerClass containerClass();
 
     // Container's information at the moment it was launched. For example,
     // used to bootstrap the launch information of future child DEBUG
@@ -367,6 +393,12 @@ private:
 
   // Helper to transition container state.
   void transition(const ContainerID& containerId, const State& state);
+
+  // Helper to determine if a container is supported by an isolator.
+  bool isSupportedByIsolator(
+      const ContainerID& containerId,
+      bool isolatorSupportsNesting,
+      bool isolatorSupportsStandalone);
 
   struct Metrics
   {

@@ -48,6 +48,8 @@
 #include "tests/mesos.hpp"
 #include "tests/resources_utils.hpp"
 
+#include "master/validation.hpp"
+
 #include "master/detector/standalone.hpp"
 
 using namespace mesos::internal::master::validation;
@@ -255,6 +257,69 @@ TEST_F(ResourceValidationTest, SharedPersistentVolume)
   Option<Error> error = resource::validate(CreateResources(volume));
 
   EXPECT_NONE(error);
+}
+
+
+TEST_F(ResourceValidationTest, SingleResourceProvider)
+{
+  Resource r1 = Resources::parse("disk", "128", "*").get();
+  r1.mutable_provider_id()->set_value("provider1");
+
+  Resource r2 = Resources::parse("cpu", "4", "*").get();
+  r2.mutable_provider_id()->set_value("provider2");
+
+  Resource r3 = Resources::parse("mem", "256", "*").get();
+  r3.mutable_provider_id()->set_value("provider2");
+
+  Resource r4 = Resources::parse("disk", "64", "*").get();
+
+  {
+    Resources resources = r1;
+
+    EXPECT_NONE(resource::internal::validateSingleResourceProvider(resources));
+  }
+
+  {
+    Resources resources = r4;
+
+    EXPECT_NONE(resource::internal::validateSingleResourceProvider(resources));
+  }
+
+  {
+    Resources resources;
+    resources += r2;
+    resources += r3;
+
+    EXPECT_NONE(resource::internal::validateSingleResourceProvider(resources));
+  }
+
+  {
+    Resources resources;
+    resources += r1;
+    resources += r2;
+
+    Option<Error> error =
+      resource::internal::validateSingleResourceProvider(resources);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "The resources have multiple resource providers"));
+  }
+
+  {
+    Resources resources;
+    resources += r1;
+    resources += r4;
+
+    Option<Error> error =
+      resource::internal::validateSingleResourceProvider(resources);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Some resources have a resource provider and some do not"));
+  }
 }
 
 
@@ -643,6 +708,74 @@ TEST_F(ReserveOperationValidationTest, AgentHierarchicalRoleCapability)
 }
 
 
+// This test verifies that validation fails if resources from multiple
+// resource providers are used.
+TEST_F(ReserveOperationValidationTest, MultipleResourceProviders)
+{
+  protobuf::slave::Capabilities capabilities;
+
+  FrameworkInfo frameworkInfo;
+  frameworkInfo.set_role("role");
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::RESERVATION_REFINEMENT);
+
+  Resource resource1 = Resources::parse("cpus", "8", "*").get();
+  resource1.add_reservations()->CopyFrom(
+      createDynamicReservationInfo("role", "principal"));
+
+  Resource resource2 = Resources::parse("disk", "10", "*").get();
+  resource2.mutable_provider_id()->set_value("provider1");
+  resource2.add_reservations()->CopyFrom(
+      createDynamicReservationInfo("role", "principal"));
+
+  Resource resource3 = Resources::parse("disk", "10", "*").get();
+  resource3.mutable_provider_id()->set_value("provider2");
+  resource3.add_reservations()->CopyFrom(
+      createDynamicReservationInfo("role", "principal"));
+
+  {
+    Offer::Operation::Reserve reserve;
+    reserve.mutable_resources()->CopyFrom(
+        allocatedResources(Resources(resource1) + resource2, "role"));
+
+    Option<Error> error =
+      operation::validate(reserve, "principal", capabilities, frameworkInfo);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: Some resources have a resource provider "
+        "and some do not"));
+  }
+
+  {
+    Offer::Operation::Reserve reserve;
+    reserve.mutable_resources()->CopyFrom(
+        allocatedResources(Resources(resource2) + resource3, "role"));
+
+    Option<Error> error =
+      operation::validate(reserve, "principal", capabilities, frameworkInfo);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: The resources have multiple resource providers: "
+        "provider2, provider1"));
+  }
+
+  {
+    Offer::Operation::Reserve reserve;
+    reserve.mutable_resources()->CopyFrom(
+        allocatedResources(resource2, "role"));
+
+    Option<Error> error =
+      operation::validate(reserve, "principal", capabilities, frameworkInfo);
+
+    EXPECT_NONE(error) << error->message;
+  }
+}
+
+
 class UnreserveOperationValidationTest : public MesosTest {};
 
 
@@ -713,6 +846,63 @@ TEST_F(UnreserveOperationValidationTest, NoPersistentVolumes)
   Option<Error> error = operation::validate(unreserve);
 
   EXPECT_SOME(error);
+}
+
+
+// This test verifies that validation fails if resources from multiple
+// resource providers are used.
+TEST_F(UnreserveOperationValidationTest, MultipleResourceProviders)
+{
+  Resource resource1 = Resources::parse("cpus", "8", "*").get();
+  resource1.add_reservations()->CopyFrom(
+      createDynamicReservationInfo("role", "principal"));
+
+  Resource resource2 = Resources::parse("disk", "10", "*").get();
+  resource2.mutable_provider_id()->set_value("provider1");
+  resource2.add_reservations()->CopyFrom(
+      createDynamicReservationInfo("role", "principal"));
+
+  Resource resource3 = Resources::parse("disk", "10", "*").get();
+  resource3.mutable_provider_id()->set_value("provider2");
+  resource3.add_reservations()->CopyFrom(
+      createDynamicReservationInfo("role", "principal"));
+
+  {
+    Offer::Operation::Unreserve unreserve;
+    unreserve.add_resources()->CopyFrom(resource1);
+    unreserve.add_resources()->CopyFrom(resource2);
+
+    Option<Error> error = operation::validate(unreserve);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: Some resources have a resource provider "
+        "and some do not"));
+  }
+
+  {
+    Offer::Operation::Unreserve unreserve;
+    unreserve.add_resources()->CopyFrom(resource2);
+    unreserve.add_resources()->CopyFrom(resource3);
+
+    Option<Error> error = operation::validate(unreserve);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: The resources have multiple resource providers: "
+        "provider2, provider1"));
+  }
+
+  {
+    Offer::Operation::Unreserve unreserve;
+    unreserve.add_resources()->CopyFrom(resource2);
+
+    Option<Error> error = operation::validate(unreserve);
+
+    EXPECT_NONE(error) << error->message;
+  }
 }
 
 
@@ -852,7 +1042,7 @@ TEST_F(CreateOperationValidationTest, SharedVolumeBasedOnCapability)
   // When a FrameworkInfo with no SHARED_RESOURCES capability is
   // specified, the validation should fail.
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
+  frameworkInfo.set_roles(0, "role1");
 
   error = operation::validate(
       create, Resources(), None(), capabilities, frameworkInfo);
@@ -875,17 +1065,15 @@ TEST_F(CreateOperationValidationTest, SharedVolumeBasedOnCapability)
 // than the offered disk resource results won't succeed.
 TEST_F(CreateOperationValidationTest, InsufficientDiskResource)
 {
-  protobuf::slave::Capabilities capabilities;
-
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
+  frameworkInfo.set_roles(0, "role1");
 
   master::Flags masterFlags = CreateMasterFlags();
 
   ACLs acls;
   mesos::ACL::RegisterFramework* acl = acls.add_register_frameworks();
   acl->mutable_principals()->add_values(frameworkInfo.principal());
-  acl->mutable_roles()->add_values(frameworkInfo.role());
+  acl->mutable_roles()->add_values(frameworkInfo.roles(0));
 
   masterFlags.acls = acls;
   masterFlags.roles = "role1";
@@ -916,7 +1104,7 @@ TEST_F(CreateOperationValidationTest, InsufficientDiskResource)
   driver.start();
 
   AWAIT_READY(offers1);
-  EXPECT_FALSE(offers1->empty());
+  ASSERT_FALSE(offers1->empty());
 
   Offer offer1 = offers1.get()[0];
 
@@ -946,7 +1134,7 @@ TEST_F(CreateOperationValidationTest, InsufficientDiskResource)
   Clock::advance(masterFlags.allocation_interval);
 
   AWAIT_READY(offers2);
-  EXPECT_FALSE(offers2->empty());
+  ASSERT_FALSE(offers2->empty());
 
   Offer offer2 = offers2.get()[0];
 
@@ -1024,6 +1212,66 @@ TEST_F(CreateOperationValidationTest, AgentHierarchicalRoleCapability)
         error->message,
         "with reservation for hierarchical role 'foo/bar' cannot be created "
         "on an agent without HIERARCHICAL_ROLE capability"));
+  }
+}
+
+
+// This test verifies that validation fails if resources from multiple
+// resource providers are used.
+TEST_F(CreateOperationValidationTest, MultipleResourceProviders)
+{
+  protobuf::slave::Capabilities capabilities;
+
+  Resource resource1 = Resources::parse("disk", "10", "role").get();
+  resource1.mutable_disk()->CopyFrom(createDiskInfo("id1", "path1"));
+
+
+  Resource resource2 = Resources::parse("disk", "10", "role").get();
+  resource2.mutable_provider_id()->set_value("provider1");
+  resource2.mutable_disk()->CopyFrom(createDiskInfo("id2", "path2"));
+
+  Resource resource3 = Resources::parse("disk", "10", "role").get();
+  resource3.mutable_provider_id()->set_value("provider2");
+  resource3.mutable_disk()->CopyFrom(createDiskInfo("id3", "path3"));
+
+  {
+    Offer::Operation::Create create;
+    create.add_volumes()->CopyFrom(resource1);
+    create.add_volumes()->CopyFrom(resource2);
+
+    Option<Error> error =
+      operation::validate(create, Resources(), None(), capabilities);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: Some resources have a resource provider "
+        "and some do not"));
+  }
+
+  {
+    Offer::Operation::Create create;
+    create.add_volumes()->CopyFrom(resource2);
+    create.add_volumes()->CopyFrom(resource3);
+
+    Option<Error> error =
+      operation::validate(create, Resources(), None(), capabilities);
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: The resources have multiple resource providers: "
+        "provider2, provider1"));
+  }
+
+  {
+    Offer::Operation::Create create;
+    create.add_volumes()->CopyFrom(resource2);
+
+    Option<Error> error =
+      operation::validate(create, Resources(), None(), capabilities);
+
+    EXPECT_NONE(error) << error->message;
   }
 }
 
@@ -1156,6 +1404,226 @@ TEST_F(DestroyOperationValidationTest, UnknownPersistentVolume)
 }
 
 
+// This test verifies that validation fails if resources from multiple
+// resource providers are used.
+TEST_F(DestroyOperationValidationTest, MultipleResourceProviders)
+{
+  Resource resource1 = Resources::parse("disk", "10", "role").get();
+  resource1.mutable_disk()->CopyFrom(createDiskInfo("id1", "path1"));
+
+  Resource resource2 = Resources::parse("disk", "10", "role").get();
+  resource2.mutable_provider_id()->set_value("provider1");
+  resource2.mutable_disk()->CopyFrom(createDiskInfo("id2", "path2"));
+
+  Resource resource3 = Resources::parse("disk", "10", "role").get();
+  resource3.mutable_provider_id()->set_value("provider2");
+  resource3.mutable_disk()->CopyFrom(createDiskInfo("id3", "path3"));
+
+  Resources volumes = Resources(resource1) + resource2 + resource3;
+
+  {
+    Offer::Operation::Destroy destroy;
+    destroy.add_volumes()->CopyFrom(resource1);
+    destroy.add_volumes()->CopyFrom(resource2);
+
+    Option<Error> error = operation::validate(destroy, volumes, {}, {});
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: Some resources have a resource provider "
+        "and some do not"));
+  }
+
+  {
+    Offer::Operation::Destroy destroy;
+    destroy.add_volumes()->CopyFrom(resource2);
+    destroy.add_volumes()->CopyFrom(resource3);
+
+    Option<Error> error = operation::validate(destroy, volumes, {}, {});
+
+    ASSERT_SOME(error);
+    EXPECT_TRUE(strings::contains(
+        error->message,
+        "Invalid resources: The resources have multiple resource providers: "
+        "provider2, provider1"));
+  }
+
+  {
+    Offer::Operation::Destroy destroy;
+    destroy.add_volumes()->CopyFrom(resource2);
+
+    Option<Error> error = operation::validate(destroy, volumes, {}, {});
+
+    EXPECT_NONE(error) << error->message;
+  }
+}
+
+
+TEST(OperationValidationTest, CreateVolume)
+{
+  Resource disk1 = createDiskResource(
+      "10", "*", None(), None(), createDiskSourceRaw());
+
+  Resource disk2 = createDiskResource(
+      "20", "*", None(), None(), createDiskSourceMount());
+
+  Resource disk3 = createDiskResource(
+      "30", "*", None(), None(), createDiskSourceRaw());
+
+  disk1.mutable_provider_id()->set_value("provider1");
+  disk2.mutable_provider_id()->set_value("provider2");
+
+  Offer::Operation::CreateVolume createVolume;
+  createVolume.mutable_source()->CopyFrom(disk1);
+  createVolume.set_target_type(Resource::DiskInfo::Source::MOUNT);
+
+  Option<Error> error = operation::validate(createVolume);
+  EXPECT_NONE(error);
+
+  createVolume.mutable_source()->CopyFrom(disk2);
+  createVolume.set_target_type(Resource::DiskInfo::Source::MOUNT);
+
+  error = operation::validate(createVolume);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'source' is not a RAW disk resource"));
+
+  createVolume.mutable_source()->CopyFrom(disk3);
+  createVolume.set_target_type(Resource::DiskInfo::Source::PATH);
+
+  error = operation::validate(createVolume);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "Does not have a resource provider"));
+
+  createVolume.mutable_source()->CopyFrom(disk1);
+  createVolume.set_target_type(Resource::DiskInfo::Source::BLOCK);
+
+  error = operation::validate(createVolume);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'target_type' is neither MOUNT or PATH"));
+}
+
+
+TEST(OperationValidationTest, DestroyVolume)
+{
+  Resource disk1 = createDiskResource(
+      "10", "*", None(), None(), createDiskSourceMount());
+
+  Resource disk2 = createDiskResource(
+      "20", "*", None(), None(), createDiskSourcePath());
+
+  Resource disk3 = createDiskResource(
+      "30", "*", None(), None(), createDiskSourceRaw());
+
+  disk1.mutable_provider_id()->set_value("provider1");
+  disk3.mutable_provider_id()->set_value("provider3");
+
+  Offer::Operation::DestroyVolume destroyVolume;
+  destroyVolume.mutable_volume()->CopyFrom(disk1);
+
+  Option<Error> error = operation::validate(destroyVolume);
+  EXPECT_NONE(error);
+
+  destroyVolume.mutable_volume()->CopyFrom(disk2);
+
+  error = operation::validate(destroyVolume);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "Does not have a resource provider"));
+
+  destroyVolume.mutable_volume()->CopyFrom(disk3);
+
+  error = operation::validate(destroyVolume);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'volume' is neither a MOUTN or PATH disk resource"));
+}
+
+
+TEST(OperationValidationTest, CreateBlock)
+{
+  Resource disk1 = createDiskResource(
+      "10", "*", None(), None(), createDiskSourceRaw());
+
+  Resource disk2 = createDiskResource(
+      "20", "*", None(), None(), createDiskSourceMount());
+
+  Resource disk3 = createDiskResource(
+      "30", "*", None(), None(), createDiskSourceRaw());
+
+  disk1.mutable_provider_id()->set_value("provider1");
+  disk2.mutable_provider_id()->set_value("provider2");
+
+  Offer::Operation::CreateBlock createBlock;
+  createBlock.mutable_source()->CopyFrom(disk1);
+
+  Option<Error> error = operation::validate(createBlock);
+  EXPECT_NONE(error);
+
+  createBlock.mutable_source()->CopyFrom(disk2);
+
+  error = operation::validate(createBlock);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'source' is not a RAW disk resource"));
+
+  createBlock.mutable_source()->CopyFrom(disk3);
+
+  error = operation::validate(createBlock);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "Does not have a resource provider"));
+}
+
+
+TEST(OperationValidationTest, DestroyBlock)
+{
+  Resource disk1 = createDiskResource(
+      "10", "*", None(), None(), createDiskSourceBlock());
+
+  Resource disk2 = createDiskResource(
+      "20", "*", None(), None(), createDiskSourceBlock());
+
+  Resource disk3 = createDiskResource(
+      "30", "*", None(), None(), createDiskSourceMount());
+
+  disk1.mutable_provider_id()->set_value("provider1");
+  disk3.mutable_provider_id()->set_value("provider3");
+
+  Offer::Operation::DestroyBlock destroyBlock;
+  destroyBlock.mutable_block()->CopyFrom(disk1);
+
+  Option<Error> error = operation::validate(destroyBlock);
+  EXPECT_NONE(error);
+
+  destroyBlock.mutable_block()->CopyFrom(disk2);
+
+  error = operation::validate(destroyBlock);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "Does not have a resource provider"));
+
+  destroyBlock.mutable_block()->CopyFrom(disk3);
+
+  error = operation::validate(destroyBlock);
+  ASSERT_SOME(error);
+  EXPECT_TRUE(strings::contains(
+      error->message,
+      "'block' is not a BLOCK disk resource"));
+}
+
+
 // TODO(jieyu): All of the task validation tests have the same flow:
 // launch a task, expect an update of a particular format (invalid w/
 // message). Consider providing common functionalities in the test
@@ -1182,7 +1650,7 @@ TEST_F(TaskValidationTest, ExecutorUsesInvalidFrameworkID)
   // Create an executor with a random framework id.
   ExecutorInfo executor;
   executor = DEFAULT_EXECUTOR_INFO;
-  executor.mutable_framework_id()->set_value(UUID::random().toString());
+  executor.mutable_framework_id()->set_value(id::UUID::random().toString());
 
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(LaunchTasks(executor, 1, 1, 16, "*"))
@@ -1352,7 +1820,7 @@ TEST_F(TaskValidationTest, TaskUsesCommandInfoAndExecutorInfo)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -1481,7 +1949,7 @@ TEST_F(TaskValidationTest, TaskUsesNoResources)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -1530,7 +1998,7 @@ TEST_F(TaskValidationTest, TaskUsesMoreResourcesThanOffered)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task;
   task.set_name("");
@@ -1591,7 +2059,7 @@ TEST_F(TaskValidationTest, DuplicatedTaskID)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
@@ -1675,7 +2143,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnSameSlave)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   ExecutorInfo executor;
   executor.mutable_executor_id()->set_value("default");
@@ -1769,7 +2237,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
   ASSERT_SOME(slave1);
 
   AWAIT_READY(offers1);
-  EXPECT_FALSE(offers1->empty());
+  ASSERT_FALSE(offers1->empty());
 
   // Launch the first task with the default executor id.
   ExecutorInfo executor1;
@@ -1807,7 +2275,7 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
-  EXPECT_FALSE(offers2->empty());
+  ASSERT_FALSE(offers2->empty());
 
   // Now launch the second task with the same executor id but
   // a different executor command.
@@ -1889,14 +2357,20 @@ TEST_F(TaskValidationTest, TaskReusesUnreachableTaskID)
   Offer offer1 = offers1.get()[0];
   TaskInfo task1 = createTask(offer1, "sleep 60");
 
+  Future<TaskStatus> startingStatus;
   Future<TaskStatus> runningStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&startingStatus))
     .WillOnce(FutureArg<1>(&runningStatus));
 
   Future<Nothing> statusUpdateAck = FUTURE_DISPATCH(
       slave1.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offer1.id(), {task1});
+
+  AWAIT_READY(startingStatus);
+  EXPECT_EQ(TASK_STARTING, startingStatus->state());
+  EXPECT_EQ(task1.task_id(), startingStatus->task_id());
 
   AWAIT_READY(runningStatus);
   EXPECT_EQ(TASK_RUNNING, runningStatus->state());
@@ -2159,7 +2633,7 @@ TEST_F(TaskValidationTest, ExecutorShutdownGracePeriodIsNonNegative)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   ExecutorInfo executorInfo(DEFAULT_EXECUTOR_INFO);
@@ -2217,7 +2691,7 @@ TEST_F(TaskValidationTest, KillPolicyGracePeriodIsNonNegative)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   TaskInfo task;
@@ -2275,7 +2749,7 @@ TEST_F(TaskValidationTest, TaskEnvironmentInvalid)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -2295,6 +2769,112 @@ TEST_F(TaskValidationTest, TaskEnvironmentInvalid)
   EXPECT_EQ(
       "Task's `CommandInfo` is invalid: Environment variable 'ENV_VAR_KEY' "
       "of type 'VALUE' must have a value set",
+      status->message());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that a task that has `ContainerInfo` set as DOCKER
+// but has no `DockerInfo` is rejected during `TaskInfo` validation.
+TEST_F(TaskValidationTest, TaskMissingDockerInfo)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  // Create an invalid task that has `ContainerInfo` set
+  // as DOCKER but has no `DockerInfo`.
+  TaskInfo task = createTask(offers.get()[0], "exit 0");
+  task.mutable_container()->set_type(ContainerInfo::DOCKER);
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_ERROR, status->state());
+  EXPECT_EQ(
+      "Task's `ContainerInfo` is invalid: "
+      "DockerInfo 'docker' is not set for DOCKER typed ContainerInfo",
+      status->message());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies that a task that has `name` parameter set
+// in `DockerInfo` is rejected during `TaskInfo` validation.
+TEST_F(TaskValidationTest, TaskSettingDockerParameterName)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  // Create an invalid task that has `name` parameter set in `DockerInfo`.
+  TaskInfo task = createTask(offers.get()[0], "exit 0");
+  task.mutable_container()->set_type(ContainerInfo::DOCKER);
+  task.mutable_container()->mutable_docker()->set_image("alpine");
+
+  Parameter* parameter =
+      task.mutable_container()->mutable_docker()->add_parameters();
+
+  parameter->set_key("name");
+  parameter->set_value("test");
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_ERROR, status->state());
+  EXPECT_EQ(
+      "Task's `ContainerInfo` is invalid: "
+      "Parameter in DockerInfo must not be 'name'",
       status->message());
 
   driver.stop();
@@ -2325,7 +2905,7 @@ TEST_F(ExecutorValidationTest, ExecutorType)
 {
   ExecutorInfo executorInfo;
   executorInfo = DEFAULT_EXECUTOR_INFO;
-  executorInfo.mutable_framework_id()->set_value(UUID::random().toString());
+  executorInfo.mutable_framework_id()->set_value(id::UUID::random().toString());
 
   {
     // 'CUSTOM' executor with `CommandInfo` set is valid.
@@ -2706,7 +3286,7 @@ TEST_F(TaskGroupValidationTest, ExecutorUsesDockerContainerInfo)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -2805,7 +3385,7 @@ TEST_F(TaskGroupValidationTest, ExecutorWithoutFrameworkId)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // Create an invalid executor without framework id.
   ExecutorInfo executor;
@@ -2894,7 +3474,7 @@ TEST_F(TaskGroupValidationTest, TaskUsesDockerContainerInfo)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -2911,6 +3491,7 @@ TEST_F(TaskGroupValidationTest, TaskUsesDockerContainerInfo)
   task1.mutable_slave_id()->MergeFrom(offer.slave_id());
   task1.mutable_resources()->MergeFrom(resources);
   task1.mutable_container()->set_type(ContainerInfo::DOCKER);
+  task1.mutable_container()->mutable_docker()->set_image("alpine");
 
   // Create a valid task.
   TaskInfo task2;
@@ -2958,22 +3539,29 @@ TEST_F(TaskGroupValidationTest, TaskUsesDockerContainerInfo)
 }
 
 
-// Ensures that a task in a task group that has `NetworkInfo`
-// set is rejected during `TaskGroupInfo` validation.
-TEST_F(TaskGroupValidationTest, TaskUsesNetworkInfo)
+// Ensures that a task in a task group that has `NetworkInfo` set does
+// not have HTTP health checks during `TaskGroupInfo` validation.
+TEST_F(TaskGroupValidationTest, TaskWithNetworkInfosDoesNotHaveHTTPHealthChecks)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
+
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
-  MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  EXPECT_CALL(sched, registered(&driver, _, _));
+  MesosSchedulerDriver driver(
+      &sched,
+      DEFAULT_FRAMEWORK_INFO,
+      master.get()->pid,
+      DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
 
   Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
@@ -2982,41 +3570,43 @@ TEST_F(TaskGroupValidationTest, TaskUsesNetworkInfo)
 
   driver.start();
 
+  AWAIT_READY(frameworkId);
+
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
-  Resources resources = Resources::parse("cpus:1;mem:512;disk:32").get();
+  Resources resources = Resources::parse("cpus:0.5;mem:300;disk:100").get();
 
   ExecutorInfo executor(DEFAULT_EXECUTOR_INFO);
   executor.set_type(ExecutorInfo::CUSTOM);
   executor.mutable_resources()->CopyFrom(resources);
+  executor.mutable_framework_id()->CopyFrom(frameworkId.get());
 
-  // Create an invalid task that has NetworkInfos set.
-  TaskInfo task1;
-  task1.set_name("1");
-  task1.mutable_task_id()->set_value("1");
-  task1.mutable_slave_id()->MergeFrom(offer.slave_id());
-  task1.mutable_resources()->MergeFrom(resources);
-  task1.mutable_container()->set_type(ContainerInfo::MESOS);
-  task1.mutable_container()->add_network_infos();
+  TaskInfo task;
+  task.set_name("1");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(resources);
+  task.mutable_container()->set_type(ContainerInfo::MESOS);
+  task.mutable_container()->add_network_infos();
 
-  // Create a valid task.
-  TaskInfo task2;
-  task2.set_name("2");
-  task2.mutable_task_id()->set_value("2");
-  task2.mutable_slave_id()->MergeFrom(offer.slave_id());
-  task2.mutable_resources()->MergeFrom(resources);
+  // Add a HTTP health check to this task.
+  HealthCheck healthCheck;
+  healthCheck.set_type(HealthCheck::HTTP);
+  healthCheck.mutable_http()->set_port(80);
+  healthCheck.set_delay_seconds(0);
+  healthCheck.set_interval_seconds(0);
+  healthCheck.set_grace_period_seconds(15);
+
+  task.mutable_health_check()->CopyFrom(healthCheck);
 
   TaskGroupInfo taskGroup;
-  taskGroup.add_tasks()->CopyFrom(task1);
-  taskGroup.add_tasks()->CopyFrom(task2);
+  taskGroup.add_tasks()->CopyFrom(task);
 
-  Future<TaskStatus> task1Status;
-  Future<TaskStatus> task2Status;
+  Future<TaskStatus> taskStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&task1Status))
-    .WillOnce(FutureArg<1>(&task2Status));
+    .WillOnce(FutureArg<1>(&taskStatus));
 
   Offer::Operation operation;
   operation.set_type(Offer::Operation::LAUNCH_GROUP);
@@ -3029,17 +3619,109 @@ TEST_F(TaskGroupValidationTest, TaskUsesNetworkInfo)
 
   driver.acceptOffers({offer.id()}, {operation});
 
-  AWAIT_READY(task1Status);
-  EXPECT_EQ(task1.task_id(), task1Status->task_id());
-  EXPECT_EQ(TASK_ERROR, task1Status->state());
-  EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, task1Status->reason());
-  EXPECT_EQ("Task '1' is invalid: NetworkInfos must not be set on the task",
-            task1Status->message());
+  const string expected =
+    "Task '1' is invalid: HTTP and TCP health checks are not supported "
+    "for nested containers not joining parent's network";
 
-  AWAIT_READY(task2Status);
-  EXPECT_EQ(task2.task_id(), task2Status->task_id());
-  EXPECT_EQ(TASK_ERROR, task2Status->state());
-  EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, task2Status->reason());
+  AWAIT_READY(taskStatus);
+  EXPECT_EQ(task.task_id(), taskStatus->task_id());
+  EXPECT_EQ(TASK_ERROR, taskStatus->state());
+  EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, taskStatus->reason());
+  EXPECT_EQ(expected, taskStatus->message());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// Ensures that a task in a task group that has `NetworkInfo` set does
+// not have TCP health checks during `TaskGroupInfo` validation.
+TEST_F(TaskGroupValidationTest, TaskWithNetworkInfosDoesNotHaveTCPHealthChecks)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched,
+      DEFAULT_FRAMEWORK_INFO,
+      master.get()->pid,
+      DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(frameworkId);
+
+  AWAIT_READY(offers);
+  ASSERT_FALSE(offers->empty());
+  Offer offer = offers.get()[0];
+
+  Resources resources = Resources::parse("cpus:0.5;mem:300;disk:100").get();
+
+  ExecutorInfo executor(DEFAULT_EXECUTOR_INFO);
+  executor.set_type(ExecutorInfo::DEFAULT);
+  executor.mutable_resources()->CopyFrom(resources);
+  executor.mutable_framework_id()->CopyFrom(frameworkId.get());
+
+  TaskInfo task;
+  task.set_name("1");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(resources);
+  task.mutable_container()->set_type(ContainerInfo::MESOS);
+  task.mutable_container()->add_network_infos();
+
+  // Add a TCP health check to this task.
+  HealthCheck healthCheck;
+  healthCheck.set_type(HealthCheck::TCP);
+  healthCheck.mutable_tcp()->set_port(30000);
+  healthCheck.set_delay_seconds(0);
+  healthCheck.set_interval_seconds(0);
+  healthCheck.set_grace_period_seconds(15);
+
+  task.mutable_health_check()->CopyFrom(healthCheck);
+
+  TaskGroupInfo taskGroup;
+  taskGroup.add_tasks()->CopyFrom(task);
+
+  Future<TaskStatus> taskStatus;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&taskStatus));
+
+  Offer::Operation operation;
+  operation.set_type(Offer::Operation::LAUNCH_GROUP);
+
+  Offer::Operation::LaunchGroup* launchGroup =
+    operation.mutable_launch_group();
+
+  launchGroup->mutable_executor()->CopyFrom(executor);
+  launchGroup->mutable_task_group()->CopyFrom(taskGroup);
+
+  driver.acceptOffers({offer.id()}, {operation});
+
+  const string expected =
+    "Task '1' is invalid: HTTP and TCP health checks are not supported "
+    "for nested containers not joining parent's network";
+
+  AWAIT_READY(taskStatus);
+  EXPECT_EQ(task.task_id(), taskStatus->task_id());
+  EXPECT_EQ(TASK_ERROR, taskStatus->state());
+  EXPECT_EQ(TaskStatus::REASON_TASK_GROUP_INVALID, taskStatus->reason());
+  EXPECT_EQ(expected, taskStatus->message());
 
   driver.stop();
   driver.join();
@@ -3074,7 +3756,7 @@ TEST_F(TaskGroupValidationTest, TaskUsesDifferentExecutor)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
   Offer offer = offers.get()[0];
 
   Resources resources = Resources::parse("cpus:1;mem:512;disk:32").get();
@@ -3169,7 +3851,7 @@ TEST_F(TaskGroupValidationTest, ExecutorEnvironmentInvalid)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task1;
   task1.set_name("1");
@@ -3273,7 +3955,7 @@ TEST_F(TaskGroupValidationTest, TaskEnvironmentInvalid)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   TaskInfo task1;
   task1.set_name("1");
@@ -3468,7 +4150,8 @@ TEST_F(FrameworkInfoValidationTest, MissingMultiRoleCapability)
   ASSERT_SOME(master);
 
   FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
-  framework.add_roles("role");
+  framework.clear_capabilities();
+  framework.set_roles(0, "role");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -3491,7 +4174,7 @@ TEST_F(FrameworkInfoValidationTest, AcceptMultiRoleFramework)
   ASSERT_SOME(master);
 
   FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
-  framework.add_roles("role1");
+  framework.set_roles(0, "role1");
   framework.add_roles("role2");
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::MULTI_ROLE);
@@ -3521,7 +4204,7 @@ TEST_F(FrameworkInfoValidationTest, MultiRoleWhitelist)
   ASSERT_SOME(master);
 
   FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
-  framework.add_roles("role1");
+  framework.set_roles(0, "role1");
   framework.add_roles("role2");
   framework.add_capabilities()->set_type(
       FrameworkInfo::Capability::MULTI_ROLE);
@@ -3554,6 +4237,8 @@ TEST_F(FrameworkInfoValidationTest, UpgradeToMultiRole)
   ASSERT_SOME(master);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.clear_capabilities();
+  frameworkInfo.clear_roles();
   frameworkInfo.set_role("role");
 
   // Set a long failover timeout so the framework isn't immediately removed.
@@ -3625,7 +4310,7 @@ TEST_F(FrameworkInfoValidationTest, DowngradeFromMultipleRoles)
   // is removed from `DEFAULT_FRAMEWORK_INFO`.
   frameworkInfo.clear_capabilities();
 
-  frameworkInfo.add_roles("role1");
+  frameworkInfo.set_roles(0, "role1");
   frameworkInfo.add_roles("role2");
   frameworkInfo.add_capabilities()->set_type(
       FrameworkInfo::Capability::MULTI_ROLE);
@@ -3657,10 +4342,10 @@ TEST_F(FrameworkInfoValidationTest, DowngradeFromMultipleRoles)
 
   // Downgrade `frameworkInfo` to remove `MULTI_ROLE` capability, and
   // migrate from `roles` to `role` field.
-  ASSERT_EQ(2u, frameworkInfo.roles_size());
+  ASSERT_EQ(2, frameworkInfo.roles_size());
   frameworkInfo.set_role(frameworkInfo.roles(0));
   frameworkInfo.clear_roles();
-  ASSERT_EQ(1u, frameworkInfo.capabilities_size());
+  ASSERT_EQ(1, frameworkInfo.capabilities_size());
   frameworkInfo.clear_capabilities();
 
   {
@@ -3695,9 +4380,7 @@ TEST_F(FrameworkInfoValidationTest, RoleChangeWithMultiRole)
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
 
   ASSERT_FALSE(frameworkInfo.has_role());
-  frameworkInfo.add_roles("role1");
-  frameworkInfo.add_capabilities()->set_type(
-      FrameworkInfo::Capability::MULTI_ROLE);
+  frameworkInfo.set_roles(0, "role1");
 
   // Set a long failover timeout so the framework isn't immediately removed.
   frameworkInfo.set_failover_timeout(Weeks(1).secs());
@@ -3767,6 +4450,8 @@ TEST_F(FrameworkInfoValidationTest, RoleChangeWithMultiRoleMasterFailover)
   // immediately cleaned up.
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_failover_timeout(Weeks(1).secs());
+  frameworkInfo.clear_capabilities();
+  frameworkInfo.clear_roles();
   frameworkInfo.set_role("role1");
 
   Future<FrameworkID> frameworkId;
@@ -3909,11 +4594,11 @@ TEST_F(RegisterSlaveValidationTest, DropInvalidReregistration)
   ReregisterSlaveMessage message = reregisterSlaveMessage.get();
 
   Task* task = message.add_tasks();
-  task->set_name(UUID::random().toString());
-  task->mutable_slave_id()->set_value(UUID::random().toString());
-  task->mutable_task_id()->set_value(UUID::random().toString());
-  task->mutable_framework_id()->set_value(UUID::random().toString());
-  task->mutable_executor_id()->set_value(UUID::random().toString());
+  task->set_name(id::UUID::random().toString());
+  task->mutable_slave_id()->set_value(id::UUID::random().toString());
+  task->mutable_task_id()->set_value(id::UUID::random().toString());
+  task->mutable_framework_id()->set_value(id::UUID::random().toString());
+  task->mutable_executor_id()->set_value(id::UUID::random().toString());
   task->set_state(TASK_RUNNING);
 
   // We expect the master to drop the ReregisterSlaveMessage, so it
@@ -3961,15 +4646,62 @@ TEST_F(RegisterSlaveValidationTest, DropInvalidRegistration)
   slaveInfo->mutable_id()->set_value(
       strings::join(
           "/../",
-          UUID::random().toString(),
-          UUID::random().toString(),
-          UUID::random().toString()));
+          id::UUID::random().toString(),
+          id::UUID::random().toString(),
+          id::UUID::random().toString()));
 
   // Send the modified message to the master.
   process::post(slave.get()->pid, master->get()->pid, message);
 
   // Settle the clock to retire in-flight messages.
   Clock::settle();
+}
+
+
+// Test that duplicate ExecutorIDs are correctly handled when
+// validating the ReregisterSlaveMessage.
+TEST_F(RegisterSlaveValidationTest, DuplicateExecutorID)
+{
+  ReregisterSlaveMessage message;
+
+  SlaveInfo *slaveInfo = message.mutable_slave();
+  slaveInfo->mutable_id()->set_value("agent-id");
+  slaveInfo->mutable_resources()->CopyFrom(
+      Resources::parse("cpus:2;mem:10").get());
+
+  FrameworkInfo *framework = message.add_frameworks();
+  framework->CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  framework->set_name("framework1");
+  framework->mutable_id()->set_value("framework1");
+
+  framework = message.add_frameworks();
+  framework->CopyFrom(DEFAULT_FRAMEWORK_INFO);
+  framework->set_name("framework2");
+  framework->mutable_id()->set_value("framework2");
+
+  ExecutorInfo *executor = message.add_executor_infos();
+  executor->CopyFrom(DEFAULT_EXECUTOR_INFO);
+  executor->mutable_framework_id()->set_value("framework1");
+
+  executor = message.add_executor_infos();
+  executor->CopyFrom(DEFAULT_EXECUTOR_INFO);
+  executor->mutable_framework_id()->set_value("framework2");
+
+  // Executors with the same ID in different frameworks are allowed.
+  EXPECT_EQ(message.executor_infos(0).executor_id(),
+            message.executor_infos(1).executor_id());
+  EXPECT_NE(message.executor_infos(0).framework_id(),
+            message.executor_infos(1).framework_id());
+  EXPECT_NONE(master::validation::master::message::reregisterSlave(message));
+
+  executor->mutable_framework_id()->set_value("framework1");
+
+  // Executors with the same ID in in the same framework are not allowed.
+  EXPECT_EQ(message.executor_infos(0).executor_id(),
+            message.executor_infos(1).executor_id());
+  EXPECT_EQ(message.executor_infos(0).framework_id(),
+            message.executor_infos(1).framework_id());
+  EXPECT_SOME(master::validation::master::message::reregisterSlave(message));
 }
 
 } // namespace tests {

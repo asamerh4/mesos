@@ -20,6 +20,7 @@
 #include <process/check.hpp>
 #include <process/clock.hpp>
 #include <process/future.hpp>
+#include <process/gtest_constants.hpp>
 #include <process/http.hpp>
 
 #include <stout/duration.hpp>
@@ -181,6 +182,38 @@ template <typename T>
 }
 
 
+template <typename T>
+::testing::AssertionResult AwaitAssertAbandoned(
+    const char* expr,
+    const char*, // Unused string representation of 'duration'.
+    const process::Future<T>& actual,
+    const Duration& duration)
+{
+  process::Owned<process::Latch> latch(new process::Latch());
+
+  actual.onAny([=]() { latch->trigger(); });
+  actual.onAbandoned([=]() { latch->trigger(); });
+
+  if (!latch->await(duration)) {
+    return ::testing::AssertionFailure()
+      << "Failed to wait " << duration << " for " << expr;
+  } else if (actual.isDiscarded()) {
+    return ::testing::AssertionFailure()
+      << expr << " was discarded";
+  } else if (actual.isReady()) {
+    return ::testing::AssertionFailure()
+      << expr << " is ready (" << ::testing::PrintToString(actual.get()) << ")";
+  } else if (actual.isFailed()) {
+    return ::testing::AssertionFailure()
+      << "(" << expr << ").failure(): " << actual.failure();
+  }
+
+  CHECK_ABANDONED(actual);
+
+  return ::testing::AssertionSuccess();
+}
+
+
 template <typename T1, typename T2>
 ::testing::AssertionResult AwaitAssertEq(
     const char* expectedExpr,
@@ -209,13 +242,29 @@ template <typename T1, typename T2>
 }
 
 
+#define AWAIT_ASSERT_ABANDONED_FOR(actual, duration)            \
+  ASSERT_PRED_FORMAT2(AwaitAssertAbandoned, actual, duration)
+
+
+#define AWAIT_ASSERT_ABANDONED(actual)                  \
+  AWAIT_ASSERT_ABANDONED_FOR(actual, process::TEST_AWAIT_TIMEOUT)
+
+
+#define AWAIT_EXPECT_ABANDONED_FOR(actual, duration)            \
+  EXPECT_PRED_FORMAT2(AwaitAssertAbandoned, actual, duration)
+
+
+#define AWAIT_EXPECT_ABANDONED(actual)                  \
+  AWAIT_EXPECT_ABANDONED_FOR(actual, process::TEST_AWAIT_TIMEOUT)
+
+
 // TODO(bmahler): Differentiate EXPECT and ASSERT here.
 #define AWAIT_FOR(actual, duration)             \
   ASSERT_PRED_FORMAT2(Await, actual, duration)
 
 
 #define AWAIT(actual)                           \
-  AWAIT_FOR(actual, Seconds(15))
+  AWAIT_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_ASSERT_READY_FOR(actual, duration)                \
@@ -223,7 +272,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_ASSERT_READY(actual)              \
-  AWAIT_ASSERT_READY_FOR(actual, Seconds(15))
+  AWAIT_ASSERT_READY_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_READY_FOR(actual, duration)       \
@@ -239,7 +288,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_EXPECT_READY(actual)              \
-  AWAIT_EXPECT_READY_FOR(actual, Seconds(15))
+  AWAIT_EXPECT_READY_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_ASSERT_FAILED_FOR(actual, duration)               \
@@ -247,7 +296,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_ASSERT_FAILED(actual)             \
-  AWAIT_ASSERT_FAILED_FOR(actual, Seconds(15))
+  AWAIT_ASSERT_FAILED_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_FAILED_FOR(actual, duration)       \
@@ -263,7 +312,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_EXPECT_FAILED(actual)             \
-  AWAIT_EXPECT_FAILED_FOR(actual, Seconds(15))
+  AWAIT_EXPECT_FAILED_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_ASSERT_DISCARDED_FOR(actual, duration)            \
@@ -271,7 +320,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_ASSERT_DISCARDED(actual)                  \
-  AWAIT_ASSERT_DISCARDED_FOR(actual, Seconds(15))
+  AWAIT_ASSERT_DISCARDED_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_DISCARDED_FOR(actual, duration)       \
@@ -287,7 +336,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_EXPECT_DISCARDED(actual)                  \
-  AWAIT_EXPECT_DISCARDED_FOR(actual, Seconds(15))
+  AWAIT_EXPECT_DISCARDED_FOR(actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_ASSERT_EQ_FOR(expected, actual, duration)                 \
@@ -295,7 +344,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_ASSERT_EQ(expected, actual)       \
-  AWAIT_ASSERT_EQ_FOR(expected, actual, Seconds(15))
+  AWAIT_ASSERT_EQ_FOR(expected, actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EQ_FOR(expected, actual, duration)              \
@@ -311,7 +360,7 @@ template <typename T1, typename T2>
 
 
 #define AWAIT_EXPECT_EQ(expected, actual)               \
-  AWAIT_EXPECT_EQ_FOR(expected, actual, Seconds(15))
+  AWAIT_EXPECT_EQ_FOR(expected, actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_ASSERT_TRUE_FOR(actual, duration)                 \
@@ -374,14 +423,15 @@ inline ::testing::AssertionResult AwaitAssertResponseStatusEq(
     AwaitAssertReady(actualExpr, durationExpr, actual, duration);
 
   if (result) {
-    if (expected == actual.get().status) {
+    if (expected == actual->status) {
       return ::testing::AssertionSuccess();
     } else {
       return ::testing::AssertionFailure()
-        << "Value of: (" << actualExpr << ").get().status\n"
-        << "  Actual: " << ::testing::PrintToString(actual.get().status) << "\n"
-        << "Expected: " << expectedExpr << "\n"
-        << "Which is: " << ::testing::PrintToString(expected);
+             << "Value of: (" << actualExpr << ")->status\n"
+             << "  Actual: " << ::testing::PrintToString(actual->status) << "\n"
+             << "Expected: " << expectedExpr << "\n"
+             << "Which is: " << ::testing::PrintToString(expected) << "\n"
+             << "    Body: " << ::testing::PrintToString(actual->body);
     }
   }
 
@@ -393,16 +443,22 @@ inline ::testing::AssertionResult AwaitAssertResponseStatusEq(
   ASSERT_PRED_FORMAT3(AwaitAssertResponseStatusEq, expected, actual, duration)
 
 
-#define AWAIT_ASSERT_RESPONSE_STATUS_EQ(expected, actual)               \
-  AWAIT_ASSERT_RESPONSE_STATUS_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_ASSERT_RESPONSE_STATUS_EQ(expected, actual) \
+  AWAIT_ASSERT_RESPONSE_STATUS_EQ_FOR(                    \
+      expected,                                           \
+      actual,                                             \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_RESPONSE_STATUS_EQ_FOR(expected, actual, duration) \
   EXPECT_PRED_FORMAT3(AwaitAssertResponseStatusEq, expected, actual, duration)
 
 
-#define AWAIT_EXPECT_RESPONSE_STATUS_EQ(expected, actual)               \
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_EXPECT_RESPONSE_STATUS_EQ(expected, actual) \
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ_FOR(                    \
+      expected,                                           \
+      actual,                                             \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertResponseBodyEq(
@@ -417,14 +473,14 @@ inline ::testing::AssertionResult AwaitAssertResponseBodyEq(
     AwaitAssertReady(actualExpr, durationExpr, actual, duration);
 
   if (result) {
-    if (expected == actual.get().body) {
+    if (expected == actual->body) {
       return ::testing::AssertionSuccess();
     } else {
       return ::testing::AssertionFailure()
-        << "Value of: (" << actualExpr << ").get().body\n"
-        << "  Actual: " << ::testing::PrintToString(actual.get().body) << "\n"
-        << "Expected: " << expectedExpr << "\n"
-        << "Which is: " << ::testing::PrintToString(expected);
+             << "Value of: (" << actualExpr << ")->body\n"
+             << "  Actual: " << ::testing::PrintToString(actual->body) << "\n"
+             << "Expected: " << expectedExpr << "\n"
+             << "Which is: " << ::testing::PrintToString(expected);
     }
   }
 
@@ -436,16 +492,22 @@ inline ::testing::AssertionResult AwaitAssertResponseBodyEq(
   ASSERT_PRED_FORMAT3(AwaitAssertResponseBodyEq, expected, actual, duration)
 
 
-#define AWAIT_ASSERT_RESPONSE_BODY_EQ(expected, actual)                 \
-  AWAIT_ASSERT_RESPONSE_BODY_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_ASSERT_RESPONSE_BODY_EQ(expected, actual) \
+  AWAIT_ASSERT_RESPONSE_BODY_EQ_FOR(                    \
+      expected,                                         \
+      actual,                                           \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_RESPONSE_BODY_EQ_FOR(expected, actual, duration)   \
   EXPECT_PRED_FORMAT3(AwaitAssertResponseBodyEq, expected, actual, duration)
 
 
-#define AWAIT_EXPECT_RESPONSE_BODY_EQ(expected, actual)                 \
-  AWAIT_EXPECT_RESPONSE_BODY_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_EXPECT_RESPONSE_BODY_EQ(expected, actual) \
+  AWAIT_EXPECT_RESPONSE_BODY_EQ_FOR(                    \
+      expected,                                         \
+      actual,                                           \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertResponseHeaderEq(
@@ -462,7 +524,7 @@ inline ::testing::AssertionResult AwaitAssertResponseHeaderEq(
     AwaitAssertReady(actualExpr, durationExpr, actual, duration);
 
   if (result) {
-    const Option<std::string> value = actual.get().headers.get(key);
+    const Option<std::string> value = actual->headers.get(key);
     if (value.isNone()) {
       return ::testing::AssertionFailure()
         << "Response does not contain header '" << key << "'";
@@ -470,7 +532,7 @@ inline ::testing::AssertionResult AwaitAssertResponseHeaderEq(
       return ::testing::AssertionSuccess();
     } else {
       return ::testing::AssertionFailure()
-        << "Value of: (" << actualExpr << ").get().headers[" << keyExpr << "]\n"
+        << "Value of: (" << actualExpr << ")->headers[" << keyExpr << "]\n"
         << "  Actual: " << ::testing::PrintToString(value.get()) << "\n"
         << "Expected: " << expectedExpr << "\n"
         << "Which is: " << ::testing::PrintToString(expected);
@@ -481,20 +543,38 @@ inline ::testing::AssertionResult AwaitAssertResponseHeaderEq(
 }
 
 
-#define AWAIT_ASSERT_RESPONSE_HEADER_EQ_FOR(expected, key, actual, duration) \
-  ASSERT_PRED_FORMAT4(AwaitAssertResponseHeaderEq, expected, key, actual, duration) // NOLINT(whitespace/line_length)
+#define AWAIT_ASSERT_RESPONSE_HEADER_EQ_FOR(expected, key, actual, duration)  \
+  ASSERT_PRED_FORMAT4(                                                        \
+      AwaitAssertResponseHeaderEq,                                            \
+      expected,                                                               \
+      key,                                                                    \
+      actual,                                                                 \
+      duration)
 
 
-#define AWAIT_ASSERT_RESPONSE_HEADER_EQ(expected, key, actual)          \
-  AWAIT_ASSERT_RESPONSE_HEADER_EQ_FOR(expected, key, actual, Seconds(15))
+#define AWAIT_ASSERT_RESPONSE_HEADER_EQ(expected, key, actual)  \
+  AWAIT_ASSERT_RESPONSE_HEADER_EQ_FOR(                          \
+      expected,                                                 \
+      key,                                                      \
+      actual,                                                   \
+      process::TEST_AWAIT_TIMEOUT)
 
 
-#define AWAIT_EXPECT_RESPONSE_HEADER_EQ_FOR(expected, key, actual, duration) \
-  EXPECT_PRED_FORMAT4(AwaitAssertResponseHeaderEq, expected, key, actual, duration) // NOLINT(whitespace/line_length)
+#define AWAIT_EXPECT_RESPONSE_HEADER_EQ_FOR(expected, key, actual, duration)  \
+  EXPECT_PRED_FORMAT4(                                                        \
+      AwaitAssertResponseHeaderEq,                                            \
+      expected,                                                               \
+      key,                                                                    \
+      actual,                                                                 \
+      duration)
 
 
-#define AWAIT_EXPECT_RESPONSE_HEADER_EQ(expected, key, actual)          \
-  AWAIT_EXPECT_RESPONSE_HEADER_EQ_FOR(expected, key, actual, Seconds(15))
+#define AWAIT_EXPECT_RESPONSE_HEADER_EQ(expected, key, actual)  \
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ_FOR(                          \
+      expected,                                                 \
+      key,                                                      \
+      actual,                                                   \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertExited(
@@ -527,7 +607,7 @@ inline ::testing::AssertionResult AwaitAssertExited(
 
 
 #define AWAIT_ASSERT_EXITED(expected, actual)                   \
-  AWAIT_ASSERT_EXITED_FOR(expected, actual, Seconds(15))
+  AWAIT_ASSERT_EXITED_FOR(expected, actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_EXITED_FOR(expected, actual, duration)             \
@@ -535,7 +615,7 @@ inline ::testing::AssertionResult AwaitAssertExited(
 
 
 #define AWAIT_EXPECT_EXITED(expected, actual)                   \
-  AWAIT_EXPECT_EXITED_FOR(expected, actual, Seconds(15))
+  AWAIT_EXPECT_EXITED_FOR(expected, actual, process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertExitStatusEq(
@@ -567,16 +647,22 @@ inline ::testing::AssertionResult AwaitAssertExitStatusEq(
   ASSERT_PRED_FORMAT3(AwaitAssertExitStatusEq, expected, actual, duration)
 
 
-#define AWAIT_ASSERT_WEXITSTATUS_EQ(expected, actual)                   \
-  AWAIT_ASSERT_WEXITSTATUS_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_ASSERT_WEXITSTATUS_EQ(expected, actual) \
+  AWAIT_ASSERT_WEXITSTATUS_EQ_FOR(                    \
+      expected,                                       \
+      actual,                                         \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_WEXITSTATUS_EQ_FOR(expected, actual, duration)     \
   EXPECT_PRED_FORMAT3(AwaitAssertExitStatusEq, expected, actual, duration)
 
 
-#define AWAIT_EXPECT_WEXITSTATUS_EQ(expected, actual)                   \
-  AWAIT_EXPECT_WEXITSTATUS_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_EXPECT_WEXITSTATUS_EQ(expected, actual) \
+  AWAIT_EXPECT_WEXITSTATUS_EQ_FOR(                    \
+      expected,                                       \
+      actual,                                         \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertExitStatusNe(
@@ -608,18 +694,26 @@ inline ::testing::AssertionResult AwaitAssertExitStatusNe(
   ASSERT_PRED_FORMAT3(AwaitAssertExitStatusNe, expected, actual, duration)
 
 
-#define AWAIT_ASSERT_WEXITSTATUS_NE(expected, actual)           \
-  AWAIT_ASSERT_EXITSTATUS_NE_FOR(expected, actual, Seconds(15))
+#define AWAIT_ASSERT_WEXITSTATUS_NE(expected, actual) \
+  AWAIT_ASSERT_EXITSTATUS_NE_FOR(                     \
+      expected,                                       \
+      actual,                                         \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_WEXITSTATUS_NE_FOR(expected, actual, duration)     \
   EXPECT_PRED_FORMAT3(AwaitAssertExitStatusNe, expected, actual, duration)
 
 
-#define AWAIT_EXPECT_WEXITSTATUS_NE(expected, actual)                   \
-  AWAIT_EXPECT_WEXITSTATUS_NE_FOR(expected, actual, Seconds(15))
+#define AWAIT_EXPECT_WEXITSTATUS_NE(expected, actual) \
+  AWAIT_EXPECT_WEXITSTATUS_NE_FOR(                    \
+      expected,                                       \
+      actual,                                         \
+      process::TEST_AWAIT_TIMEOUT)
 
 
+// Signals are't used on Windows, so #ifdef these out.
+#ifndef __WINDOWS__
 inline ::testing::AssertionResult AwaitAssertSignaled(
     const char* actualExpr,
     const char* durationExpr,
@@ -650,7 +744,7 @@ inline ::testing::AssertionResult AwaitAssertSignaled(
 
 
 #define AWAIT_ASSERT_SIGNALED(expected, actual)                 \
-  AWAIT_ASSERT_SIGNALED_FOR(expected, actual, Seconds(15))
+  AWAIT_ASSERT_SIGNALED_FOR(expected, actual, process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_SIGNALED_FOR(expected, actual, duration)           \
@@ -658,7 +752,7 @@ inline ::testing::AssertionResult AwaitAssertSignaled(
 
 
 #define AWAIT_EXPECT_SIGNALED(expected, actual)                 \
-  AWAIT_EXPECT_SIGNALED_FOR(expected, actual, Seconds(15))
+  AWAIT_EXPECT_SIGNALED_FOR(expected, actual, process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertTermSigEq(
@@ -690,16 +784,22 @@ inline ::testing::AssertionResult AwaitAssertTermSigEq(
   ASSERT_PRED_FORMAT3(AwaitAssertTermSigEq, expected, actual, duration)
 
 
-#define AWAIT_ASSERT_WTERMSIG_EQ(expected, actual)              \
-  AWAIT_ASSERT_WTERMSIG_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_ASSERT_WTERMSIG_EQ(expected, actual)  \
+  AWAIT_ASSERT_WTERMSIG_EQ_FOR(                     \
+      expected,                                     \
+      actual,                                       \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 #define AWAIT_EXPECT_WTERMSIG_EQ_FOR(expected, actual, duration)        \
   EXPECT_PRED_FORMAT3(AwaitAssertTermSigEq, expected, actual, duration)
 
 
-#define AWAIT_EXPECT_WTERMSIG_EQ(expected, actual)              \
-  AWAIT_EXPECT_WTERMSIG_EQ_FOR(expected, actual, Seconds(15))
+#define AWAIT_EXPECT_WTERMSIG_EQ(expected, actual)  \
+  AWAIT_EXPECT_WTERMSIG_EQ_FOR(                     \
+      expected,                                     \
+      actual,                                       \
+      process::TEST_AWAIT_TIMEOUT)
 
 
 inline ::testing::AssertionResult AwaitAssertTermSigNe(
@@ -731,21 +831,28 @@ inline ::testing::AssertionResult AwaitAssertTermSigNe(
   ASSERT_PRED_FORMAT3(AwaitAssertTermSigNe, expected, actual, duration)
 
 
-#define AWAIT_ASSERT_WTERMSIG_NE(expected, actual)              \
-  AWAIT_ASSERT_TERMSIG_NE_FOR(expected, actual, Seconds(15))
+#define AWAIT_ASSERT_WTERMSIG_NE(expected, actual)  \
+  AWAIT_ASSERT_TERMSIG_NE_FOR(                      \
+      expected,                                     \
+      actual,                                       \
+      process::TEST_AWAIT_TIMEOUT
 
 
 #define AWAIT_EXPECT_TERMSIG_NE_FOR(expected, actual, duration)         \
   EXPECT_PRED_FORMAT3(AwaitAssertTermSigNe, expected, actual, duration)
 
 
-#define AWAIT_EXPECT_WTERMSIG_NE(expected, actual)              \
-  AWAIT_EXPECT_WTERMSIG_NE_FOR(expected, actual, Seconds(15))
+#define AWAIT_EXPECT_WTERMSIG_NE(expected, actual)  \
+  AWAIT_EXPECT_WTERMSIG_NE_FOR(                     \
+    expected,                                       \
+    actual,                                         \
+    process::TEST_AWAIT_TIMEOUT)
 
 
 // TODO(benh):
 // inline ::testing::AssertionResult AwaitAssertStopped(...)
 // inline ::testing::AssertionResult AwaitAssertStopSigEq(...)
 // inline ::testing::AssertionResult AwaitAssertStopSigNe(...)
+#endif // __WINDOWS__
 
 #endif // __PROCESS_GTEST_HPP__

@@ -255,7 +255,7 @@ TEST_P(LinuxCapabilitiesIsolatorTest, ROOT_Ping)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // We use 'ping' as the command since it has file capabilities
   // (`NET_RAW` and `NET_ADMIN` in permitted set). This allows us to
@@ -343,14 +343,6 @@ TEST_P(LinuxCapabilitiesIsolatorTest, ROOT_NestedPing)
   flags.isolation = "linux/capabilities";
   flags.effective_capabilities = param.operator_effective;
   flags.bounding_capabilities = param.operator_bounding;
-
-#ifndef USE_SSL_SOCKET
-  // Disable operator API authentication for the default executor. Executor
-  // authentication currently has SSL as a dependency, so we cannot require
-  // executors to authenticate with the agent operator API if Mesos was not
-  // built with SSL support.
-  flags.authenticate_http_readwrite = false;
-#endif // USE_SSL_SOCKET
 
   if (param.useImage == TestParam::WITH_IMAGE) {
     const string registry = path::join(sandbox.get(), "registry");
@@ -752,11 +744,15 @@ TEST_F(LinuxCapabilitiesIsolatorFlagsTest, ROOT_IsolatorFlags)
   slave = StartSlave(&detector, flags);
   ASSERT_SOME(slave);
 
+  slave->reset();
+
   // Allowed is a subset of bounding, which is OK.
   flags.effective_capabilities = convert(set<Capability>({NET_RAW}));
   flags.bounding_capabilities = convert(set<Capability>({NET_RAW, NET_ADMIN}));
   slave = StartSlave(&detector, flags);
   ASSERT_SOME(slave);
+
+  slave->reset();
 
   // Both sets are allowed to be missing.
   flags.effective_capabilities = None();
@@ -764,11 +760,15 @@ TEST_F(LinuxCapabilitiesIsolatorFlagsTest, ROOT_IsolatorFlags)
   slave = StartSlave(&detector, flags);
   ASSERT_SOME(slave);
 
+  slave->reset();
+
   // Bounding capabilities are allowed to be missing.
   flags.effective_capabilities = convert(set<Capability>({NET_RAW}));
   flags.bounding_capabilities = None();
   slave = StartSlave(&detector, flags);
   ASSERT_SOME(slave);
+
+  slave->reset();
 
   // Effective capabilities are allowed to be missing.
   flags.effective_capabilities = None();

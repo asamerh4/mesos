@@ -42,6 +42,8 @@
 #include <stout/nothing.hpp>
 #include <stout/os.hpp>
 
+#include <stout/os/permissions.hpp>
+
 #ifdef __linux__
 #include <stout/proc.hpp>
 #endif // __linux__
@@ -49,6 +51,10 @@
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 #include <stout/version.hpp>
+
+#ifdef USE_SSL_SOCKET
+#include "authentication/executor/jwt_secret_generator.hpp"
+#endif // USE_SSL_SOCKET
 
 #include "common/build.hpp"
 #include "common/http.hpp"
@@ -69,19 +75,23 @@
 
 #include "slave/gc.hpp"
 #include "slave/slave.hpp"
-#include "slave/status_update_manager.hpp"
+#include "slave/task_status_update_manager.hpp"
 
 #include "version/version.hpp"
 
 using namespace mesos::internal;
 using namespace mesos::internal::slave;
 
+using mesos::SecretGenerator;
+
+#ifdef USE_SSL_SOCKET
+using mesos::authentication::executor::JWTSecretGenerator;
+#endif // USE_SSL_SOCKET
+
 using mesos::master::detector::MasterDetector;
 
 using mesos::modules::Anonymous;
 using mesos::modules::ModuleManager;
-
-using mesos::master::detector::MasterDetector;
 
 using mesos::slave::QoSController;
 using mesos::slave::ResourceEstimator;
@@ -226,9 +236,9 @@ int main(int argc, char** argv)
   // The order of initialization is as follows:
   // * Windows socket stack.
   // * Validate flags.
+  // * Logging
   // * Log build information.
   // * Libprocess
-  // * Logging
   // * Version process
   // * Firewall rules: should be initialized before initializing HTTP endpoints.
   // * Modules: Load module libraries and manifests before they
@@ -241,7 +251,7 @@ int main(int argc, char** argv)
   // * Master detector.
   // * Authorizer.
   // * Garbage collector.
-  // * Status update manager.
+  // * Task status update manager.
   // * Resource estimator.
   // * QoS controller.
   // * `Agent` process.
@@ -266,8 +276,16 @@ int main(int argc, char** argv)
   }
 
   if (load.isError()) {
-    cerr << flags.usage(load.error()) << endl;
+    cerr << load.error() << "\n\n"
+         << "See `mesos-agent --help` for a list of supported flags." << endl;
     return EXIT_FAILURE;
+  }
+
+  logging::initialize(argv[0], true, flags); // Catch signals.
+
+  // Log any flag warnings (after logging is initialized).
+  foreach (const flags::Warning& warning, load->warnings) {
+    LOG(WARNING) << warning.message;
   }
 
   // Check that agent's version has the expected format (SemVer).
@@ -281,24 +299,24 @@ int main(int argc, char** argv)
   }
 
   if (flags.master.isNone() && flags.master_detector.isNone()) {
-    EXIT(EXIT_FAILURE) << flags.usage(
-        "Missing required option `--master` or `--master_detector`");
+    EXIT(EXIT_FAILURE)
+      << "Missing required option `--master` or `--master_detector`";
   }
 
   if (flags.master.isSome() && flags.master_detector.isSome()) {
-    EXIT(EXIT_FAILURE) << flags.usage(
-        "Only one of `--master` or `--master_detector` should be specified");
+    EXIT(EXIT_FAILURE)
+      << "Only one of `--master` or `--master_detector` should be specified";
   }
 
   // Initialize libprocess.
   if (flags.ip_discovery_command.isSome() && flags.ip.isSome()) {
-    EXIT(EXIT_FAILURE) << flags.usage(
-        "Only one of `--ip` or `--ip_discovery_command` should be specified");
+    EXIT(EXIT_FAILURE)
+      << "Only one of `--ip` or `--ip_discovery_command` should be specified";
   }
 
   if (flags.ip6_discovery_command.isSome() && flags.ip6.isSome()) {
-    EXIT(EXIT_FAILURE) << flags.usage(
-        "Only one of `--ip6` or `--ip6_discovery_command` should be specified");
+    EXIT(EXIT_FAILURE)
+      << "Only one of `--ip6` or `--ip6_discovery_command` should be specified";
   }
 
   if (flags.ip_discovery_command.isSome()) {
@@ -311,6 +329,7 @@ int main(int argc, char** argv)
 
     os::setenv("LIBPROCESS_IP", strings::trim(ipAddress.get()));
 #else
+    // TODO(andschwa): Support this when `os::shell` is enabled.
     EXIT(EXIT_FAILURE)
       << "The `--ip_discovery_command` is not yet supported on Windows";
 #endif // __WINDOWS__
@@ -327,6 +346,7 @@ int main(int argc, char** argv)
 
     os::setenv("LIBPROCESS_IP6", strings::trim(ip6Address.get()));
 #else
+    // TODO(andschwa): Support this when `os::shell` is enabled.
     EXIT(EXIT_FAILURE)
       << "The `--ip6_discovery_command` is not yet supported on Windows";
 #endif // __WINDOWS__
@@ -343,6 +363,8 @@ int main(int argc, char** argv)
   if (flags.advertise_port.isSome()) {
     os::setenv("LIBPROCESS_ADVERTISE_PORT", flags.advertise_port.get());
   }
+
+  os::setenv("LIBPROCESS_MEMORY_PROFILING", stringify(flags.memory_profiling));
 
   // Log build information.
   LOG(INFO) << "Build: " << build::DATE << " by " << build::USER;
@@ -380,14 +402,6 @@ int main(int argc, char** argv)
                        << "`main()` was not the function's first invocation";
   }
 
-  // TODO(alexr): This should happen before we start using glog, see MESOS-7586.
-  logging::initialize(argv[0], flags, true); // Catch signals.
-
-  // Log any flag warnings (after logging is initialized).
-  foreach (const flags::Warning& warning, load->warnings) {
-    LOG(WARNING) << warning.message;
-  }
-
   spawn(new VersionProcess(), true);
 
   if (flags.firewall_rules.isSome()) {
@@ -411,7 +425,7 @@ int main(int argc, char** argv)
   // Initialize modules.
   if (flags.modules.isSome() && flags.modulesDir.isSome()) {
     EXIT(EXIT_FAILURE) <<
-      flags.usage("Only one of --modules or --modules_dir should be specified");
+      "Only one of --modules or --modules_dir should be specified";
   }
 
   if (flags.modulesDir.isSome()) {
@@ -491,7 +505,9 @@ int main(int argc, char** argv)
   }
 
   Try<MasterDetector*> detector_ = MasterDetector::create(
-      flags.master, flags.master_detector);
+      flags.master.isSome() ? flags.master->value : Option<string>::none(),
+      flags.master_detector,
+      flags.zk_session_timeout);
 
   if (detector_.isError()) {
     EXIT(EXIT_FAILURE)
@@ -536,7 +552,8 @@ int main(int argc, char** argv)
 
   Files* files = new Files(READONLY_HTTP_AUTHENTICATION_REALM, authorizer_);
   GarbageCollector* gc = new GarbageCollector();
-  StatusUpdateManager* statusUpdateManager = new StatusUpdateManager(flags);
+  TaskStatusUpdateManager* taskStatusUpdateManager =
+    new TaskStatusUpdateManager(flags);
 
   Try<ResourceEstimator*> resourceEstimator =
     ResourceEstimator::create(flags.resource_estimator);
@@ -554,6 +571,35 @@ int main(int argc, char** argv)
                        << qosController.error();
   }
 
+  SecretGenerator* secretGenerator = nullptr;
+
+#ifdef USE_SSL_SOCKET
+  if (flags.jwt_secret_key.isSome()) {
+    Try<string> jwtSecretKey = os::read(flags.jwt_secret_key.get());
+    if (jwtSecretKey.isError()) {
+      EXIT(EXIT_FAILURE) << "Failed to read the file specified by "
+                         << "--jwt_secret_key";
+    }
+
+    // TODO(greggomann): Factor the following code out into a common helper,
+    // since we also do this when loading credentials.
+    Try<os::Permissions> permissions =
+      os::permissions(flags.jwt_secret_key.get());
+    if (permissions.isError()) {
+      LOG(WARNING) << "Failed to stat jwt secret key file '"
+                   << flags.jwt_secret_key.get()
+                   << "': " << permissions.error();
+    } else if (permissions->others.rwx) {
+      LOG(WARNING) << "Permissions on executor secret key file '"
+                   << flags.jwt_secret_key.get()
+                   << "' are too open; it is recommended that your"
+                   << " key file is NOT accessible by others";
+    }
+
+    secretGenerator = new JWTSecretGenerator(jwtSecretKey.get());
+  }
+#endif // USE_SSL_SOCKET
+
   Slave* slave = new Slave(
       id,
       flags,
@@ -561,9 +607,10 @@ int main(int argc, char** argv)
       containerizer.get(),
       files,
       gc,
-      statusUpdateManager,
+      taskStatusUpdateManager,
       resourceEstimator.get(),
       qosController.get(),
+      secretGenerator,
       authorizer_);
 
   process::spawn(slave);
@@ -571,11 +618,13 @@ int main(int argc, char** argv)
 
   delete slave;
 
+  delete secretGenerator;
+
   delete qosController.get();
 
   delete resourceEstimator.get();
 
-  delete statusUpdateManager;
+  delete taskStatusUpdateManager;
 
   delete gc;
 

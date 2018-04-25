@@ -41,6 +41,13 @@ We'd like to thank the following committers to the Apache Mesos project who have
       <td>kapil@apache.org</td>
     </tr>
     <tr>
+      <td>+1</td>
+      <td>Benjamin Bannier</td>
+      <td>Mesosphere</td>
+      <td></td>
+      <td>bbannier@apache.org</td>
+    </tr>
+    <tr>
       <td>-8</td>
       <td>Adam B</td>
       <td>Mesosphere</td>
@@ -97,6 +104,13 @@ We'd like to thank the following committers to the Apache Mesos project who have
       <td>ianh@apache.org</td>
     </tr>
     <tr>
+      <td>-8</td>
+      <td>Chun-Hung Hsiao</td>
+      <td>Mesosphere</td>
+      <td></td>
+      <td>chhsiao@apache.org</td>
+    </tr>
+    <tr>
       <td>+8</td>
       <td>Haosdent Huang</td>
       <td>Shopee</td>
@@ -130,6 +144,13 @@ We'd like to thank the following committers to the Apache Mesos project who have
       <td>Apple</td>
       <td>dlester</td>
       <td>dlester@apache.org</td>
+    </tr>
+    <tr>
+      <td>-8</td>
+      <td>Zhitao Li</td>
+      <td>Uber</td>
+      <td>zhitao</td>
+      <td>zhitao@apache.org</td>
     </tr>
     <tr>
       <td>+8</td>
@@ -235,6 +256,13 @@ We'd like to thank the following committers to the Apache Mesos project who have
       <td>Mesosphere</td>
       <td>joris</td>
       <td>joris@apache.org</td>
+    </tr>
+    <tr>
+      <td>-8</td>
+      <td>Andrew Schwartzmeyer</td>
+      <td>Microsoft</td>
+      <td>andschwa</td>
+      <td>andschwa@apache.org</td>
     </tr>
     <tr>
       <td>-8</td>
@@ -458,7 +486,7 @@ committers to learn about areas of the code that they are unfamiliar with.
       <tr>
         <td></td>
         <td>XFS Isolator</td>
-        <td>Yan Xu, James Peach (cc)</td>
+        <td>Yan Xu, James Peach</td>
       </tr>
       <tr>
         <td>Docker Containerizer</td>

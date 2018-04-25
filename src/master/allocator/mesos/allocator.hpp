@@ -99,8 +99,14 @@ public:
 
   void updateSlave(
       const SlaveID& slave,
+      const SlaveInfo& slaveInfo,
       const Option<Resources>& total = None(),
       const Option<std::vector<SlaveInfo::Capability>>& capabilities = None());
+
+  void addResourceProvider(
+      const SlaveID& slave,
+      const Resources& total,
+      const hashmap<FrameworkID, Resources>& used);
 
   void activateSlave(
       const SlaveID& slaveId);
@@ -119,7 +125,7 @@ public:
       const FrameworkID& frameworkId,
       const SlaveID& slaveId,
       const Resources& offeredResources,
-      const std::vector<Offer::Operation>& operations);
+      const std::vector<ResourceConversion>& conversions);
 
   process::Future<Nothing> updateAvailable(
       const SlaveID& slaveId,
@@ -239,9 +245,15 @@ public:
 
   virtual void updateSlave(
       const SlaveID& slave,
+      const SlaveInfo& slaveInfo,
       const Option<Resources>& total = None(),
       const Option<std::vector<SlaveInfo::Capability>>&
           capabilities = None()) = 0;
+
+  virtual void addResourceProvider(
+      const SlaveID& slave,
+      const Resources& total,
+      const hashmap<FrameworkID, Resources>& used) = 0;
 
   virtual void activateSlave(
       const SlaveID& slaveId) = 0;
@@ -260,7 +272,7 @@ public:
       const FrameworkID& frameworkId,
       const SlaveID& slaveId,
       const Resources& offeredResources,
-      const std::vector<Offer::Operation>& operations) = 0;
+      const std::vector<ResourceConversion>& conversions) = 0;
 
   virtual process::Future<Nothing> updateAvailable(
       const SlaveID& slaveId,
@@ -477,6 +489,7 @@ inline void MesosAllocator<AllocatorProcess>::removeSlave(
 template <typename AllocatorProcess>
 inline void MesosAllocator<AllocatorProcess>::updateSlave(
     const SlaveID& slaveId,
+    const SlaveInfo& slaveInfo,
     const Option<Resources>& total,
     const Option<std::vector<SlaveInfo::Capability>>& capabilities)
 {
@@ -484,8 +497,23 @@ inline void MesosAllocator<AllocatorProcess>::updateSlave(
       process,
       &MesosAllocatorProcess::updateSlave,
       slaveId,
+      slaveInfo,
       total,
       capabilities);
+}
+
+template <typename AllocatorProcess>
+void MesosAllocator<AllocatorProcess>::addResourceProvider(
+    const SlaveID& slave,
+    const Resources& total,
+    const hashmap<FrameworkID, Resources>& used)
+{
+  process::dispatch(
+      process,
+      &MesosAllocatorProcess::addResourceProvider,
+      slave,
+      total,
+      used);
 }
 
 
@@ -540,7 +568,7 @@ inline void MesosAllocator<AllocatorProcess>::updateAllocation(
     const FrameworkID& frameworkId,
     const SlaveID& slaveId,
     const Resources& offeredResources,
-    const std::vector<Offer::Operation>& operations)
+    const std::vector<ResourceConversion>& conversions)
 {
   process::dispatch(
       process,
@@ -548,7 +576,7 @@ inline void MesosAllocator<AllocatorProcess>::updateAllocation(
       frameworkId,
       slaveId,
       offeredResources,
-      operations);
+      conversions);
 }
 
 

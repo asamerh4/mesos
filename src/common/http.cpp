@@ -32,6 +32,7 @@
 #include <mesos/quota/quota.hpp>
 
 #include <process/authenticator.hpp>
+#include <process/collect.hpp>
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
 #include <process/http.hpp>
@@ -114,7 +115,7 @@ string serialize(
       return message.SerializeAsString();
     }
     case ContentType::JSON: {
-      return stringify(JSON::protobuf(message));
+      return jsonify(JSON::Protobuf(message));
     }
     case ContentType::RECORDIO: {
       LOG(FATAL) << "Serializing a RecordIO stream is not supported";
@@ -154,7 +155,7 @@ static JSON::Value value(
 {
   switch (type) {
     case Value::SCALAR:
-      return resources.get<Value::Scalar>(name).get().value();
+      return resources.get<Value::Scalar>(name)->value();
     case Value::RANGES:
       return stringify(resources.get<Value::Ranges>(name).get());
     case Value::SET:
@@ -268,6 +269,16 @@ JSON::Object model(const NetworkInfo& info)
 
   if (info.has_name()) {
     object.values["name"] = info.name();
+  }
+
+  if (info.port_mappings().size() > 0) {
+    JSON::Array array;
+    array.values.reserve(info.port_mappings().size()); // MESOS-2353
+    foreach (const NetworkInfo::PortMapping& portMapping,
+             info.port_mappings()) {
+      array.values.push_back(JSON::protobuf(portMapping));
+    }
+    object.values["port_mappings"] = std::move(array);
   }
 
   return object;
@@ -630,6 +641,15 @@ static void json(JSON::ObjectWriter* writer, const NetworkInfo& info)
   if (info.has_name()) {
     writer->field("name", info.name());
   }
+
+  if (info.port_mappings().size() > 0) {
+    writer->field("port_mappings", [&info](JSON::ArrayWriter* writer) {
+      foreach(const NetworkInfo::PortMapping& portMapping,
+              info.port_mappings()) {
+        writer->element(JSON::Protobuf(portMapping));
+      }
+    });
+  }
 }
 
 
@@ -842,82 +862,41 @@ const AuthorizationCallbacks createAuthorizationCallbacks(
   return callbacks;
 }
 
-
-bool approveViewFrameworkInfo(
-    const Owned<ObjectApprover>& frameworksApprover,
-    const FrameworkInfo& frameworkInfo)
+Future<Owned<ObjectApprovers>> ObjectApprovers::create(
+    const Option<Authorizer*>& authorizer,
+    const Option<Principal>& principal,
+    std::initializer_list<authorization::Action> actions)
 {
-  Try<bool> approved =
-    frameworksApprover->approved(ObjectApprover::Object(frameworkInfo));
-  if (approved.isError()) {
-    LOG(WARNING) << "Error during FrameworkInfo authorization: "
-                 << approved.error();
-    // TODO(joerg84): Consider exposing these errors to the caller.
-    return false;
+  // Ensures there are no repeated elements.
+  // Note: `set` is necessary because we relay in the order of the elements
+  // while doing `zip` below.
+  set<authorization::Action> _actions(actions);
+
+  Option<authorization::Subject> subject =
+    authorization::createSubject(principal);
+
+  if (authorizer.isNone()) {
+    hashmap<authorization::Action, Owned<ObjectApprover>> approvers;
+
+    foreach (authorization::Action action, _actions) {
+      approvers.put(
+          action,
+          Owned<ObjectApprover>(new AcceptingObjectApprover()));
+    }
+
+    return Owned<ObjectApprovers>(
+        new ObjectApprovers(std::move(approvers), principal));
   }
-  return approved.get();
-}
 
-
-bool approveViewExecutorInfo(
-    const Owned<ObjectApprover>& executorsApprover,
-    const ExecutorInfo& executorInfo,
-    const FrameworkInfo& frameworkInfo)
-{
-  Try<bool> approved = executorsApprover->approved(
-      ObjectApprover::Object(executorInfo, frameworkInfo));
-  if (approved.isError()) {
-    LOG(WARNING) << "Error during ExecutorInfo authorization: "
-                 << approved.error();
-    // TODO(joerg84): Consider exposing these errors to the caller.
-    return false;
-  }
-  return approved.get();
-}
-
-
-bool approveViewTaskInfo(
-    const Owned<ObjectApprover>& tasksApprover,
-    const TaskInfo& taskInfo,
-    const FrameworkInfo& frameworkInfo)
-{
-  Try<bool> approved =
-    tasksApprover->approved(ObjectApprover::Object(taskInfo, frameworkInfo));
-  if (approved.isError()) {
-    LOG(WARNING) << "Error during TaskInfo authorization: " << approved.error();
-    // TODO(joerg84): Consider exposing these errors to the caller.
-    return false;
-  }
-  return approved.get();
-}
-
-
-bool approveViewTask(
-    const Owned<ObjectApprover>& tasksApprover,
-    const Task& task,
-    const FrameworkInfo& frameworkInfo)
-{
-  Try<bool> approved =
-    tasksApprover->approved(ObjectApprover::Object(task, frameworkInfo));
-  if (approved.isError()) {
-    LOG(WARNING) << "Error during Task authorization: " << approved.error();
-    // TODO(joerg84): Consider exposing these errors to the caller.
-    return false;
-  }
-  return approved.get();
-}
-
-
-bool approveViewFlags(
-    const Owned<ObjectApprover>& flagsApprover)
-{
-  Try<bool> approved = flagsApprover->approved(ObjectApprover::Object());
-  if (approved.isError()) {
-    LOG(WARNING) << "Error during Flags authorization: " << approved.error();
-    // TODO(joerg84): Consider exposing these errors to the caller.
-    return false;
-  }
-  return approved.get();
+  return process::collect(lambda::map<std::list>(
+      [&](authorization::Action action) -> Future<Owned<ObjectApprover>> {
+        return authorizer.get()->getObjectApprover(subject, action);
+      },
+      _actions))
+    .then([=](const std::list<Owned<ObjectApprover>>& _approvers) {
+      return Owned<ObjectApprovers>(
+          new ObjectApprovers(lambda::zip(_actions, _approvers), principal));
+    });
 }
 
 
@@ -963,52 +942,6 @@ process::Future<bool> authorizeEndpoint(
 }
 
 
-bool approveViewRole(
-    const Owned<ObjectApprover>& rolesApprover,
-    const string& role)
-{
-  Try<bool> approved = rolesApprover->approved(ObjectApprover::Object(role));
-  if (approved.isError()) {
-    LOG(WARNING) << "Error during Roles authorization: " << approved.error();
-    // TODO(joerg84): Consider exposing these errors to the caller.
-    return false;
-  }
-  return approved.get();
-}
-
-
-bool authorizeResource(
-    const Resource& resource,
-    const Option<Owned<AuthorizationAcceptor>>& acceptor)
-{
-  if (acceptor.isNone()) {
-    return true;
-  }
-
-  // Necessary because recovered agents are presented in old format.
-  if (resource.has_role() && resource.role() != "*" &&
-      !acceptor.get()->accept(resource.role())) {
-    return false;
-  }
-
-  if (resource.has_allocation_info() &&
-      !acceptor.get()->accept(resource.allocation_info().role())) {
-    return false;
-  }
-
-  // Reservations follow a path model where each entry is a child of the
-  // previous one. Therefore, to accept the resource the acceptor has to
-  // accept all entries.
-  foreach (Resource::ReservationInfo reservation, resource.reservations()) {
-    if (!acceptor.get()->accept(reservation.role())) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-
 namespace {
 
 Result<process::http::authentication::Authenticator*> createBasicAuthenticator(
@@ -1035,9 +968,9 @@ Result<process::http::authentication::Authenticator*> createBasicAuthenticator(
 Result<process::http::authentication::Authenticator*> createJWTAuthenticator(
     const string& realm,
     const string& authenticatorName,
-    const Option<string>& secretKey)
+    const Option<string>& jwtSecretKey)
 {
-  if (secretKey.isNone()) {
+  if (jwtSecretKey.isNone()) {
     return Error(
         "No secret key provided for the default '" +
         string(internal::DEFAULT_JWT_HTTP_AUTHENTICATOR) +
@@ -1048,7 +981,7 @@ Result<process::http::authentication::Authenticator*> createJWTAuthenticator(
             << internal::DEFAULT_JWT_HTTP_AUTHENTICATOR
             << "' HTTP authenticator for realm '" << realm << "'";
 
-  return new JWTAuthenticator(realm, secretKey.get());
+  return new JWTAuthenticator(realm, jwtSecretKey.get());
 }
 #endif // USE_SSL_SOCKET
 
@@ -1080,7 +1013,7 @@ Try<Nothing> initializeHttpAuthenticators(
     const string& realm,
     const vector<string>& authenticatorNames,
     const Option<Credentials>& credentials,
-    const Option<string>& secretKey)
+    const Option<string>& jwtSecretKey)
 {
   if (authenticatorNames.empty()) {
     return Error(
@@ -1100,7 +1033,7 @@ Try<Nothing> initializeHttpAuthenticators(
     } else if (
         authenticatorNames[0] == internal::DEFAULT_JWT_HTTP_AUTHENTICATOR) {
       authenticator_ =
-        createJWTAuthenticator(realm, authenticatorNames[0], secretKey);
+        createJWTAuthenticator(realm, authenticatorNames[0], jwtSecretKey);
 #endif // USE_SSL_SOCKET
     } else {
       authenticator_ = createCustomAuthenticator(realm, authenticatorNames[0]);
@@ -1126,7 +1059,7 @@ Try<Nothing> initializeHttpAuthenticators(
         authenticator_ = createBasicAuthenticator(realm, name, credentials);
 #ifdef USE_SSL_SOCKET
       } else if (name == internal::DEFAULT_JWT_HTTP_AUTHENTICATOR) {
-        authenticator_ = createJWTAuthenticator(realm, name, secretKey);
+        authenticator_ = createJWTAuthenticator(realm, name, jwtSecretKey);
 #endif // USE_SSL_SOCKET
       } else {
         authenticator_ = createCustomAuthenticator(realm, name);
@@ -1174,28 +1107,5 @@ void logRequest(const process::http::Request& request)
                 ? " with X-Forwarded-For='" + forwardedFor.get() + "'"
                 : "");
 }
-
-
-Future<Owned<AuthorizationAcceptor>> AuthorizationAcceptor::create(
-    const Option<Principal>& principal,
-    const Option<Authorizer*>& authorizer,
-    const authorization::Action& action)
-{
-  if (authorizer.isNone()) {
-    return Owned<AuthorizationAcceptor>(
-        new AuthorizationAcceptor(Owned<ObjectApprover>(
-            new AcceptingObjectApprover())));
-  }
-
-  const Option<authorization::Subject> subject =
-    authorization::createSubject(principal);
-
-  return authorizer.get()->getObjectApprover(subject, action)
-    .then([=](const Owned<ObjectApprover>& approver) {
-      return Owned<AuthorizationAcceptor>(
-          new AuthorizationAcceptor(approver));
-    });
-}
-
 
 }  // namespace mesos {

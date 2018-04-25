@@ -68,7 +68,7 @@ public:
 
     // Verify that the dd command and its flags used in a bit are valid
     // on this system.
-    ASSERT_EQ(0, os::system("dd count=1 bs=1M if=/dev/zero of=/dev/null"))
+    ASSERT_SOME_EQ(0, os::system("dd count=1 bs=1M if=/dev/zero of=/dev/null"))
       << "Cannot find a compatible 'dd' command";
   }
 };
@@ -113,7 +113,7 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -124,14 +124,20 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
       Resources::parse("cpus:1;mem:256;disk:1024").get(),
       "while true; do dd count=512 bs=1M if=/dev/zero of=./temp; done");
 
+  Future<TaskStatus> starting;
   Future<TaskStatus> running;
   Future<TaskStatus> killed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&starting))
     .WillOnce(FutureArg<1>(&running))
     .WillOnce(FutureArg<1>(&killed))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(starting);
+  EXPECT_EQ(task.task_id(), starting->task_id());
+  EXPECT_EQ(TASK_STARTING, starting->state());
 
   AWAIT_READY(running);
   EXPECT_EQ(task.task_id(), running->task_id());
@@ -234,7 +240,7 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   Offer offer = offers.get()[0];
 
@@ -245,28 +251,39 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
       Resources::parse("cpus:1;mem:256;disk:1024").get(),
       "while true; do dd count=512 bs=1M if=/dev/zero of=./temp; done");
 
+  Future<TaskStatus> starting;
   Future<TaskStatus> running;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&running));
+    .WillOnce(FutureArg<1>(&starting))
+    .WillOnce(FutureArg<1>(&running))
+    .WillRepeatedly(Return()); // Ignore subsequent updates.
 
+  Future<Nothing> runningAck =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
-  Future<Nothing> _statusUpdateAcknowledgement =
+  Future<Nothing> startingAck =
     FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(starting);
+  EXPECT_EQ(task.task_id(), starting->task_id());
+  EXPECT_EQ(TASK_STARTING, starting->state());
+
+  AWAIT_READY_FOR(startingAck, Seconds(120));
 
   AWAIT_READY(running);
   EXPECT_EQ(task.task_id(), running->task_id());
   EXPECT_EQ(TASK_RUNNING, running->state());
 
   // Wait for the ACK to be checkpointed.
-  AWAIT_READY_FOR(_statusUpdateAcknowledgement, Seconds(120));
+  AWAIT_READY_FOR(runningAck, Seconds(120));
 
   // We restart the slave to let it recover.
   slave.get()->terminate();
 
   // Set up so we can wait until the new slave updates the container's
-  // resources (this occurs after the executor has re-registered).
+  // resources (this occurs after the executor has reregistered).
   Future<Nothing> update =
     FUTURE_DISPATCH(_, &MesosContainerizerProcess::update);
 

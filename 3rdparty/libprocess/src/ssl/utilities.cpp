@@ -192,7 +192,7 @@ Try<X509*> generate_x509(
           name,
           "CN",
           MBSTRING_ASC,
-          reinterpret_cast<const unsigned char*>(hostname.get().c_str()),
+          reinterpret_cast<const unsigned char*>(hostname->c_str()),
           -1,
           -1,
           0) != 1) {
@@ -238,7 +238,7 @@ Try<X509*> generate_x509(
       return Error("Failed to create alternative name: ASN1_STRING_new");
     }
 
-    Try<in_addr> in = ip.get().in();
+    Try<in_addr> in = ip->in();
 
     if (in.isError()) {
       ASN1_STRING_free(alt_name_str);
@@ -248,12 +248,15 @@ Try<X509*> generate_x509(
       return Error("Failed to get IP/4 address");
     }
 
+#ifdef __WINDOWS__
+    // cURL defines `in_addr_t` as `unsigned long` for Windows,
+    // so we do too for consistency.
+    typedef unsigned long in_addr_t;
+#endif // __WINDOWS__
+
     // For `iPAddress` we hand over a binary value as part of the
     // specification.
-    if (ASN1_STRING_set(
-            alt_name_str,
-            &in.get().s_addr,
-            sizeof(in_addr_t)) == 0) {
+    if (ASN1_STRING_set(alt_name_str, &in->s_addr, sizeof(in_addr_t)) == 0) {
       ASN1_STRING_free(alt_name_str);
       GENERAL_NAME_free(alt_name);
       sk_GENERAL_NAME_pop_free(alt_name_stack, GENERAL_NAME_free);

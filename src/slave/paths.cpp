@@ -36,6 +36,8 @@
 
 #include "common/validation.hpp"
 
+#include "csi/paths.hpp"
+
 #include "messages/messages.hpp"
 
 #include "slave/paths.hpp"
@@ -64,12 +66,19 @@ const char TASK_INFO_FILE[] = "task.info";
 const char TASK_UPDATES_FILE[] = "task.updates";
 const char RESOURCES_INFO_FILE[] = "resources.info";
 const char RESOURCES_TARGET_FILE[] = "resources.target";
+const char RESOURCE_PROVIDER_STATE_FILE[] = "resource_provider.state";
+const char OPERATION_UPDATES_FILE[] = "operation.updates";
 
 
+const char CONTAINERS_DIR[] = "containers";
+const char CSI_DIR[] = "csi";
 const char SLAVES_DIR[] = "slaves";
 const char FRAMEWORKS_DIR[] = "frameworks";
 const char EXECUTORS_DIR[] = "executors";
 const char EXECUTOR_RUNS_DIR[] = "runs";
+const char RESOURCE_PROVIDER_REGISTRY[] = "resource_provider_registry";
+const char RESOURCE_PROVIDERS_DIR[] = "resource_providers";
+const char OPERATIONS_DIR[] = "operations";
 
 
 Try<ExecutorRunPath> parseExecutorRunPath(
@@ -136,6 +145,12 @@ string getProvisionerDir(const string& rootDir)
 }
 
 
+string getCsiRootDir(const string& workDir)
+{
+  return path::join(workDir, CSI_DIR);
+}
+
+
 string getBootIdPath(const string& rootDir)
 {
   return path::join(rootDir, BOOT_ID_FILE);
@@ -153,6 +168,21 @@ string getSlavePath(
     const SlaveID& slaveId)
 {
   return path::join(rootDir, SLAVES_DIR, stringify(slaveId));
+}
+
+
+Try<list<string>> getContainerPaths(
+    const string& rootDir)
+{
+  return fs::list(path::join(rootDir, CONTAINERS_DIR, "*"));
+}
+
+
+string getContainerPath(
+    const string& rootDir,
+    const ContainerID& containerId)
+{
+  return path::join(rootDir, CONTAINERS_DIR, stringify(containerId));
 }
 
 
@@ -303,6 +333,20 @@ string getExecutorSentinelPath(
 }
 
 
+string getExecutorVirtualPath(
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId)
+{
+  return path::join(
+      stringify(os::PATH_SEPARATOR) + FRAMEWORKS_DIR,
+      stringify(frameworkId),
+      EXECUTORS_DIR,
+      stringify(executorId),
+      EXECUTOR_RUNS_DIR,
+      LATEST_SYMLINK);
+}
+
+
 string getExecutorLatestRunPath(
     const string& rootDir,
     const SlaveID& slaveId,
@@ -433,6 +477,130 @@ string getTaskUpdatesPath(
 }
 
 
+string getResourceProviderRegistryPath(
+    const string& rootDir,
+    const SlaveID& slaveId)
+{
+  return path::join(
+      getSlavePath(getMetaRootDir(rootDir), slaveId),
+      RESOURCE_PROVIDER_REGISTRY);
+}
+
+
+Try<list<string>> getResourceProviderPaths(
+    const string& metaDir,
+    const SlaveID& slaveId)
+{
+  return fs::list(path::join(
+      getSlavePath(metaDir, slaveId),
+      RESOURCE_PROVIDERS_DIR,
+      "*", // Resource provider type.
+      "*", // Resource provider name.
+      "*"));
+}
+
+
+string getResourceProviderPath(
+    const string& metaDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId)
+{
+  return path::join(
+      getSlavePath(metaDir, slaveId),
+      RESOURCE_PROVIDERS_DIR,
+      resourceProviderType,
+      resourceProviderName,
+      stringify(resourceProviderId));
+}
+
+
+string getResourceProviderStatePath(
+    const string& metaDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId)
+{
+  return path::join(
+      getResourceProviderPath(
+          metaDir,
+          slaveId,
+          resourceProviderType,
+          resourceProviderName,
+          resourceProviderId),
+      RESOURCE_PROVIDER_STATE_FILE);
+}
+
+
+string getLatestResourceProviderPath(
+    const string& metaDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName)
+{
+  return path::join(
+      getSlavePath(metaDir, slaveId),
+      RESOURCE_PROVIDERS_DIR,
+      resourceProviderType,
+      resourceProviderName,
+      LATEST_SYMLINK);
+}
+
+
+Try<list<string>> getOperationPaths(
+    const string& rootDir)
+{
+  return fs::list(path::join(rootDir, OPERATIONS_DIR, "*"));
+}
+
+
+string getOperationPath(
+    const string& rootDir,
+    const id::UUID& operationUuid)
+{
+  return path::join(rootDir, OPERATIONS_DIR, operationUuid.toString());
+}
+
+
+Try<id::UUID> parseOperationPath(
+    const string& rootDir,
+    const string& dir)
+{
+  // TODO(chhsiao): Consider using `<regex>`, which requires GCC 4.9+.
+
+  // Make sure there's a separator at the end of the prefix so that we
+  // don't accidently slice off part of a directory.
+  const string prefix = path::join(rootDir, OPERATIONS_DIR, "");
+
+  if (!strings::startsWith(dir, prefix)) {
+    return Error(
+        "Directory '" + dir + "' does not fall under operations directory '" +
+        prefix + "'");
+  }
+
+  Try<id::UUID> operationUuid = id::UUID::fromString(Path(dir).basename());
+  if (operationUuid.isError()) {
+    return Error(
+        "Could not decode operation UUID from string '" +
+        Path(dir).basename() + "': " + operationUuid.error());
+  }
+
+  return operationUuid.get();
+}
+
+
+string getOperationUpdatesPath(
+    const string& rootDir,
+    const id::UUID& operationUuid)
+{
+  return path::join(
+      getOperationPath(rootDir, operationUuid),
+      OPERATION_UPDATES_FILE);
+}
+
+
 string getResourcesInfoPath(
     const string& rootDir)
 {
@@ -448,7 +616,7 @@ string getResourcesTargetPath(
 
 
 string getPersistentVolumePath(
-    const string& rootDir,
+    const string& workDir,
     const string& role,
     const string& persistenceId)
 {
@@ -469,12 +637,12 @@ string getPersistentVolumePath(
   string serializableRole = strings::replace(role, "/", " ");
 
   return path::join(
-      rootDir, "volumes", "roles", serializableRole, persistenceId);
+      workDir, "volumes", "roles", serializableRole, persistenceId);
 }
 
 
 string getPersistentVolumePath(
-    const string& rootDir,
+    const string& workDir,
     const Resource& volume)
 {
   CHECK_GT(volume.reservations_size(), 0);
@@ -490,10 +658,10 @@ string getPersistentVolumePath(
 
 
   // If no `source` is provided in `DiskInfo` volumes are mapped into
-  // the `rootDir`.
+  // the `workDir`.
   if (!volume.disk().has_source()) {
     return getPersistentVolumePath(
-        rootDir,
+        workDir,
         role,
         volume.disk().persistence().id());
   }
@@ -506,8 +674,21 @@ string getPersistentVolumePath(
       // For `PATH` we mount a directory inside the `root`.
       CHECK(volume.disk().source().has_path());
       CHECK(volume.disk().source().path().has_root());
+      string root = volume.disk().source().path().root();
+
+      if (!path::absolute(root)) {
+        // A relative path in `root` is relative to agent work dir.
+        root = path::join(workDir, root);
+      }
+
+      if (volume.disk().source().has_id()) {
+        // For a CSI volume the mount point is derived from `root` and `id`.
+        root =
+          csi::paths::getMountTargetPath(root, volume.disk().source().id());
+      }
+
       return getPersistentVolumePath(
-          volume.disk().source().path().root(),
+          root,
           role,
           volume.disk().persistence().id());
     }
@@ -515,8 +696,23 @@ string getPersistentVolumePath(
       // For `MOUNT` we map straight onto the root of the mount.
       CHECK(volume.disk().source().has_mount());
       CHECK(volume.disk().source().mount().has_root());
-      return volume.disk().source().mount().root();
+      string root = volume.disk().source().mount().root();
+
+      if (!path::absolute(root)) {
+        // A relative path in `root` is relative to agent work dir.
+        root = path::join(workDir, root);
+      }
+
+      if (volume.disk().source().has_id()) {
+        // For a CSI volume the mount point is derived from `root` and `id`.
+        root =
+          csi::paths::getMountTargetPath(root, volume.disk().source().id());
+      }
+
+      return root;
     }
+    case Resource::DiskInfo::Source::BLOCK:
+    case Resource::DiskInfo::Source::RAW:
     case Resource::DiskInfo::Source::UNKNOWN:
       LOG(FATAL) << "Unsupported DiskInfo.Source.type";
       break;
@@ -526,7 +722,7 @@ string getPersistentVolumePath(
 }
 
 
-string createExecutorDirectory(
+Try<string> createExecutorDirectory(
     const string& rootDir,
     const SlaveID& slaveId,
     const FrameworkID& frameworkId,
@@ -545,10 +741,19 @@ string createExecutorDirectory(
   const string directory =
     getExecutorRunPath(rootDir, slaveId, frameworkId, executorId, containerId);
 
-  Try<Nothing> mkdir = os::mkdir(directory);
+  if (user.isSome()) {
+    LOG(INFO) << "Creating sandbox '" << directory << "'"
+              << " for user '" << user.get() << "'";
+  } else {
+    LOG(INFO) << "Creating sandbox '" << directory << "'";
+  }
 
-  CHECK_SOME(mkdir)
-    << "Failed to create executor directory '" << directory << "'";
+  Try<Nothing> mkdir = createSandboxDirectory(directory, user);
+  if (mkdir.isError()) {
+    return Error(
+        "Failed to create executor directory '" + directory + "': " +
+        mkdir.error());
+  }
 
   // Remove the previous "latest" symlink.
   const string latest =
@@ -561,38 +766,51 @@ string createExecutorDirectory(
 
   // Symlink the new executor directory to "latest".
   Try<Nothing> symlink = ::fs::symlink(directory, latest);
+  if (symlink.isError()) {
+    return Error(
+        "Failed to symlink '" + directory + "' to '" + latest + "': " +
+        symlink.error());
+  }
 
-  CHECK_SOME(symlink)
-    << "Failed to symlink directory '" << directory
-    << "' to '" << latest << "'";
+  return directory;
+}
 
-// `os::chown()` is not available on Windows.
+
+// Given a directory path and an optional user, create a directory
+// suitable for use as a task sandbox. A task sandbox must be owned
+// by the task user (if present) and have restricted permissions.
+Try<Nothing> createSandboxDirectory(
+    const string& directory,
+    const Option<string>& user)
+{
+  Try<Nothing> mkdir = os::mkdir(directory);
+  if (mkdir.isError()) {
+    return Error("Failed to create directory: " + mkdir.error());
+  }
+
 #ifndef __WINDOWS__
+  // Since this is a sandbox directory containing private task data,
+  // we want to ensure that it is not accessible to "others".
+  Try<Nothing> chmod = os::chmod(directory, 0750);
+  if (mkdir.isError()) {
+    return Error("Failed to chmod directory: " + chmod.error());
+  }
+
   if (user.isSome()) {
-    // Per MESOS-2592, we need to set the ownership of the executor
-    // directory during its creation. We should not rely on subsequent
-    // phases of the executor creation to ensure the ownership as
-    // those may be conditional and in some cases leave the executor
-    // directory owned by the slave user instead of the specified
-    // framework or per-executor user.
-    LOG(INFO) << "Trying to chown '" << directory << "' to user '"
-              << user.get() << "'";
     Try<Nothing> chown = os::chown(user.get(), directory);
     if (chown.isError()) {
-      // TODO(nnielsen): We currently have tests which depend on using
-      // user names which may not be available on the test machines.
-      // Therefore, we cannot make the chown validation a hard
-      // CHECK().
-      LOG(WARNING) << "Failed to chown executor directory '" << directory
-                   << "'. This may be due to attempting to run the executor "
-                   << "as a nonexistent user on the agent; see the description"
-                   << " for the `--switch_user` flag for more information: "
-                   << chown.error();
+      // Attempt to clean up, but since we've already failed to chown,
+      // we don't check the return value here.
+      os::rmdir(directory);
+
+      return Error(
+          "Failed to chown directory to '" +
+          user.get() + "': " + chown.error());
     }
   }
 #endif // __WINDOWS__
 
-  return directory;
+  return Nothing();
 }
 
 
@@ -620,6 +838,48 @@ string createSlaveDirectory(
   }
 
   // Symlink the new slave directory to "latest".
+  Try<Nothing> symlink = ::fs::symlink(directory, latest);
+
+  CHECK_SOME(symlink)
+    << "Failed to symlink directory '" << directory
+    << "' to '" << latest << "'";
+
+  return directory;
+}
+
+
+string createResourceProviderDirectory(
+    const string& rootDir,
+    const SlaveID& slaveId,
+    const string& resourceProviderType,
+    const string& resourceProviderName,
+    const ResourceProviderID& resourceProviderId)
+{
+  const string directory = getResourceProviderPath(
+      rootDir,
+      slaveId,
+      resourceProviderType,
+      resourceProviderName,
+      resourceProviderId);
+
+  Try<Nothing> mkdir = os::mkdir(directory);
+
+  CHECK_SOME(mkdir)
+    << "Failed to create resource provider directory '" << directory << "'";
+
+  // Remove the previous "latest" symlink.
+  const string latest = getLatestResourceProviderPath(
+      rootDir,
+      slaveId,
+      resourceProviderType,
+      resourceProviderName);
+
+  if (os::exists(latest)) {
+    CHECK_SOME(os::rm(latest))
+      << "Failed to remove latest symlink '" << latest << "'";
+  }
+
+  // Symlink the new resource provider directory to "latest".
   Try<Nothing> symlink = ::fs::symlink(directory, latest);
 
   CHECK_SOME(symlink)

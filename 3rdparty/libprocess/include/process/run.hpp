@@ -38,7 +38,7 @@ public:
   virtual ~ThunkProcess() {}
 
 protected:
-  virtual void serve(const Event& event)
+  void serve(Event&& event) override
   {
     promise->set((*thunk)());
   }
@@ -87,7 +87,7 @@ Future<R> run(R (*method)())
     return future;                                                      \
   }
 
-  REPEAT_FROM_TO(1, 12, TEMPLATE, _) // Args A0 -> A10.
+  REPEAT_FROM_TO(1, 13, TEMPLATE, _) // Args A0 -> A11.
 #undef TEMPLATE
 
 } // namespace process {

@@ -84,7 +84,7 @@ namespace process {
 namespace network {
 namespace internal {
 
-Try<std::shared_ptr<SocketImpl>> LibeventSSLSocketImpl::create(int s)
+Try<std::shared_ptr<SocketImpl>> LibeventSSLSocketImpl::create(int_fd s)
 {
   openssl::initialize();
 
@@ -154,7 +154,7 @@ void LibeventSSLSocketImpl::initialize()
 }
 
 
-Try<Nothing> LibeventSSLSocketImpl::shutdown(int how)
+Try<Nothing, SocketError> LibeventSSLSocketImpl::shutdown(int how)
 {
   // Nothing to do if this socket was never initialized.
   synchronized (lock) {
@@ -165,7 +165,13 @@ Try<Nothing> LibeventSSLSocketImpl::shutdown(int how)
       CHECK(recv_request.get() == nullptr);
       CHECK(send_request.get() == nullptr);
 
-      return ErrnoError(ENOTCONN);
+      // We expect this to fail and generate an 'ENOTCONN' failure as
+      // no connection should exist at this point.
+      if (::shutdown(s, how) < 0) {
+        return SocketError();
+      }
+
+      return Nothing();
     }
   }
 
@@ -337,19 +343,34 @@ void LibeventSSLSocketImpl::event_callback(short events)
 {
   CHECK(__in_event_loop__);
 
+  // TODO(bmahler): Libevent's invariant is that `events` contains:
+  //
+  //   (1) one of BEV_EVENT_READING or BEV_EVENT_WRITING to
+  //       indicate whether the event was on the read or write path.
+  //
+  //   (2) one of BEV_EVENT_EOF, BEV_EVENT_ERROR, BEV_EVENT_TIMEOUT,
+  //       BEV_EVENT_CONNECTED.
+  //
+  // (1) allows us to handle read and write errors separately.
+  // HOWEVER, for SSL bufferevents in 2.0.x, libevent never seems
+  // to tell us about BEV_EVENT_READING or BEV_EVENT_WRITING,
+  // which forces us to write incorrect logic here by treating all
+  // events as affecting both reads and writes.
+  //
+  // This has been fixed in 2.1.x:
+  //   2.1 "What's New":
+  //     https://github.com/libevent/libevent/blob/release-2.1.8-stable/whatsnew-2.1.txt#L333-L335 // NOLINT
+  //   Commit:
+  //     https://github.com/libevent/libevent/commit/f7eb69ace
+  //
+  // We should require 2.1.x so that we can correctly distinguish
+  // between the read and write errors, and not have two code paths
+  // depending on the libevent version, see MESOS-5999, MESOS-6770.
+
   Owned<RecvRequest> current_recv_request;
   Owned<SendRequest> current_send_request;
   Owned<ConnectRequest> current_connect_request;
 
-  // In all of the following conditions, we're interested in swapping
-  // the value of the requests with null (if they are already null,
-  // then there's no harm).
-  //
-  // TODO(bmahler): If we receive an EOF because the receiving
-  // side only shutdown writes on its socket, we can technically
-  // still send data on the socket!
-  //   See: http://www.unixguide.net/network/socketfaq/2.6.shtml
-  //   Related JIRA: MESOS-5999
   if (events & BEV_EVENT_EOF ||
       events & BEV_EVENT_CONNECTED ||
       events & BEV_EVENT_ERROR) {
@@ -360,21 +381,19 @@ void LibeventSSLSocketImpl::event_callback(short events)
     }
   }
 
-  // If a request below is null, then no such request is in progress,
-  // either because it was never created, it has already been
-  // completed, or it has been discarded.
-
-  // The case below where `EVUTIL_SOCKET_ERROR() == 0` will catch
-  // unclean shutdowns of the socket.
+  // First handle EOF, we also look for `BEV_EVENT_ERROR` with
+  // `EVUTIL_SOCKET_ERROR() == 0` since this occurs as a result
+  // of a "dirty" SSL shutdown (i.e. TCP close before SSL close)
+  // or when this socket has been shut down and further sends
+  // are performed.
   //
-  // TODO(greggomann): We should make use of the `BEV_EVENT_READING`
-  // and `BEV_EVENT_WRITING` flags to handle read and write errors
-  // differently. Related JIRA: MESOS-6770
+  // TODO(bmahler): We don't expose "dirty" SSL shutdowns as
+  // recv errors, but perhaps we should?
   if (events & BEV_EVENT_EOF ||
      (events & BEV_EVENT_ERROR && EVUTIL_SOCKET_ERROR() == 0)) {
-    // At end of file, close the connection.
+    received_eof = true;
+
     if (current_recv_request.get() != nullptr) {
-      received_eof = true;
       // Drain any remaining data from the bufferevent or complete the
       // promise with 0 to signify EOF. Because we set `received_eof`,
       // subsequent calls to `recv` will return 0 if there is no data
@@ -394,7 +413,7 @@ void LibeventSSLSocketImpl::event_callback(short events)
     }
 
     if (current_send_request.get() != nullptr) {
-      current_send_request->promise.set(0);
+      current_send_request->promise.fail("Failed send: connection closed");
     }
 
     if (current_connect_request.get() != nullptr) {
@@ -463,7 +482,7 @@ void LibeventSSLSocketImpl::event_callback(short events)
 }
 
 
-LibeventSSLSocketImpl::LibeventSSLSocketImpl(int _s)
+LibeventSSLSocketImpl::LibeventSSLSocketImpl(int_fd _s)
   : SocketImpl(_s),
     bev(nullptr),
     listener(nullptr),
@@ -474,7 +493,7 @@ LibeventSSLSocketImpl::LibeventSSLSocketImpl(int _s)
 
 
 LibeventSSLSocketImpl::LibeventSSLSocketImpl(
-    int _s,
+    int_fd _s,
     bufferevent* _bev,
     Option<string>&& _peer_hostname)
   : SocketImpl(_s),
@@ -842,7 +861,11 @@ Future<size_t> LibeventSSLSocketImpl::sendfile(
           // descriptor and close it after it has finished reading it.
           int result = evbuffer_add_file(
               bufferevent_get_output(self->bev),
+#ifdef __WINDOWS__
+              owned_fd.crt(),
+#else
               owned_fd,
+#endif // __WINDOWS__
               offset,
               size);
           CHECK_EQ(0, result);
@@ -870,7 +893,7 @@ Try<Nothing> LibeventSSLSocketImpl::listen(int backlog)
   listener = evconnlistener_new(
       base,
       [](evconnlistener* listener,
-         int socket,
+         evutil_socket_t socket,
          sockaddr* addr,
          int addr_length,
          void* arg) {
@@ -935,6 +958,14 @@ Try<Nothing> LibeventSSLSocketImpl::listen(int backlog)
 
 Future<std::shared_ptr<SocketImpl>> LibeventSSLSocketImpl::accept()
 {
+  // Note that due to MESOS-8448, when the caller discards, it's
+  // possible that we pull an accepted socket out of the queue but
+  // drop it when `.then` transitions to discarded rather than
+  // executing the continuation. This is currently acceptable since
+  // callers only discard when they're breaking their accept loop.
+  // However, from an API perspective, we shouldn't be dropping
+  // the socket on the floor.
+  //
   // We explicitly specify the return type to avoid a type deduction
   // issue in some versions of clang. See MESOS-2943.
   return accept_queue.get()

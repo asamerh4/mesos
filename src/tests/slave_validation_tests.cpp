@@ -285,7 +285,7 @@ TEST(AgentCallValidationTest, LaunchNestedContainer)
 
   // Valid `container_id` but missing `container_id.parent`.
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   launch->mutable_container_id()->CopyFrom(containerId);
 
@@ -296,7 +296,7 @@ TEST(AgentCallValidationTest, LaunchNestedContainer)
   // an invalid environment variable to check that the common validation
   // code for the command's environment is being executed.
   ContainerID parentContainerId;
-  parentContainerId.set_value(UUID::random().toString());
+  parentContainerId.set_value(id::UUID::random().toString());
 
   launch->mutable_container_id()->mutable_parent()->CopyFrom(parentContainerId);
   launch->mutable_command()->CopyFrom(createCommandInfo("exit 0"));
@@ -323,7 +323,7 @@ TEST(AgentCallValidationTest, LaunchNestedContainer)
 
   // Any number of parents is valid.
   ContainerID grandparentContainerId;
-  grandparentContainerId.set_value(UUID::random().toString());
+  grandparentContainerId.set_value(id::UUID::random().toString());
 
   launch->mutable_container_id()->mutable_parent()->mutable_parent()
     ->CopyFrom(grandparentContainerId);
@@ -344,7 +344,7 @@ TEST(AgentCallValidationTest, WaitNestedContainer)
 
   // Expecting a `container_id.parent`.
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   agent::Call::WaitNestedContainer* wait =
     call.mutable_wait_nested_container();
@@ -356,7 +356,7 @@ TEST(AgentCallValidationTest, WaitNestedContainer)
 
   // Test the valid case.
   ContainerID parentContainerId;
-  parentContainerId.set_value(UUID::random().toString());
+  parentContainerId.set_value(id::UUID::random().toString());
 
   wait->mutable_container_id()->mutable_parent()->CopyFrom(containerId);
 
@@ -376,7 +376,7 @@ TEST(AgentCallValidationTest, KillNestedContainer)
 
   // Expecting a `container_id.parent`.
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   agent::Call::KillNestedContainer* kill =
     call.mutable_kill_nested_container();
@@ -388,7 +388,7 @@ TEST(AgentCallValidationTest, KillNestedContainer)
 
   // Test the valid case.
   ContainerID parentContainerId;
-  parentContainerId.set_value(UUID::random().toString());
+  parentContainerId.set_value(id::UUID::random().toString());
 
   kill->mutable_container_id()->mutable_parent()->CopyFrom(containerId);
 
@@ -408,7 +408,7 @@ TEST(AgentCallValidationTest, RemoveNestedContainer)
 
   // Expecting a `container_id.parent`.
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   agent::Call::RemoveNestedContainer* removeNestedContainer =
     call.mutable_remove_nested_container();
@@ -420,7 +420,7 @@ TEST(AgentCallValidationTest, RemoveNestedContainer)
 
   // Test the valid case.
   ContainerID parentContainerId;
-  parentContainerId.set_value(UUID::random().toString());
+  parentContainerId.set_value(id::UUID::random().toString());
 
   removeNestedContainer->mutable_container_id()->mutable_parent()->CopyFrom(
       containerId);
@@ -453,7 +453,7 @@ TEST(AgentCallValidationTest, LaunchNestedContainerSession)
 
   // Valid `container_id` but missing `container_id.parent`.
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   launch->mutable_container_id()->CopyFrom(containerId);
 
@@ -464,7 +464,7 @@ TEST(AgentCallValidationTest, LaunchNestedContainerSession)
   // an invalid environment variable to check that the common validation
   // code for the command's environment is being executed.
   ContainerID parentContainerId;
-  parentContainerId.set_value(UUID::random().toString());
+  parentContainerId.set_value(id::UUID::random().toString());
 
   launch->mutable_container_id()->mutable_parent()->CopyFrom(parentContainerId);
   launch->mutable_command()->CopyFrom(createCommandInfo("exit 0"));
@@ -491,10 +491,80 @@ TEST(AgentCallValidationTest, LaunchNestedContainerSession)
 
   // Any number of parents is valid.
   ContainerID grandparentContainerId;
-  grandparentContainerId.set_value(UUID::random().toString());
+  grandparentContainerId.set_value(id::UUID::random().toString());
 
   launch->mutable_container_id()->mutable_parent()->mutable_parent()->CopyFrom(
       grandparentContainerId);
+
+  error = validation::agent::call::validate(call);
+  EXPECT_NONE(error);
+}
+
+
+TEST(AgentCallValidationTest, AddResourceProviderConfig)
+{
+  // Expecting `add_resource_provider_config`.
+  agent::Call call;
+  call.set_type(agent::Call::ADD_RESOURCE_PROVIDER_CONFIG);
+
+  Option<Error> error = validation::agent::call::validate(call);
+  EXPECT_SOME(error);
+
+  // Expecting `info.id` to be unset.
+  ResourceProviderInfo* info =
+    call.mutable_add_resource_provider_config()->mutable_info();
+  info->set_type("org.apache.mesos.rp.type");
+  info->set_name("name");
+  info->mutable_id()->set_value("id");
+
+  error = validation::agent::call::validate(call);
+  EXPECT_SOME(error);
+
+  info->clear_id();
+
+  error = validation::agent::call::validate(call);
+  EXPECT_NONE(error);
+}
+
+
+TEST(AgentCallValidationTest, UpdateResourceProviderConfig)
+{
+  // Expecting `update_resource_provider_config`.
+  agent::Call call;
+  call.set_type(agent::Call::UPDATE_RESOURCE_PROVIDER_CONFIG);
+
+  Option<Error> error = validation::agent::call::validate(call);
+  EXPECT_SOME(error);
+
+  // Expecting `info.id` to be unset.
+  ResourceProviderInfo* info =
+    call.mutable_update_resource_provider_config()->mutable_info();
+  info->set_type("org.apache.mesos.rp.type");
+  info->set_name("name");
+  info->mutable_id()->set_value("id");
+
+  error = validation::agent::call::validate(call);
+  EXPECT_SOME(error);
+
+  info->clear_id();
+
+  error = validation::agent::call::validate(call);
+  EXPECT_NONE(error);
+}
+
+
+TEST(AgentCallValidationTest, RemoveResourceProviderConfig)
+{
+  // Expecting `remove_resource_provider_config`.
+  agent::Call call;
+  call.set_type(agent::Call::REMOVE_RESOURCE_PROVIDER_CONFIG);
+
+  Option<Error> error = validation::agent::call::validate(call);
+  EXPECT_SOME(error);
+
+  call.mutable_remove_resource_provider_config()
+    ->set_type("org.apache.mesos.rp.type");
+  call.mutable_remove_resource_provider_config()->set_name("name");
 
   error = validation::agent::call::validate(call);
   EXPECT_NONE(error);

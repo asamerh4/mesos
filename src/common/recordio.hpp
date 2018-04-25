@@ -167,7 +167,7 @@ public:
     }
 
     if (error.isSome()) {
-      return process::Failure(error.get().message);
+      return process::Failure(error->message);
     }
 
     if (done) {
@@ -213,6 +213,8 @@ private:
     }
   }
 
+  using process::Process<ReaderProcess<T>>::consume;
+
   void consume()
   {
     reader.read()
@@ -228,7 +230,7 @@ private:
     }
 
     // Have we reached EOF?
-    if (read.get().empty()) {
+    if (read->empty()) {
       complete();
       return;
     }

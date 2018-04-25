@@ -63,6 +63,7 @@ namespace paths = mesos::internal::slave::containerizer::paths;
 using mesos::agent::Call;
 using mesos::agent::ProcessIO;
 
+using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::IOSwitchboardServer;
 using mesos::internal::slave::MesosContainerizer;
@@ -316,7 +317,7 @@ TEST_F(IOSwitchboardServerTest, AttachOutput)
   Future<Nothing> runServer = server.get()->run();
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<unix::Address> address = unix::Address::create(socketPath);
   ASSERT_SOME(address);
@@ -394,7 +395,7 @@ TEST_F(IOSwitchboardServerTest, SendHeartbeat)
   call.set_type(Call::ATTACH_CONTAINER_OUTPUT);
 
   Call::AttachContainerOutput* attach = call.mutable_attach_container_output();
-  attach->mutable_container_id()->set_value(UUID::random().toString());
+  attach->mutable_container_id()->set_value(id::UUID::random().toString());
 
   http::Request request;
   request.method = "POST";
@@ -549,7 +550,7 @@ TEST_F(IOSwitchboardServerTest, AttachInput)
 
   Call::AttachContainerInput* attach = call.mutable_attach_container_input();
   attach->set_type(Call::AttachContainerInput::CONTAINER_ID);
-  attach->mutable_container_id()->set_value(UUID::random().toString());
+  attach->mutable_container_id()->set_value(id::UUID::random().toString());
 
   writer.write(encoder.encode(call));
 
@@ -659,7 +660,7 @@ TEST_F(IOSwitchboardServerTest, ReceiveHeartbeat)
 
   Call::AttachContainerInput* attach = call.mutable_attach_container_input();
   attach->set_type(Call::AttachContainerInput::CONTAINER_ID);
-  attach->mutable_container_id()->set_value(UUID::random().toString());
+  attach->mutable_container_id()->set_value(id::UUID::random().toString());
 
   writer.write(encoder.encode(call));
 
@@ -728,7 +729,7 @@ TEST_F(IOSwitchboardTest, ContainerAttach)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
@@ -742,20 +743,21 @@ TEST_F(IOSwitchboardTest, ContainerAttach)
   executorInfo.mutable_container()->set_type(ContainerInfo::MESOS);
   executorInfo.mutable_container()->mutable_tty_info();
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executorInfo, directory.get()),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<http::Connection> connection = containerizer->attach(containerId);
   AWAIT_READY(connection);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
-  Future<bool> destroy = containerizer->destroy(containerId);
+  Future<Option<ContainerTermination>> destroy =
+    containerizer->destroy(containerId);
   AWAIT_READY(destroy);
 
   AWAIT_READY(wait);
@@ -790,7 +792,7 @@ TEST_F(IOSwitchboardTest, OutputRedirectionWithTTY)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
@@ -807,13 +809,13 @@ TEST_F(IOSwitchboardTest, OutputRedirectionWithTTY)
   executorInfo.mutable_container()->set_type(ContainerInfo::MESOS);
   executorInfo.mutable_container()->mutable_tty_info();
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executorInfo, directory.get()),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
@@ -851,7 +853,7 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
   AWAIT_READY(containerizer->recover(state));
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
@@ -861,17 +863,17 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
       "sleep 1000",
       "cpus:1");
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executorInfo, directory.get()),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   ContainerID childContainerId;
   childContainerId.mutable_parent()->CopyFrom(containerId);
-  childContainerId.set_value(UUID::random().toString());
+  childContainerId.set_value(id::UUID::random().toString());
 
   launch = containerizer->launch(
       childContainerId,
@@ -882,7 +884,7 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Result<pid_t> pid = paths::getContainerIOSwitchboardPid(
         flags.runtime_dir, childContainerId);
@@ -900,9 +902,9 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
   ASSERT_TRUE(wait.get()->has_status());
   EXPECT_WTERMSIG_EQ(SIGKILL, wait.get()->status());
 
-  ASSERT_TRUE(wait.get()->reasons().size() == 1);
+  ASSERT_TRUE(wait.get()->has_reason());
   ASSERT_EQ(TaskStatus::REASON_IO_SWITCHBOARD_EXITED,
-            wait.get()->reasons().Get(0));
+            wait.get()->reason());
 
   wait = containerizer->wait(containerId);
 
@@ -917,6 +919,8 @@ TEST_F(IOSwitchboardTest, KillSwitchboardContainerDestroyed)
 
 
 // This test verifies that the io switchboard isolator recovers properly.
+//
+// TODO(alexr): Enable after MESOS-7023 is resolved.
 TEST_F(IOSwitchboardTest, DISABLED_RecoverThenKillSwitchboardContainerDestroyed)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -965,7 +969,7 @@ TEST_F(IOSwitchboardTest, DISABLED_RecoverThenKillSwitchboardContainerDestroyed)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
   // Launch a task with tty to start the switchboard server.
   TaskInfo task = createTask(offers.get()[0], "sleep 1000");
@@ -993,13 +997,16 @@ TEST_F(IOSwitchboardTest, DISABLED_RecoverThenKillSwitchboardContainerDestroyed)
 
   containerizer.reset(create.get());
 
-  // Expect three task updates.
-  // (1) TASK_RUNNING before recovery.
-  // (2) TASK_RUNNING after recovery.
-  // (3) TASK_FAILED after the io switchboard is killed.
+  // Expect four task updates.
+  // (1) TASK_STARTING when the task starts.
+  // (2) TASK_RUNNING before recovery.
+  // (3) TASK_RUNNING after recovery.
+  // (4) TASK_FAILED after the io switchboard is killed.
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   Future<TaskStatus> statusFailed;
   EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusRunning))
     .WillOnce(FutureArg<1>(&statusFailed))
@@ -1008,12 +1015,15 @@ TEST_F(IOSwitchboardTest, DISABLED_RecoverThenKillSwitchboardContainerDestroyed)
   slave = StartSlave(detector.get(), containerizer.get(), flags);
   ASSERT_SOME(slave);
 
+  AWAIT_READY(statusStarting);
+  EXPECT_EQ(TASK_STARTING, statusStarting->state());
+
   // Make sure the task comes back as running.
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning->state());
 
   // Kill the io switchboard for the task.
-  Future<hashset<ContainerID>> containers = containerizer.get()->containers();
+  Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   ASSERT_EQ(1u, containers->size());
 
@@ -1085,13 +1095,18 @@ TEST_F(IOSwitchboardTest, ContainerAttachAfterSlaveRestart)
   driver.start();
 
   AWAIT_READY(offers);
-  EXPECT_FALSE(offers->empty());
+  ASSERT_FALSE(offers->empty());
 
+  Future<TaskStatus> statusStarting;
   Future<TaskStatus> statusRunning;
   EXPECT_CALL(sched, statusUpdate(_, _))
+    .WillOnce(FutureArg<1>(&statusStarting))
     .WillOnce(FutureArg<1>(&statusRunning));
 
-  Future<Nothing> _ack =
+  Future<Nothing> _ackRunning =
+    FUTURE_DISPATCH(_, &slave::Slave::_statusUpdateAcknowledgement);
+
+  Future<Nothing> _ackStarting =
     FUTURE_DISPATCH(_, &slave::Slave::_statusUpdateAcknowledgement);
 
   // Launch a task with tty to start the switchboard server.
@@ -1101,10 +1116,11 @@ TEST_F(IOSwitchboardTest, ContainerAttachAfterSlaveRestart)
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
+  // Ultimately wait for the `TASK_RUNNING` ack to be checkpointed.
+  AWAIT_READY(statusStarting);
+  AWAIT_READY(_ackStarting);
   AWAIT_READY(statusRunning);
-
-  // Wait for the ACK to be checkpointed.
-  AWAIT_READY(_ack);
+  AWAIT_READY(_ackRunning);
 
   // Restart the slave with a new containerizer.
   slave.get()->terminate();
@@ -1126,7 +1142,7 @@ TEST_F(IOSwitchboardTest, ContainerAttachAfterSlaveRestart)
   // Wait until containerizer is recovered.
   AWAIT_READY(_recover);
 
-  Future<hashset<ContainerID>> containers = containerizer.get()->containers();
+  Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   ASSERT_EQ(1u, containers->size());
 

@@ -71,6 +71,7 @@
   affiliations:
     - {organization: Mesosphere}
   emails:
+    - anand@apache.org
     - mazumdar.anand@gmail.com
   jira_user: anandmazumdar
   reviewboard_user: anandmazumdar
@@ -106,6 +107,18 @@
     - anindya_sinha@apple.com
   jira_user: anindya.sinha
   reviewboard_user: anisinha
+
+- name: Antonis Danezis
+  emails:
+    - anton.dan@hotmail.com
+  jira_user: antondan
+  reviewboard_user: antondan
+
+- name: Anurag Bihani
+  emails:
+    - anuragbihani@gmail.com
+  jira_user: anuragbihani
+  reviewboard_user: anuragbihani
 
 - name: Armand Grillet
   affiliations:
@@ -156,6 +169,8 @@
     - {organization: Mesosphere, start_date: 2014-09-22}
     - {organization: Twitter, end_date: 2014-09-21}
   emails:
+    - benh@apache.org
+    - benh@berkeley.edu
     - benjamin.hindman@gmail.com
   jira_user: benjaminhindman
   reviewboard_user: benjaminhindman
@@ -200,6 +215,15 @@
     - chhsiao@mesosphere.io
   jira_user: chhsia0
   reviewboard_user: chhsia0
+
+- name: Clément Michaud
+  affiliations:
+    - {organization: Criteo}
+  emails:
+    - clement.michaud34@gmail.com
+    - c.michaud@criteo.com
+  jira_user: clems4ever
+  reviewboard_user: clems4ever
 
 - name: Daniel Pravat
   affiliations:
@@ -250,6 +274,14 @@
   jira_user: cinchurge
   reviewboard_user: cinchurge
 
+- name: Eric Mumau
+  affiliations:
+    - {organization: Microsoft}
+  emails:
+    - ermumau@microsoft.com
+  jira_user: ermumau
+  reviewboard_user: ermumau
+
 - name: Ezra Silvera
   affiliations:
     - {organization: IBM}
@@ -270,7 +302,9 @@
   affiliations:
     - {organization: Mesosphere}
   emails:
+    - gaston.kleiman@gmail.com
     - gaston@mesosphere.com
+    - gaston@mesosphere.io
   jira_user: gkleiman
   reviewboard_user: gaston
 
@@ -288,6 +322,7 @@
     - {organization: Mesosphere}
   emails:
     - greg@mesosphere.io
+    - gregorywmann@gmail.com
   jira_user: greggomann
   reviewboard_user: greggomann
 
@@ -355,6 +390,14 @@
     - jjanco@apple.com
   jira_user: jjanco
   reviewboard_user: jjanco
+
+- name: Jack Yang
+  affiliations:
+    - {organization: is-land}
+  emails:
+    - jack@is-land.com.tw
+  jira_user: jackyoh
+  reviewboard_user: jackyoh
 
 - name: Jan Schlicht
   affiliations:
@@ -459,6 +502,7 @@
     - {organization: Mesosphere}
   emails:
     - joseph@mesosphere.io
+    - josephwu@apache.org
   jira_user: kaysoky
   reviewboard_user: kaysoky
 
@@ -552,6 +596,14 @@
   jira_user: megha.sharma
   reviewboard_user: megha.sharma
 
+- name: Meng Zhu
+  affiliations:
+    - {organization: Mesosphere}
+  emails:
+    - mzhu@mesosphere.com
+  jira_user: mzhu
+  reviewboard_user: mzhu
+
 - name: Michael Lunoe
   affiliations:
     - {organization: Mesosphere}
@@ -576,6 +628,12 @@
   jira_user: bernadinm
   reviewboard_user: bernadinm
 
+- name: Nathan Jackson
+  emails:
+    - nate.ds.jackson@gmail.com
+  jira_user: csnate
+  reviewboard_user: csnate
+
 - name: Neil Conway
   affiliations:
     - {organization: Mesosphere}
@@ -596,9 +654,12 @@
 
 - name: Qian Zhang
   affiliations:
-    - {organization: IBM}
+    - {organization: Mesosphere, start_date: 2017-10-01}
+    - {organization: IBM, end_date: 2017-09-30}
   emails:
-    - zhangqxa@cn.ibm.com
+    - qianzhang@apache.org
+    - zhq527725@gmail.com
+    - qzhang@mesosphere.com
   jira_user: qianzhang
   reviewboard_user: qianzhang
 
@@ -627,6 +688,18 @@
     - okuryu@okuryu.com
   jira_user: okuryu
   reviewboard_user: okuryu
+
+- name: Sachin Paryani
+  emails:
+    - sachin.paryani@gmail.com
+  jira_user: sachinparyani
+  reviewboard_user: sachinparyani
+
+- name: Shubham Kumar
+  emails:
+    - shukumar@umail.iu.edu
+  jira_user: shukumar
+  reviewboard_user: shukumar
 
 - name: Stephen Hankinson
   affiliations:

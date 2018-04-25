@@ -94,7 +94,7 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   Owned<Containerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ContainerInfo container = createContainerInfo(
       None(),
@@ -113,20 +113,20 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   string directory = path::join(flags.work_dir, "sandbox");
   ASSERT_SOME(os::mkdir(directory));
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executor, directory),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
   if (nesting) {
     ContainerID nestedContainerId;
     nestedContainerId.mutable_parent()->CopyFrom(containerId);
-    nestedContainerId.set_value(UUID::random().toString());
+    nestedContainerId.set_value(id::UUID::random().toString());
 
     launch = containerizer->launch(
         nestedContainerId,
@@ -134,7 +134,7 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
         map<string, string>(),
         None());
 
-    AWAIT_ASSERT_TRUE(launch);
+    AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
     wait = containerizer->wait(nestedContainerId);
   }
@@ -182,7 +182,7 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   Owned<Containerizer> containerizer(create.get());
 
   ContainerID containerId;
-  containerId.set_value(UUID::random().toString());
+  containerId.set_value(id::UUID::random().toString());
 
   ContainerInfo container = createContainerInfo(
       "test_image_rootfs",
@@ -203,20 +203,20 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   string directory = path::join(flags.work_dir, "sandbox");
   ASSERT_SOME(os::mkdir(directory));
 
-  Future<bool> launch = containerizer->launch(
+  Future<Containerizer::LaunchResult> launch = containerizer->launch(
       containerId,
       createContainerConfig(None(), executor, directory),
       map<string, string>(),
       None());
 
-  AWAIT_ASSERT_TRUE(launch);
+  AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
   Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
 
   if (nesting) {
     ContainerID nestedContainerId;
     nestedContainerId.mutable_parent()->CopyFrom(containerId);
-    nestedContainerId.set_value(UUID::random().toString());
+    nestedContainerId.set_value(id::UUID::random().toString());
 
     launch = containerizer->launch(
         nestedContainerId,
@@ -224,7 +224,7 @@ TEST_P(VolumeImageIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
         map<string, string>(),
         None());
 
-    AWAIT_ASSERT_TRUE(launch);
+    AWAIT_ASSERT_EQ(Containerizer::LaunchResult::SUCCESS, launch);
 
     wait = containerizer->wait(nestedContainerId);
   }

@@ -29,6 +29,7 @@
 #include <stout/strings.hpp>
 
 #include <stout/os/constants.hpp>
+#include <stout/os/copyfile.hpp>
 
 #include <mesos/mesos.hpp>
 
@@ -90,7 +91,19 @@ static Try<bool> extract(
     in = Subprocess::PATH(sourcePath);
     out = Subprocess::PATH(destinationPath);
   } else if (strings::endsWith(sourcePath, ".zip")) {
+#ifdef __WINDOWS__
+    command = {"powershell",
+               "-NoProfile",
+               "-Command",
+               "Expand-Archive",
+               "-Force",
+               "-Path",
+               sourcePath,
+               "-DestinationPath",
+               destinationDirectory};
+#else
     command = {"unzip", "-o", "-d", destinationDirectory, sourcePath};
+#endif // __WINDOWS__
   } else {
     return false;
   }
@@ -154,7 +167,8 @@ static Try<string> downloadWithHadoopClient(
 
 static Try<string> downloadWithNet(
     const string& sourceUri,
-    const string& destinationPath)
+    const string& destinationPath,
+    const Option<Duration>& stallTimeout)
 {
   // The net::download function only supports these protocols.
   CHECK(strings::startsWith(sourceUri, "http://")  ||
@@ -165,7 +179,7 @@ static Try<string> downloadWithNet(
   LOG(INFO) << "Downloading resource from '" << sourceUri
             << "' to '" << destinationPath << "'";
 
-  Try<int> code = net::download(sourceUri, destinationPath);
+  Try<int> code = net::download(sourceUri, destinationPath, stallTimeout);
   if (code.isError()) {
     return Error("Error downloading resource: " + code.error());
   } else {
@@ -189,23 +203,15 @@ static Try<string> downloadWithNet(
 }
 
 
+// TODO(coffler): Refactor code to eliminate redundant function.
 static Try<string> copyFile(
-    const string& sourcePath,
-    const string& destinationPath)
+    const string& sourcePath, const string& destinationPath)
 {
-  int status = os::spawn("cp", {"cp", sourcePath, destinationPath});
+  const Try<Nothing> result = os::copyfile(sourcePath, destinationPath);
 
-  if (status == -1) {
-    return ErrnoError("Failed to copy '" + sourcePath + "'");
+  if (result.isError()) {
+    return Error(result.error());
   }
-
-  if (!WSUCCEEDED(status)) {
-    return Error(
-        "Failed to copy '" + sourcePath + "': " + WSTRINGIFY(status));
-  }
-
-  LOG(INFO) << "Copied resource '" << sourcePath
-            << "' to '" << destinationPath << "'";
 
   return destinationPath;
 }
@@ -214,7 +220,8 @@ static Try<string> copyFile(
 static Try<string> download(
     const string& _sourceUri,
     const string& destinationPath,
-    const Option<string>& frameworksHome)
+    const Option<string>& frameworksHome,
+    const Option<Duration>& stallTimeout)
 {
   // Trim leading whitespace for 'sourceUri'.
   const string sourceUri = strings::trim(_sourceUri, strings::PREFIX);
@@ -240,7 +247,7 @@ static Try<string> download(
   // 2. Try to fetch URI using os::net / libcurl implementation.
   // We consider http, https, ftp, ftps compatible with libcurl.
   if (Fetcher::isNetUri(sourceUri)) {
-    return downloadWithNet(sourceUri, destinationPath);
+    return downloadWithNet(sourceUri, destinationPath, stallTimeout);
   }
 
   // 3. Try to fetch the URI using hadoop client.
@@ -264,12 +271,15 @@ static Try<string> download(
 // so that someone can do: os::chmod(path, EXECUTABLE_CHMOD_FLAGS).
 static Try<string> chmodExecutable(const string& filePath)
 {
+  // TODO(coffler): Fix Windows chmod handling, see MESOS-3176.
+#ifndef __WINDOWS__
   Try<Nothing> chmod = os::chmod(
       filePath, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
   if (chmod.isError()) {
     return Error("Failed to chmod executable '" +
                  filePath + "': " + chmod.error());
   }
+#endif // __WINDOWS__
 
   return filePath;
 }
@@ -280,7 +290,8 @@ static Try<string> chmodExecutable(const string& filePath)
 static Try<string> fetchBypassingCache(
     const CommandInfo::URI& uri,
     const string& sandboxDirectory,
-    const Option<string>& frameworksHome)
+    const Option<string>& frameworksHome,
+    const Option<Duration>& stallTimeout)
 {
   LOG(INFO) << "Fetching directly into the sandbox directory";
 
@@ -294,7 +305,8 @@ static Try<string> fetchBypassingCache(
 
       if (result.isError()) {
         return Error(
-            "Unable to create subdirectory " + dirname + " in sandbox");
+            "Unable to create subdirectory " + dirname +
+            " in sandbox: " + result.error());
       }
     }
   }
@@ -309,7 +321,8 @@ static Try<string> fetchBypassingCache(
 
   string path = path::join(sandboxDirectory, outputFile.get());
 
-  Try<string> downloaded = download(uri.value(), path, frameworksHome);
+  Try<string> downloaded =
+    download(uri.value(), path, frameworksHome, stallTimeout);
   if (downloaded.isError()) {
     return Error(downloaded.error());
   }
@@ -348,7 +361,8 @@ static Try<string> fetchFromCache(
 
       if (result.isError()) {
         return Error(
-          "Unable to create subdirectory " + dirname + "in sandbox");
+          "Unable to create subdirectory " + dirname +
+          " in sandbox: " + result.error());
       }
     }
   }
@@ -398,9 +412,10 @@ static Try<string> fetchThroughCache(
     const FetcherInfo::Item& item,
     const Option<string>& cacheDirectory,
     const string& sandboxDirectory,
-    const Option<string>& frameworksHome)
+    const Option<string>& frameworksHome,
+    const Option<Duration>& stallTimeout)
 {
-  if (cacheDirectory.isNone() || cacheDirectory.get().empty()) {
+  if (cacheDirectory.isNone() || cacheDirectory->empty()) {
     return Error("Cache directory not specified");
   }
 
@@ -422,7 +437,8 @@ static Try<string> fetchThroughCache(
     Try<string> downloaded = download(
         item.uri().value(),
         path::join(cacheDirectory.get(), item.cache_filename()),
-        frameworksHome);
+        frameworksHome,
+        stallTimeout);
 
     if (downloaded.isError()) {
       return Error(downloaded.error());
@@ -439,7 +455,8 @@ static Try<string> fetch(
     const FetcherInfo::Item& item,
     const Option<string>& cacheDirectory,
     const string& sandboxDirectory,
-    const Option<string>& frameworksHome)
+    const Option<string>& frameworksHome,
+    const Option<Duration>& stallTimeout)
 {
   LOG(INFO) << "Fetching URI '" << item.uri().value() << "'";
 
@@ -447,14 +464,16 @@ static Try<string> fetch(
     return fetchBypassingCache(
         item.uri(),
         sandboxDirectory,
-        frameworksHome);
+        frameworksHome,
+        stallTimeout);
   }
 
   return fetchThroughCache(
       item,
       cacheDirectory,
       sandboxDirectory,
-      frameworksHome);
+      frameworksHome,
+      stallTimeout);
 }
 
 
@@ -479,6 +498,9 @@ static Try<Nothing> createCacheDirectory(const FetcherInfo& fetcherInfo)
       if (fetcherInfo.has_user()) {
         // Fetching is performed as the task's user,
         // so chown the cache directory.
+
+        // TODO(coffler): Fix Windows chown handling, see MESOS-8063.
+#ifndef __WINDOWS__
         Try<Nothing> chown = os::chown(
             fetcherInfo.user(),
             fetcherInfo.cache_directory(),
@@ -487,6 +509,7 @@ static Try<Nothing> createCacheDirectory(const FetcherInfo& fetcherInfo)
         if (chown.isError()) {
           return chown;
         }
+#endif // __WINDOWS__
       }
 
       break;
@@ -517,9 +540,17 @@ int main(int argc, char* argv[])
 
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
 
-  CHECK_SOME(load) << "Could not load flags: " << load.error();
+  if (flags.help) {
+    std::cout << flags.usage() << std::endl;
+    return EXIT_SUCCESS;
+  }
 
-  logging::initialize(argv[0], flags, true); // Catch signals.
+  if (load.isError()) {
+    std::cerr << flags.usage(load.error()) << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  logging::initialize(argv[0], true, flags); // Catch signals.
 
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
@@ -539,10 +570,10 @@ int main(int argc, char* argv[])
   CHECK_SOME(fetcherInfo)
     << "Failed to parse FetcherInfo: " << fetcherInfo.error();
 
-  CHECK(!fetcherInfo.get().sandbox_directory().empty())
+  CHECK(!fetcherInfo->sandbox_directory().empty())
     << "Missing sandbox directory";
 
-  const string sandboxDirectory = fetcherInfo.get().sandbox_directory();
+  const string sandboxDirectory = fetcherInfo->sandbox_directory();
 
   Try<Nothing> result = createCacheDirectory(fetcherInfo.get());
   if (result.isError()) {
@@ -552,29 +583,36 @@ int main(int argc, char* argv[])
 
   // If the `FetcherInfo` specifies a user, use `os::su()` to fetch files as the
   // task's user to ensure that filesystem permissions are enforced.
-  if (fetcherInfo.get().has_user()) {
-    result = os::su(fetcherInfo.get().user());
+  if (fetcherInfo->has_user()) {
+  // TODO(coffler): No support for os::su on Windows, see MESOS-8063
+#ifndef __WINDOWS__
+    result = os::su(fetcherInfo->user());
     if (result.isError()) {
-      EXIT(EXIT_FAILURE)
-        << "Fetcher could not execute `os::su()` for user '"
-        << fetcherInfo.get().user() << "'";
+      EXIT(EXIT_FAILURE) << "Fetcher could not execute `os::su()` for user '"
+                         << fetcherInfo->user() << "'";
     }
+#endif // __WINDOWS__
   }
 
   const Option<string> cacheDirectory =
-    fetcherInfo.get().has_cache_directory() ?
-      Option<string>::some(fetcherInfo.get().cache_directory()) :
-        Option<string>::none();
+    fetcherInfo->has_cache_directory()
+      ? Option<string>::some(fetcherInfo->cache_directory())
+      : Option<string>::none();
 
   const Option<string> frameworksHome =
-    fetcherInfo.get().has_frameworks_home() ?
-      Option<string>::some(fetcherInfo.get().frameworks_home()) :
-        Option<string>::none();
+    fetcherInfo->has_frameworks_home()
+      ? Option<string>::some(fetcherInfo->frameworks_home())
+      : Option<string>::none();
+
+  const Option<Duration> stallTimeout =
+    fetcherInfo->has_stall_timeout()
+      ? Nanoseconds(fetcherInfo->stall_timeout().nanoseconds())
+      : Option<Duration>::none();
 
   // Fetch each URI to a local file and chmod if necessary.
-  foreach (const FetcherInfo::Item& item, fetcherInfo.get().items()) {
-    Try<string> fetched =
-      fetch(item, cacheDirectory, sandboxDirectory, frameworksHome);
+  foreach (const FetcherInfo::Item& item, fetcherInfo->items()) {
+    Try<string> fetched = fetch(
+        item, cacheDirectory, sandboxDirectory, frameworksHome, stallTimeout);
     if (fetched.isError()) {
       EXIT(EXIT_FAILURE)
         << "Failed to fetch '" << item.uri().value() << "': " + fetched.error();
@@ -583,6 +621,9 @@ int main(int argc, char* argv[])
                 << "' to '" << fetched.get() << "'";
     }
   }
+
+  LOG(INFO) << "Successfully fetched all URIs into "
+            << "'" << sandboxDirectory << "'";
 
   return 0;
 }
