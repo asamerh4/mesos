@@ -239,10 +239,9 @@ public:
 
     add(&Flags::framework_capabilities,
         "framework_capabilities",
-        "Comma separated list of optional framework capabilities to enable.\n"
-        "TASK_KILLING_STATE is always enabled. PARTITION_AWARE is enabled\n"
-        "unless --no-partition-aware is specified.\n"
-        "other choices are e.g. 'SHARED_RESOURCES' or 'GPU_RESOURCES'");
+        "Comma-separated list of optional framework capabilities to enable.\n"
+        "RESERVATION_REFINEMENT and TASK_KILLING_STATE are always enabled.\n"
+        "PARTITION_AWARE is enabled unless --no-partition-aware is specified.");
 
     add(&Flags::role,
         "role",
@@ -580,6 +579,7 @@ protected:
         case Event::FAILURE:
         case Event::RESCIND:
         case Event::RESCIND_INVERSE_OFFER:
+        case Event::UPDATE_OPERATION_STATUS:
         case Event::MESSAGE: {
           break;
         }
@@ -880,6 +880,7 @@ protected:
         case Event::FAILURE:
         case Event::RESCIND:
         case Event::RESCIND_INVERSE_OFFER:
+        case Event::UPDATE_OPERATION_STATUS:
         case Event::MESSAGE: {
           break;
         }
@@ -913,7 +914,7 @@ private:
 int main(int argc, char** argv)
 {
 cout << R"( ___  ___  ___
-|\__\|\__\|\__\  commandline batch processing framework for mesos 1.1++
+|\__\|\__\|\__\  commandline batch processing framework for mesos 1.5++
 \|__|\|__|\|__|  github.com/asamerh4/mesos-batch
 
 )";
@@ -963,7 +964,8 @@ cout << R"( ___  ___  ___
   // Always enable the TASK_KILLING_STATE capability.
   vector<FrameworkInfo::Capability::Type> frameworkCapabilities = {
     FrameworkInfo::Capability::RESERVATION_REFINEMENT,
-    FrameworkInfo::Capability::TASK_KILLING_STATE
+    FrameworkInfo::Capability::TASK_KILLING_STATE,
+    FrameworkInfo::Capability::REVOCABLE_RESOURCES,
   };
 
   // Enable PARTITION_AWARE unless disabled by the user.
